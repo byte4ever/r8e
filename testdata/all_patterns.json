@@ -1,0 +1,22 @@
+{
+  "policies": {
+    "full-policy": {
+      "timeout": "2s",
+      "circuit_breaker": {
+        "failure_threshold": 5,
+        "recovery_timeout": "30s",
+        "half_open_max_attempts": 2
+      },
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "exponential",
+        "base_delay": "100ms",
+        "max_delay": "10s"
+      },
+      "rate_limit": 100,
+      "bulkhead": 10,
+      "stale_cache": "5m",
+      "hedge": "200ms"
+    }
+  }
+}

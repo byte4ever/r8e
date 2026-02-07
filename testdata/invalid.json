@@ -1,0 +1,7 @@
+{
+  "policies": {
+    "bad-policy": {
+      "timeout": "not-a-duration"
+    }
+  }
+}

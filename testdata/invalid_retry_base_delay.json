@@ -1,0 +1,11 @@
+{
+  "policies": {
+    "bad-retry-base": {
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "constant",
+        "base_delay": "not-a-duration"
+      }
+    }
+  }
+}

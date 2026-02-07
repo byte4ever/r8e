@@ -1,0 +1,7 @@
+{
+  "policies": {
+    "bad-hedge": {
+      "hedge": "not-a-duration"
+    }
+  }
+}

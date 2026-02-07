@@ -1,0 +1,10 @@
+{
+  "policies": {
+    "bad-cb": {
+      "circuit_breaker": {
+        "failure_threshold": 5,
+        "recovery_timeout": "not-a-duration"
+      }
+    }
+  }
+}

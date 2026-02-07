@@ -1,0 +1,11 @@
+{
+  "policies": {
+    "bad-retry": {
+      "retry": {
+        "max_attempts": 3,
+        "backoff": "fibonacci",
+        "base_delay": "100ms"
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "policies": {
+    "bad-stale": {
+      "stale_cache": "not-a-duration"
+    }
+  }
+}
