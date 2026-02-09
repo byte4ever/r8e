@@ -2,81 +2,93 @@ package r8e
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 )
 
-// Pattern: Stale Cache — serves last-known-good value on failure;
-// lock-free via atomic pointer swap for cached entries.
+type (
+	// StaleCache wraps a function call with keyed stale-on-error caching.
+	// On success, the result is stored in the underlying [Cache]. On failure,
+	// the cached value for that key is returned if available (within TTL).
+	//
+	// StaleCache is a standalone wrapper — it is not part of [Policy].
+	// Compose it with a Policy by calling Policy.Do inside the function
+	// passed to StaleCache.Do.
+	StaleCache[K comparable, V any] struct {
+		cache            Cache[K, V]
+		onStaleServed    func(K)
+		onCacheRefreshed func(K)
+		ttl              time.Duration
+	}
 
-// cacheEntry holds a cached value and the time it was stored.
-type cacheEntry[T any] struct {
-	value    T
-	storedAt time.Time
-}
+	// StaleCacheOption configures a [StaleCache].
+	StaleCacheOption[K comparable, V any] func(*StaleCache[K, V])
+)
 
-// StaleCache caches successful results and serves them when subsequent calls fail.
-type StaleCache[T any] struct {
-	ttl          time.Duration
-	clock        Clock
-	hooks        *Hooks
-	cached       atomic.Pointer[cacheEntry[T]]
-	servingStale atomic.Bool
-	staleAgeNs   atomic.Int64
-}
-
-// NewStaleCache creates a stale cache with the given TTL.
-func NewStaleCache[T any](ttl time.Duration, clock Clock, hooks *Hooks) *StaleCache[T] {
-	return &StaleCache[T]{
-		ttl:   ttl,
-		clock: clock,
-		hooks: hooks,
+// OnStaleServed sets a callback invoked when a stale cached value is served.
+func OnStaleServed[K comparable, V any](fn func(K)) StaleCacheOption[K, V] {
+	return func(sc *StaleCache[K, V]) {
+		sc.onStaleServed = fn
 	}
 }
 
-// Do executes fn. On success, caches the result. On failure, returns the cached
-// value if one exists and is within TTL.
-func (sc *StaleCache[T]) Do(ctx context.Context, fn func(context.Context) (T, error)) (T, error) {
-	result, err := fn(ctx)
+// OnCacheRefreshed sets a callback invoked when a cache entry is refreshed.
+func OnCacheRefreshed[K comparable, V any](fn func(K)) StaleCacheOption[K, V] {
+	return func(sc *StaleCache[K, V]) {
+		sc.onCacheRefreshed = fn
+	}
+}
 
+// NewStaleCache creates a keyed stale cache backed by the given [Cache].
+// The ttl determines how long cached entries remain valid.
+func NewStaleCache[K comparable, V any](
+	cache Cache[K, V],
+	ttl time.Duration,
+	opts ...StaleCacheOption[K, V],
+) *StaleCache[K, V] {
+	sc := &StaleCache[K, V]{
+		cache: cache,
+		ttl:   ttl,
+	}
+
+	for _, opt := range opts {
+		opt(sc)
+	}
+
+	return sc
+}
+
+// Do executes fn with the given key. On success, the result is cached.
+// On failure, a cached value is returned if one exists within TTL.
+//
+//nolint:ireturn,revive // generic type parameter V, not an interface; Do
+// matches Policy.Do naming.
+func (sc *StaleCache[K, V]) Do(
+	ctx context.Context,
+	key K,
+	fn func(context.Context, K) (V, error),
+) (V, error) {
+	result, err := fn(ctx, key)
 	if err == nil {
-		// Success: atomically swap in new cache entry.
-		entry := &cacheEntry[T]{
-			value:    result,
-			storedAt: sc.clock.Now(),
+		sc.cache.Set(key, result, sc.ttl)
+
+		if sc.onCacheRefreshed != nil {
+			sc.onCacheRefreshed(key)
 		}
-		sc.cached.Store(entry)
-		sc.servingStale.Store(false)
-		sc.staleAgeNs.Store(0)
-		sc.hooks.emitCacheRefreshed()
+
 		return result, nil
 	}
 
 	// Failure: check for a cached entry.
-	entry := sc.cached.Load()
-	if entry != nil {
-		age := sc.clock.Since(entry.storedAt)
-		if age <= sc.ttl {
-			sc.servingStale.Store(true)
-			sc.staleAgeNs.Store(int64(age))
-			sc.hooks.emitStaleServed(age)
-			return entry.value, nil
+	if cached, ok := sc.cache.Get(key); ok {
+		if sc.onStaleServed != nil {
+			sc.onStaleServed(key)
 		}
+
+		return cached, nil
 	}
 
-	// No cache or expired: return original error.
-	var zero T
-	sc.servingStale.Store(false)
-	sc.staleAgeNs.Store(0)
-	return zero, err
-}
+	// No cache entry: return original error.
+	var zero V
 
-// ServingStale reports whether the last Do call served a stale cached value.
-func (sc *StaleCache[T]) ServingStale() bool {
-	return sc.servingStale.Load()
-}
-
-// StaleAge returns the age of the cached value, or 0 if not serving stale.
-func (sc *StaleCache[T]) StaleAge() time.Duration {
-	return time.Duration(sc.staleAgeNs.Load())
+	return zero, err //nolint:wrapcheck // caller's error returned as-is
 }

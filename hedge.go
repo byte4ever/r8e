@@ -9,21 +9,36 @@ import (
 // The first response wins; the other is cancelled. This reduces tail latency
 // by racing redundant requests.
 
-// hedgeResult holds the outcome of a hedged call attempt.
-type hedgeResult[T any] struct {
-	val       T
-	err       error
-	isPrimary bool
-}
+type (
+	// hedgeResult holds the outcome of a hedged call attempt.
+	hedgeResult[T any] struct {
+		val       T
+		err       error
+		isPrimary bool
+	}
+
+	// HedgeParams holds the configuration for a hedged request.
+	HedgeParams struct {
+		Clock Clock
+		Hooks *Hooks
+		Delay time.Duration
+	}
+)
 
 // DoHedge executes fn and, if it hasn't completed after delay, fires a second
 // concurrent attempt. The first response wins; the other is cancelled.
-func DoHedge[T any](ctx context.Context, delay time.Duration, fn func(context.Context) (T, error), hooks *Hooks, clock Clock) (T, error) {
+//
+//nolint:ireturn // generic type parameter T, not an interface
+func DoHedge[T any](
+	ctx context.Context,
+	fn func(context.Context) (T, error),
+	params HedgeParams,
+) (T, error) {
 	var zero T
 
 	// If the parent context is already done, return its error immediately.
 	if ctx.Err() != nil {
-		return zero, ctx.Err()
+		return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
 	}
 
 	// Buffered channel of size 2 to receive results from both goroutines.
@@ -39,21 +54,23 @@ func DoHedge[T any](ctx context.Context, delay time.Duration, fn func(context.Co
 	}()
 
 	// Start a timer for the hedge delay.
-	timer := clock.NewTimer(delay)
+	timer := params.Clock.NewTimer(params.Delay)
 
 	// Wait for primary completion, timer, or context cancellation.
 	select {
-	case r := <-results:
+	case result := <-results:
 		// Primary completed before delay elapsed.
 		timer.Stop()
-		if r.err != nil {
-			return r.val, r.err
+
+		if result.err != nil {
+			return result.val, result.err
 		}
-		return r.val, nil
+
+		return result.val, nil
 
 	case <-timer.C():
 		// Delay elapsed; primary is still running. Fire hedge.
-		hooks.emitHedgeTriggered()
+		params.Hooks.emitHedgeTriggered()
 
 		hedgeCtx, hedgeCancel := context.WithCancel(ctx)
 		defer hedgeCancel()
@@ -64,38 +81,49 @@ func DoHedge[T any](ctx context.Context, delay time.Duration, fn func(context.Co
 		}()
 
 		// Now wait for first completion from either goroutine.
-		return waitForResults(ctx, results, primaryCancel, hedgeCancel, hooks)
+		//nolint:wrapcheck // internal delegation
+		return waitForResults(
+			ctx,
+			results,
+			primaryCancel,
+			hedgeCancel,
+			params.Hooks,
+		)
 
 	case <-ctx.Done():
 		timer.Stop()
-		return zero, ctx.Err()
+
+		return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
 	}
 }
 
 // waitForResults waits for results from both the primary and hedge goroutines
 // after the hedge has been triggered. It returns the first successful result,
 // or an error if both fail.
+//
+//nolint:ireturn,revive // generic type parameter T; argument count justified
+// for internal use.
 func waitForResults[T any](
 	ctx context.Context,
 	results chan hedgeResult[T],
-	primaryCancel context.CancelFunc,
-	hedgeCancel context.CancelFunc,
+	primaryCancel, hedgeCancel context.CancelFunc,
 	hooks *Hooks,
 ) (T, error) {
 	var zero T
 
 	// Wait for the first result.
 	select {
-	case r := <-results:
-		if r.err == nil {
+	case result := <-results:
+		if result.err == nil {
 			// Success: cancel the loser.
-			if r.isPrimary {
+			if result.isPrimary {
 				hedgeCancel()
 			} else {
 				primaryCancel()
 				hooks.emitHedgeWon()
 			}
-			return r.val, nil
+
+			return result.val, nil
 		}
 
 		// First result was an error. Wait for the second.
@@ -109,16 +137,17 @@ func waitForResults[T any](
 					primaryCancel()
 					hooks.emitHedgeWon()
 				}
+
 				return r2.val, nil
 			}
 			// Both failed. Return the first error received.
-			return zero, r.err
+			return zero, result.err
 
 		case <-ctx.Done():
-			return zero, ctx.Err()
+			return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
 		}
 
 	case <-ctx.Done():
-		return zero, ctx.Err()
+		return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
 	}
 }

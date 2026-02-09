@@ -4,83 +4,34 @@ import "errors"
 
 // ---------------------------------------------------------------------------
 // Error classification wrappers
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-// transientError marks a wrapped error as transient (retriable).
-type transientError struct {
-	err error
-}
-
-func (e *transientError) Error() string { return "transient: " + e.err.Error() }
-func (e *transientError) Unwrap() error { return e.err }
-
-// permanentError marks a wrapped error as permanent (non-retriable).
-type permanentError struct {
-	err error
-}
-
-func (e *permanentError) Error() string { return "permanent: " + e.err.Error() }
-func (e *permanentError) Unwrap() error { return e.err }
-
-// Transient wraps err to mark it as a transient (retriable) error.
-// Returns nil if err is nil.
-func Transient(err error) error {
-	if err == nil {
-		return nil
+type (
+	// ResilienceError identifies errors produced by the resilience layer
+	// itself,
+	// as opposed to errors from the wrapped function.
+	//nolint:iface // exported for use in tests and consumer error
+	// classification.
+	ResilienceError interface {
+		error
+		// IsResilience reports whether this error originates from the
+		// resilience layer.
+		IsResilience() bool
 	}
-	return &transientError{err: err}
-}
 
-// Permanent wraps err to mark it as a permanent (non-retriable) error.
-// Returns nil if err is nil.
-func Permanent(err error) error {
-	if err == nil {
-		return nil
+	// transientError marks a wrapped error as transient (retriable).
+	transientError struct {
+		err error
 	}
-	return &permanentError{err: err}
-}
 
-// IsTransient reports whether err is transient. Unclassified (unwrapped)
-// errors are treated as transient. Returns false for nil.
-func IsTransient(err error) bool {
-	if err == nil {
-		return false
+	// permanentError marks a wrapped error as permanent (non-retriable).
+	permanentError struct {
+		err error
 	}
-	// Explicitly permanent errors are not transient.
-	var pe *permanentError
-	if errors.As(err, &pe) {
-		return false
-	}
-	return true
-}
 
-// IsPermanent reports whether err was explicitly marked as permanent.
-// Returns false for nil and for unclassified errors.
-func IsPermanent(err error) bool {
-	if err == nil {
-		return false
-	}
-	var pe *permanentError
-	return errors.As(err, &pe)
-}
-
-// ---------------------------------------------------------------------------
-// ResilienceError interface and sentinel errors
-// ---------------------------------------------------------------------------
-
-// ResilienceError is implemented by all sentinel resilience errors produced
-// by this package. It allows callers to distinguish infrastructure errors
-// from application errors using [errors.As].
-type ResilienceError interface {
-	error
-	IsResilience() bool
-}
-
-// resilienceError is the concrete type backing all sentinel errors.
-type resilienceError string
-
-func (e resilienceError) Error() string      { return string(e) }
-func (e resilienceError) IsResilience() bool  { return true }
+	// resilienceError is the concrete type backing all sentinel errors.
+	resilienceError string
+)
 
 // Sentinel resilience errors.
 var (
@@ -95,3 +46,58 @@ var (
 	// ErrRetriesExhausted is returned when all retry attempts have been used.
 	ErrRetriesExhausted error = resilienceError("retries exhausted")
 )
+
+func (e *transientError) Error() string { return "transient: " + e.err.Error() }
+func (e *transientError) Unwrap() error { return e.err }
+
+func (e *permanentError) Error() string { return "permanent: " + e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+func (e resilienceError) Error() string { return string(e) }
+
+// IsResilience reports whether the error is a resilience infrastructure error.
+func (resilienceError) IsResilience() bool { return true }
+
+// Transient wraps err to mark it as a transient (retriable) error.
+// Returns nil if err is nil.
+func Transient(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return &transientError{err: err}
+}
+
+// Permanent wraps err to mark it as a permanent (non-retriable) error.
+// Returns nil if err is nil.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return &permanentError{err: err}
+}
+
+// IsTransient reports whether err is transient. Unclassified (unwrapped)
+// errors are treated as transient. Returns false for nil.
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Explicitly permanent errors are not transient.
+	var pe *permanentError
+
+	return !errors.As(err, &pe)
+}
+
+// IsPermanent reports whether err was explicitly marked as permanent.
+// Returns false for nil and for unclassified errors.
+func IsPermanent(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var pe *permanentError
+
+	return errors.As(err, &pe)
+}
