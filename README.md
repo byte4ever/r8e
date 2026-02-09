@@ -4,7 +4,7 @@
 
 **Stop writing retry loops. Start shipping resilient services.**
 
-r8e (_resilience_) gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, and fallback — all composable into a single policy with one line of code. A standalone keyed stale cache with pluggable cache backends complements the policy chain. Zero dependencies. Lock-free internals. 100% test coverage.
+r8e — short for r(esilienc)e, just like k8s stands for k(ubernete)s — gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, and fallback — all composable into a single policy with one line of code. A standalone keyed stale cache with pluggable cache backends complements the policy chain. Zero dependencies. Lock-free internals. 100% test coverage.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/byte4ever/r8e.svg)](https://pkg.go.dev/github.com/byte4ever/r8e)
 [![Go Report Card](https://goreportcard.com/badge/github.com/byte4ever/r8e)](https://goreportcard.com/report/github.com/byte4ever/r8e)
