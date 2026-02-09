@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # r8e
 
 **Stop writing retry loops. Start shipping resilient services.**

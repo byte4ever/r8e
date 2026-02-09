@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 06 — Bulkhead
 
 Demonstrates concurrency limiting using the bulkhead (semaphore) pattern.

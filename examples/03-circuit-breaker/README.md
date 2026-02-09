@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 03 — Circuit Breaker
 
 Demonstrates the circuit breaker state machine: **closed** (normal),

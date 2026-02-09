@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 12 — Hooks & Observability
 
 Demonstrates all 12 lifecycle hooks available on `Hooks`, showing how they

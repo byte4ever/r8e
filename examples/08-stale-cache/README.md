@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 08 — Stale Cache
 
 Demonstrates the standalone keyed stale-on-error cache (`StaleCache`). On

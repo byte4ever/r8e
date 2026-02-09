@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 15 — Presets
 
 Demonstrates ready-made option bundles for common use cases, so you don't

@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 09 — Fallback
 
 Demonstrates the fallback pattern — a last line of defence that provides a

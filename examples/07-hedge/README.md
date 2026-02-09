@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 07 — Hedged Requests
 
 Demonstrates hedged (speculative) requests that reduce tail latency by

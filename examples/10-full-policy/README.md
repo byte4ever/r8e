@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 10 — Full Policy
 
 Demonstrates composing all resilience patterns into a single policy. r8e

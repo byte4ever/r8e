@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 13 — Health & Readiness
 
 Demonstrates policy health reporting, hierarchical dependencies, and

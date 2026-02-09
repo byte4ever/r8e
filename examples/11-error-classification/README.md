@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 11 — Error Classification
 
 Demonstrates how r8e classifies errors as **transient** or **permanent** and

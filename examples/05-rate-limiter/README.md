@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 05 — Rate Limiter
 
 Demonstrates the token-bucket rate limiter in both **reject** and **blocking**

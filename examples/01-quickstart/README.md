@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 01 — Quickstart
 
 Minimal end-to-end example of creating a resilience policy and executing a

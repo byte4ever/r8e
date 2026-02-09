@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 14 — JSON Configuration
 
 Demonstrates loading policy configuration from a JSON file and retrieving

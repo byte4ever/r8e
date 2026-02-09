@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 16 — Convenience Do
 
 Demonstrates the `r8e.Do` convenience function for one-off resilient calls

@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 04 — Timeout
 
 Demonstrates the global timeout pattern and how it interacts with context

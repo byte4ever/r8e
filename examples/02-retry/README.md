@@ -1,3 +1,5 @@
+*[Lire en Francais](README.fr.md)*
+
 # Example 02 — Retry
 
 Comprehensive demonstration of the retry pattern with all four backoff
