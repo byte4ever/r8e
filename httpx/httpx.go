@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
@@ -69,4 +70,46 @@ func NewClient(
 		p:  r8e.NewPolicy[*http.Response](name, opts...),
 		cl: cl,
 	}
+}
+
+// Do executes the HTTP request through the resilience policy.
+// Like http.Client.Do, it may return both a non-nil response
+// and a non-nil error. When the Classifier returns Transient
+// or Permanent, the response is wrapped in a StatusError
+// accessible via errors.As.
+func (c *Client) Do(
+	ctx context.Context,
+	req *http.Request,
+) (*http.Response, error) {
+	//nolint:wrapcheck // policy returns caller's error as-is
+	return c.p.Do(
+		ctx,
+		func(ctx context.Context) (*http.Response, error) {
+			resp, err := c.hc.Do(
+				req.WithContext(ctx),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			switch c.cl(resp.StatusCode) {
+			case Transient:
+				return resp, r8e.Transient(
+					&StatusError{
+						Response:   resp,
+						StatusCode: resp.StatusCode,
+					},
+				)
+			case Permanent:
+				return resp, r8e.Permanent(
+					&StatusError{
+						Response:   resp,
+						StatusCode: resp.StatusCode,
+					},
+				)
+			default:
+				return resp, nil
+			}
+		},
+	)
 }
