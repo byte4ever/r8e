@@ -1,4 +1,4 @@
-package r8e
+package r8e_test
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/byte4ever/r8e"
 )
 
 // ---------------------------------------------------------------------------
@@ -14,20 +16,17 @@ import (
 
 func TestDoHedgePrimaryWinsFast(t *testing.T) {
 	var hedgeTriggered atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
 	}
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		time.Hour, // very long delay; hedge should never fire
 		func(_ context.Context) (string, error) {
 			return "primary", nil
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -46,16 +45,15 @@ func TestDoHedgePrimaryWinsFast(t *testing.T) {
 func TestDoHedgePrimarySlowHedgeWins(t *testing.T) {
 	var hedgeTriggered atomic.Bool
 	var hedgeWon atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
 		OnHedgeWon:       func() { hedgeWon.Store(true) },
 	}
 
 	callCount := atomic.Int32{}
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		20*time.Millisecond, // short hedge delay
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -70,10 +68,12 @@ func TestDoHedgePrimarySlowHedgeWins(t *testing.T) {
 			// Secondary: returns immediately
 			return "hedge", nil
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -95,16 +95,15 @@ func TestDoHedgePrimarySlowHedgeWins(t *testing.T) {
 func TestDoHedgePrimaryWinsAfterHedgeTriggered(t *testing.T) {
 	var hedgeTriggered atomic.Bool
 	var hedgeWon atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
 		OnHedgeWon:       func() { hedgeWon.Store(true) },
 	}
 
 	callCount := atomic.Int32{}
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		20*time.Millisecond, // short hedge delay
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -120,10 +119,12 @@ func TestDoHedgePrimaryWinsAfterHedgeTriggered(t *testing.T) {
 				return "", ctx.Err()
 			}
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -143,12 +144,11 @@ func TestDoHedgePrimaryWinsAfterHedgeTriggered(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeBothFail(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	callCount := atomic.Int32{}
 
-	_, err := DoHedge[string](
+	_, err := r8e.DoHedge[string](
 		context.Background(),
-		20*time.Millisecond,
 		func(_ context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -159,8 +159,11 @@ func TestDoHedgeBothFail(t *testing.T) {
 			// Secondary: fails fast
 			return "", errors.New("hedge error")
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
 
 	if err == nil {
@@ -173,7 +176,7 @@ func TestDoHedgeBothFail(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextCancellation(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -182,15 +185,13 @@ func TestDoHedgeContextCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := DoHedge[string](
+	_, err := r8e.DoHedge[string](
 		ctx,
-		time.Hour,
 		func(ctx context.Context) (string, error) {
 			<-ctx.Done()
 			return "", ctx.Err()
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
 	)
 
 	if !errors.Is(err, context.Canceled) {
@@ -203,19 +204,17 @@ func TestDoHedgeContextCancellation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextAlreadyCancelled(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := DoHedge[string](
+	_, err := r8e.DoHedge[string](
 		ctx,
-		time.Hour,
 		func(_ context.Context) (string, error) {
 			return "should-not-run", nil
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
 	)
 
 	if !errors.Is(err, context.Canceled) {
@@ -228,18 +227,15 @@ func TestDoHedgeContextAlreadyCancelled(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeNilHooksDoNotPanic(t *testing.T) {
-	hooks := &Hooks{} // all nil callbacks
+	hooks := &r8e.Hooks{} // all nil callbacks
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		time.Hour,
 		func(_ context.Context) (string, error) {
 			return "ok", nil
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -253,12 +249,11 @@ func TestDoHedgeNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimaryErrorHedgeSucceeds(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	callCount := atomic.Int32{}
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		20*time.Millisecond,
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -269,10 +264,12 @@ func TestDoHedgePrimaryErrorHedgeSucceeds(t *testing.T) {
 			// Secondary: succeeds
 			return "hedge-ok", nil
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -287,19 +284,17 @@ func TestDoHedgePrimaryErrorHedgeSucceeds(t *testing.T) {
 
 func TestDoHedgePrimaryFailsFast(t *testing.T) {
 	var hedgeTriggered atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
 	}
 	sentinel := errors.New("primary fast error")
 
-	_, err := DoHedge[string](
+	_, err := r8e.DoHedge[string](
 		context.Background(),
-		time.Hour, // very long delay; hedge should never fire
 		func(_ context.Context) (string, error) {
 			return "", sentinel
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
 	)
 
 	if !errors.Is(err, sentinel) {
@@ -315,12 +310,11 @@ func TestDoHedgePrimaryFailsFast(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeHedgeFailsPrimarySucceeds(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	callCount := atomic.Int32{}
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		20*time.Millisecond,
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -331,10 +325,12 @@ func TestDoHedgeHedgeFailsPrimarySucceeds(t *testing.T) {
 			// Secondary: fails fast
 			return "", errors.New("hedge failed")
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -348,14 +344,13 @@ func TestDoHedgeHedgeFailsPrimarySucceeds(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextCancelledAfterHedgeTriggered(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	callCount := atomic.Int32{}
 
-	_, err := DoHedge[string](
+	_, err := r8e.DoHedge[string](
 		ctx,
-		20*time.Millisecond,
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -368,8 +363,11 @@ func TestDoHedgeContextCancelledAfterHedgeTriggered(t *testing.T) {
 			<-ctx.Done()
 			return "", ctx.Err()
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
 
 	if !errors.Is(err, context.Canceled) {
@@ -382,14 +380,13 @@ func TestDoHedgeContextCancelledAfterHedgeTriggered(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextCancelledWhileWaitingSecondResult(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	callCount := atomic.Int32{}
 
-	_, err := DoHedge[string](
+	_, err := r8e.DoHedge[string](
 		ctx,
-		20*time.Millisecond,
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -404,8 +401,11 @@ func TestDoHedgeContextCancelledWhileWaitingSecondResult(t *testing.T) {
 			}()
 			return "", errors.New("hedge failed")
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
 
 	if !errors.Is(err, context.Canceled) {
@@ -419,14 +419,13 @@ func TestDoHedgeContextCancelledWhileWaitingSecondResult(t *testing.T) {
 
 func TestDoHedgePrimaryFailsFirstHedgeSucceedsSecond(t *testing.T) {
 	var hedgeWon atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnHedgeWon: func() { hedgeWon.Store(true) },
 	}
 	callCount := atomic.Int32{}
 
-	result, err := DoHedge[string](
+	result, err := r8e.DoHedge[string](
 		context.Background(),
-		20*time.Millisecond,
 		func(ctx context.Context) (string, error) {
 			n := callCount.Add(1)
 			if n == 1 {
@@ -438,10 +437,12 @@ func TestDoHedgePrimaryFailsFirstHedgeSucceedsSecond(t *testing.T) {
 			time.Sleep(40 * time.Millisecond)
 			return "hedge-won", nil
 		},
-		hooks,
-		RealClock{},
+		r8e.HedgeParams{
+			Delay: 20 * time.Millisecond,
+			Hooks: hooks,
+			Clock: r8e.RealClock{},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoHedge() error = %v, want nil", err)
 	}
@@ -449,7 +450,9 @@ func TestDoHedgePrimaryFailsFirstHedgeSucceedsSecond(t *testing.T) {
 		t.Fatalf("DoHedge() = %q, want %q", result, "hedge-won")
 	}
 	if !hedgeWon.Load() {
-		t.Fatal("OnHedgeWon should be called when hedge succeeds as second result")
+		t.Fatal(
+			"OnHedgeWon should be called when hedge succeeds as second result",
+		)
 	}
 }
 
@@ -458,18 +461,20 @@ func TestDoHedgePrimaryFailsFirstHedgeSucceedsSecond(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func BenchmarkDoHedge(b *testing.B) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	ctx := context.Background()
 
 	for b.Loop() {
-		_, _ = DoHedge[string](
+		_, _ = r8e.DoHedge[string](
 			ctx,
-			time.Second,
 			func(_ context.Context) (string, error) {
 				return "ok", nil
 			},
-			hooks,
-			RealClock{},
+			r8e.HedgeParams{
+				Delay: time.Second,
+				Hooks: hooks,
+				Clock: r8e.RealClock{},
+			},
 		)
 	}
 }

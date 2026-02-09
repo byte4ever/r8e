@@ -5,6 +5,38 @@ import (
 	"time"
 )
 
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------.
+
+type (
+	circuitBreakerConfig struct {
+		failureThreshold    int
+		recoveryTimeout     time.Duration
+		halfOpenMaxAttempts int
+	}
+
+	// CircuitBreakerOption configures a circuit breaker.
+	CircuitBreakerOption func(*circuitBreakerConfig)
+
+	// CircuitBreaker tracks the health of a dependency and fails fast when it's
+	// down.
+	//
+	// Pattern: Circuit Breaker — fast-fails calls to unhealthy downstream;
+	// auto-recovers via half-open probe after timeout. Lock-free via atomic
+	// CAS.
+	CircuitBreaker struct {
+		clock Clock
+		hooks *Hooks
+		cfg   circuitBreakerConfig
+
+		state             atomic.Uint32 // stateClosed | stateOpen | stateHalfOpen
+		failureCount      atomic.Int64
+		lastFailureNano   atomic.Int64 // unix nano of last failure
+		halfOpenSuccesses atomic.Int64
+	}
+)
+
 // Circuit breaker states (stored in atomic.Uint32).
 const (
 	stateClosed   uint32 = 0
@@ -12,26 +44,13 @@ const (
 	stateHalfOpen uint32 = 2
 )
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-type circuitBreakerConfig struct {
-	failureThreshold   int
-	recoveryTimeout    time.Duration
-	halfOpenMaxAttempts int
-}
-
 func defaultCircuitBreakerConfig() circuitBreakerConfig {
 	return circuitBreakerConfig{
-		failureThreshold:   5,
-		recoveryTimeout:    30 * time.Second,
+		failureThreshold:    5,
+		recoveryTimeout:     30 * time.Second,
 		halfOpenMaxAttempts: 1,
 	}
 }
-
-// CircuitBreakerOption configures a circuit breaker.
-type CircuitBreakerOption func(*circuitBreakerConfig)
 
 // FailureThreshold sets the number of consecutive failures before opening.
 func FailureThreshold(n int) CircuitBreakerOption {
@@ -40,45 +59,33 @@ func FailureThreshold(n int) CircuitBreakerOption {
 	}
 }
 
-// RecoveryTimeout sets how long to wait in open state before transitioning to half-open.
+// RecoveryTimeout sets how long to wait in open state before transitioning to
+// half-open.
 func RecoveryTimeout(d time.Duration) CircuitBreakerOption {
 	return func(cfg *circuitBreakerConfig) {
 		cfg.recoveryTimeout = d
 	}
 }
 
-// HalfOpenMaxAttempts sets the number of successful probes needed to close from half-open.
+// HalfOpenMaxAttempts sets the number of successful probes needed to close from
+// half-open.
 func HalfOpenMaxAttempts(n int) CircuitBreakerOption {
 	return func(cfg *circuitBreakerConfig) {
 		cfg.halfOpenMaxAttempts = n
 	}
 }
 
-// ---------------------------------------------------------------------------
-// CircuitBreaker
-// ---------------------------------------------------------------------------
-
-// CircuitBreaker tracks the health of a dependency and fails fast when it's down.
-//
-// Pattern: Circuit Breaker — fast-fails calls to unhealthy downstream;
-// auto-recovers via half-open probe after timeout. Lock-free via atomic CAS.
-type CircuitBreaker struct {
-	clock Clock
-	hooks *Hooks
-	cfg   circuitBreakerConfig
-
-	state            atomic.Uint32 // stateClosed | stateOpen | stateHalfOpen
-	failureCount     atomic.Int64
-	lastFailureNano  atomic.Int64  // unix nano of last failure
-	halfOpenSuccesses atomic.Int64
-}
-
 // NewCircuitBreaker creates a circuit breaker with the given options.
-func NewCircuitBreaker(clock Clock, hooks *Hooks, opts ...CircuitBreakerOption) *CircuitBreaker {
+func NewCircuitBreaker(
+	clock Clock,
+	hooks *Hooks,
+	opts ...CircuitBreakerOption,
+) *CircuitBreaker {
 	cfg := defaultCircuitBreakerConfig()
 	for _, o := range opts {
 		o(&cfg)
 	}
+
 	return &CircuitBreaker{
 		clock: clock,
 		hooks: hooks,
@@ -95,6 +102,7 @@ func (cb *CircuitBreaker) Allow() error {
 	if s == stateOpen {
 		// Check if recovery timeout has elapsed.
 		lastNano := cb.lastFailureNano.Load()
+
 		lastTime := time.Unix(0, lastNano)
 		if cb.clock.Since(lastTime) > cb.cfg.recoveryTimeout {
 			// Attempt CAS from open to half-open.
@@ -106,6 +114,7 @@ func (cb *CircuitBreaker) Allow() error {
 			// the state is now half-open, so allow the call.
 			return nil
 		}
+
 		return ErrCircuitOpen
 	}
 
@@ -124,14 +133,20 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 	case stateHalfOpen:
 		newCount := cb.halfOpenSuccesses.Add(1)
-		if newCount >= int64(cb.cfg.halfOpenMaxAttempts) {
-			// Transition to closed.
-			if cb.state.CompareAndSwap(stateHalfOpen, stateClosed) {
-				cb.failureCount.Store(0)
-				cb.halfOpenSuccesses.Store(0)
-				cb.hooks.emitCircuitClose()
-			}
+		if newCount < int64(cb.cfg.halfOpenMaxAttempts) {
+			break
 		}
+
+		if !cb.state.CompareAndSwap(stateHalfOpen, stateClosed) {
+			break
+		}
+
+		cb.failureCount.Store(0)
+		cb.halfOpenSuccesses.Store(0)
+		cb.hooks.emitCircuitClose()
+
+	default:
+		// stateOpen — no action on success
 	}
 }
 
@@ -145,12 +160,15 @@ func (cb *CircuitBreaker) RecordFailure() {
 	switch s {
 	case stateClosed:
 		newCount := cb.failureCount.Add(1)
-		if newCount >= int64(cb.cfg.failureThreshold) {
-			// Transition to open.
-			if cb.state.CompareAndSwap(stateClosed, stateOpen) {
-				cb.hooks.emitCircuitOpen()
-			}
+		if newCount < int64(cb.cfg.failureThreshold) {
+			break
 		}
+
+		if !cb.state.CompareAndSwap(stateClosed, stateOpen) {
+			break
+		}
+
+		cb.hooks.emitCircuitOpen()
 
 	case stateHalfOpen:
 		// Any failure in half-open goes back to open.
@@ -158,10 +176,14 @@ func (cb *CircuitBreaker) RecordFailure() {
 			cb.halfOpenSuccesses.Store(0)
 			cb.hooks.emitCircuitOpen()
 		}
+
+	default:
+		// stateOpen — already open, no state change needed
 	}
 }
 
-// State returns the current state as a string: "closed", "open", or "half_open".
+// State returns the current state as a string: "closed", "open", or
+// "half_open".
 func (cb *CircuitBreaker) State() string {
 	switch cb.state.Load() {
 	case stateOpen:

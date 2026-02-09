@@ -1,7 +1,5 @@
 package r8e
 
-import "time"
-
 // Hooks holds optional callback functions for resilience pattern lifecycle
 // events. All fields are nil by default; callers set only the hooks they care
 // about. Once constructed, a Hooks value must not be mutated — emit methods
@@ -20,8 +18,6 @@ type Hooks struct {
 	OnBulkheadAcquired func()
 	OnBulkheadReleased func()
 	OnTimeout          func()
-	OnStaleServed      func(age time.Duration)
-	OnCacheRefreshed   func()
 	OnHedgeTriggered   func()
 	OnHedgeWon         func()
 	OnFallbackUsed     func(err error)
@@ -78,18 +74,6 @@ func (h *Hooks) emitBulkheadReleased() {
 func (h *Hooks) emitTimeout() {
 	if h.OnTimeout != nil {
 		h.OnTimeout()
-	}
-}
-
-func (h *Hooks) emitStaleServed(age time.Duration) {
-	if h.OnStaleServed != nil {
-		h.OnStaleServed(age)
-	}
-}
-
-func (h *Hooks) emitCacheRefreshed() {
-	if h.OnCacheRefreshed != nil {
-		h.OnCacheRefreshed()
 	}
 }
 

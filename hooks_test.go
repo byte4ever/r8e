@@ -5,7 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -104,26 +103,6 @@ func TestEmitTimeoutCallsHook(t *testing.T) {
 	}
 }
 
-func TestEmitStaleServedCallsHook(t *testing.T) {
-	var gotAge time.Duration
-	h := Hooks{
-		OnStaleServed: func(age time.Duration) { gotAge = age },
-	}
-	h.emitStaleServed(5 * time.Second)
-	if gotAge != 5*time.Second {
-		t.Fatalf("OnStaleServed age = %v, want 5s", gotAge)
-	}
-}
-
-func TestEmitCacheRefreshedCallsHook(t *testing.T) {
-	called := false
-	h := Hooks{OnCacheRefreshed: func() { called = true }}
-	h.emitCacheRefreshed()
-	if !called {
-		t.Fatal("OnCacheRefreshed not called")
-	}
-}
-
 func TestEmitHedgeTriggeredCallsHook(t *testing.T) {
 	called := false
 	h := Hooks{OnHedgeTriggered: func() { called = true }}
@@ -171,8 +150,6 @@ func TestNilHooksDoNotPanic(t *testing.T) {
 	h.emitBulkheadAcquired()
 	h.emitBulkheadReleased()
 	h.emitTimeout()
-	h.emitStaleServed(time.Second)
-	h.emitCacheRefreshed()
 	h.emitHedgeTriggered()
 	h.emitHedgeWon()
 	h.emitFallbackUsed(errors.New("err"))
@@ -194,15 +171,13 @@ func TestConcurrentEmissionIsSafe(t *testing.T) {
 		OnBulkheadAcquired: func() { count.Add(1) },
 		OnBulkheadReleased: func() { count.Add(1) },
 		OnTimeout:          func() { count.Add(1) },
-		OnStaleServed:      func(time.Duration) { count.Add(1) },
-		OnCacheRefreshed:   func() { count.Add(1) },
 		OnHedgeTriggered:   func() { count.Add(1) },
 		OnHedgeWon:         func() { count.Add(1) },
 		OnFallbackUsed:     func(error) { count.Add(1) },
 	}
 
 	const goroutines = 10
-	const hooksPerGoroutine = 14
+	const hooksPerGoroutine = 12
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
@@ -219,8 +194,6 @@ func TestConcurrentEmissionIsSafe(t *testing.T) {
 			h.emitBulkheadAcquired()
 			h.emitBulkheadReleased()
 			h.emitTimeout()
-			h.emitStaleServed(time.Second)
-			h.emitCacheRefreshed()
 			h.emitHedgeTriggered()
 			h.emitHedgeWon()
 			h.emitFallbackUsed(errors.New("err"))

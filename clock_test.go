@@ -1,12 +1,14 @@
-package r8e
+package r8e_test
 
 import (
 	"testing"
 	"time"
+
+	"github.com/byte4ever/r8e"
 )
 
 func TestRealClockNow(t *testing.T) {
-	c := RealClock{}
+	c := r8e.RealClock{}
 	before := time.Now()
 	got := c.Now()
 	after := time.Now()
@@ -17,7 +19,7 @@ func TestRealClockNow(t *testing.T) {
 }
 
 func TestRealClockSince(t *testing.T) {
-	c := RealClock{}
+	c := r8e.RealClock{}
 	start := c.Now()
 
 	// Sleep a tiny bit so Since returns a positive duration.
@@ -30,7 +32,7 @@ func TestRealClockSince(t *testing.T) {
 }
 
 func TestRealClockNewTimerFires(t *testing.T) {
-	c := RealClock{}
+	c := r8e.RealClock{}
 	tmr := c.NewTimer(10 * time.Millisecond)
 
 	select {
@@ -44,7 +46,7 @@ func TestRealClockNewTimerFires(t *testing.T) {
 }
 
 func TestRealClockNewTimerStop(t *testing.T) {
-	c := RealClock{}
+	c := r8e.RealClock{}
 	tmr := c.NewTimer(1 * time.Hour) // very long; will not fire
 
 	if !tmr.Stop() {
@@ -53,7 +55,7 @@ func TestRealClockNewTimerStop(t *testing.T) {
 }
 
 func TestRealClockNewTimerReset(t *testing.T) {
-	c := RealClock{}
+	c := r8e.RealClock{}
 	tmr := c.NewTimer(1 * time.Hour) // very long; will not fire
 
 	tmr.Stop()
@@ -75,28 +77,28 @@ func TestRealClockNewTimerReset(t *testing.T) {
 // fakeClock can satisfy the Clock interface. This proves the interface is
 // implementable outside of the real implementation.
 func TestFakeClockSatisfiesInterface(t *testing.T) {
-	var _ Clock = (*fakeClock)(nil)
-	var _ Timer = (*fakeTimer)(nil)
+	var _ r8e.Clock = (*fakeClock)(nil)
+	var _ r8e.Timer = (*fakeTimer)(nil)
 }
 
 // fakeClock is a minimal stub that satisfies Clock for the compile check.
 type fakeClock struct{}
 
-func (f *fakeClock) Now() time.Time                        { return time.Time{} }
-func (f *fakeClock) Since(time.Time) time.Duration         { return 0 }
-func (f *fakeClock) NewTimer(time.Duration) Timer          { return &fakeTimer{} }
+func (f *fakeClock) Now() time.Time                   { return time.Time{} }
+func (f *fakeClock) Since(time.Time) time.Duration    { return 0 }
+func (f *fakeClock) NewTimer(time.Duration) r8e.Timer { return &fakeTimer{} }
 
 type fakeTimer struct{}
 
-func (f *fakeTimer) C() <-chan time.Time        { return make(chan time.Time) }
-func (f *fakeTimer) Stop() bool                 { return false }
-func (f *fakeTimer) Reset(time.Duration) bool   { return false }
+func (f *fakeTimer) C() <-chan time.Time      { return make(chan time.Time) }
+func (f *fakeTimer) Stop() bool               { return false }
+func (f *fakeTimer) Reset(time.Duration) bool { return false }
 
 // TestRealClockConcurrentAccess verifies that concurrent reads are safe.
 // RealClock is stateless (zero-value struct), so concurrent use is inherently
 // safe; this test confirms it under the race detector.
 func TestRealClockConcurrentAccess(t *testing.T) {
-	c := RealClock{}
+	c := r8e.RealClock{}
 	done := make(chan struct{})
 
 	for range 10 {

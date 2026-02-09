@@ -45,7 +45,11 @@ func TestRegistryRegister(t *testing.T) {
 		t.Fatalf("Policies = %d, want 1", len(status.Policies))
 	}
 	if status.Policies[0].Name != "test-policy" {
-		t.Fatalf("Policies[0].Name = %q, want %q", status.Policies[0].Name, "test-policy")
+		t.Fatalf(
+			"Policies[0].Name = %q, want %q",
+			status.Policies[0].Name,
+			"test-policy",
+		)
 	}
 	if !status.Ready {
 		t.Fatal("Ready = false, want true")
@@ -134,7 +138,10 @@ func TestRegistryOneCritical(t *testing.T) {
 				t.Fatal("unhealthy-svc: Healthy = true, want false")
 			}
 			if ps.Criticality != CriticalityCritical {
-				t.Fatalf("unhealthy-svc: Criticality = %v, want CriticalityCritical", ps.Criticality)
+				t.Fatalf(
+					"unhealthy-svc: Criticality = %v, want CriticalityCritical",
+					ps.Criticality,
+				)
 			}
 		}
 	}
@@ -176,7 +183,10 @@ func TestRegistryOneDegraded(t *testing.T) {
 		t.Fatalf("Policies = %d, want 1", len(status.Policies))
 	}
 	if status.Policies[0].Criticality != CriticalityDegraded {
-		t.Fatalf("Criticality = %v, want CriticalityDegraded", status.Policies[0].Criticality)
+		t.Fatalf(
+			"Criticality = %v, want CriticalityDegraded",
+			status.Policies[0].Criticality,
+		)
 	}
 }
 
@@ -214,7 +224,8 @@ func TestRegistryConcurrentReads(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestRegistryConcurrentRegisterAndRead — Register and CheckReadiness concurrent
+// TestRegistryConcurrentRegisterAndRead — Register and CheckReadiness
+// concurrent
 // ---------------------------------------------------------------------------
 
 func TestRegistryConcurrentRegisterAndRead(t *testing.T) {
@@ -294,12 +305,17 @@ func TestWithRegistry(t *testing.T) {
 		t.Fatalf("Policies = %d, want 1", len(status.Policies))
 	}
 	if status.Policies[0].Name != "explicit-reg" {
-		t.Fatalf("Policies[0].Name = %q, want %q", status.Policies[0].Name, "explicit-reg")
+		t.Fatalf(
+			"Policies[0].Name = %q, want %q",
+			status.Policies[0].Name,
+			"explicit-reg",
+		)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// TestAutoRegistration — NewPolicy with name auto-registers with DefaultRegistry
+// TestAutoRegistration — NewPolicy with name auto-registers with
+// DefaultRegistry
 // ---------------------------------------------------------------------------
 
 func TestAutoRegistration(t *testing.T) {
@@ -317,10 +333,17 @@ func TestAutoRegistration(t *testing.T) {
 
 	status := reg.CheckReadiness()
 	if len(status.Policies) != 1 {
-		t.Fatalf("Policies = %d, want 1 (auto-registered)", len(status.Policies))
+		t.Fatalf(
+			"Policies = %d, want 1 (auto-registered)",
+			len(status.Policies),
+		)
 	}
 	if status.Policies[0].Name != "auto-reg-test" {
-		t.Fatalf("Policies[0].Name = %q, want %q", status.Policies[0].Name, "auto-reg-test")
+		t.Fatalf(
+			"Policies[0].Name = %q, want %q",
+			status.Policies[0].Name,
+			"auto-reg-test",
+		)
 	}
 }
 
@@ -341,7 +364,10 @@ func TestAnonymousPolicyNotRegistered(t *testing.T) {
 
 	status := reg.CheckReadiness()
 	if len(status.Policies) != 0 {
-		t.Fatalf("Policies = %d, want 0 (anonymous policy should not be registered)", len(status.Policies))
+		t.Fatalf(
+			"Policies = %d, want 0 (anonymous policy should not be registered)",
+			len(status.Policies),
+		)
 	}
 }
 

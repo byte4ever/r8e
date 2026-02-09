@@ -7,33 +7,38 @@ import (
 
 // ---------------------------------------------------------------------------
 // ReadinessStatus — result of checking all registered policies
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-// ReadinessStatus is the result of checking all registered policies.
-type ReadinessStatus struct {
-	Ready    bool           `json:"ready"`
-	Policies []PolicyStatus `json:"policies"`
-}
+type (
+	// ReadinessStatus is the result of checking all registered policies.
+	ReadinessStatus struct {
+		Policies []PolicyStatus `json:"policies"`
+		Ready    bool           `json:"ready"`
+	}
 
-// ---------------------------------------------------------------------------
-// Registry — tracks HealthReporter instances and derives readiness status
-// ---------------------------------------------------------------------------
+	// Registry tracks HealthReporter instances and derives readiness status.
+	//
+	// Pattern: Singleton — DefaultRegistry uses sync.OnceValue for safe lazy
+	// init;
+	// explicit registries can be created for testing or multi-tenant scenarios.
+	Registry struct {
+		reporters atomic.Pointer[[]HealthReporter]
+		configs   map[string]PolicyConfig
+		mu        sync.Mutex
+	}
+)
 
-// Registry tracks HealthReporter instances and derives readiness status.
-//
-// Pattern: Singleton — DefaultRegistry uses sync.Once for safe lazy init;
-// explicit registries can be created for testing or multi-tenant scenarios.
-type Registry struct {
-	mu        sync.Mutex
-	reporters atomic.Pointer[[]HealthReporter]
-	configs   map[string]policyConfig // stored by LoadConfig, read by GetPolicy
-}
+//nolint:gochecknoglobals // singleton via sync.OnceValue
+var defaultRegistry = sync.OnceValue(NewRegistry)
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	r := &Registry{}
-	empty := make([]HealthReporter, 0)
+
+	var empty []HealthReporter
+
 	r.reporters.Store(&empty)
+
 	return r
 }
 
@@ -53,7 +58,8 @@ func (r *Registry) Register(hr HealthReporter) {
 	r.reporters.Store(&updated)
 }
 
-// CheckReadiness iterates all registered reporters and builds a ReadinessStatus.
+// CheckReadiness iterates all registered reporters and builds a
+// ReadinessStatus.
 // Ready is false if any policy has CriticalityCritical and is unhealthy.
 func (r *Registry) CheckReadiness() ReadinessStatus {
 	reporters := *r.reporters.Load()
@@ -76,24 +82,11 @@ func (r *Registry) CheckReadiness() ReadinessStatus {
 	return status
 }
 
-// ---------------------------------------------------------------------------
-// DefaultRegistry — package-level global registry singleton
-// ---------------------------------------------------------------------------
-
-// defaultRegistry is the package-level global registry.
-var (
-	defaultRegistryOnce sync.Once
-	defaultRegistryVal  *Registry
-)
-
 // DefaultRegistry returns the package-level global registry, creating it
 // on first call.
 //
-// Pattern: Singleton — lazy initialization via sync.Once ensures exactly one
-// global registry exists and is safe for concurrent access.
+// Pattern: Singleton — lazy initialization via sync.OnceValue ensures exactly
+// one global registry exists and is safe for concurrent access.
 func DefaultRegistry() *Registry {
-	defaultRegistryOnce.Do(func() {
-		defaultRegistryVal = NewRegistry()
-	})
-	return defaultRegistryVal
+	return defaultRegistry()
 }

@@ -2,6 +2,8 @@
 //
 // Creates a simple policy with timeout, retry, and circuit breaker,
 // then executes a function through it.
+//
+//nolint:forbidigo // This is an example program.
 package main
 
 import (
@@ -21,12 +23,16 @@ func main() {
 	)
 
 	// Execute a function through the policy.
-	result, err := policy.Do(context.Background(), func(ctx context.Context) (string, error) {
-		return "Hello from r8e!", nil
-	})
+	result, err := policy.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "Hello from r8e!", nil
+		},
+	)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
+
 	fmt.Println("result:", result)
 }

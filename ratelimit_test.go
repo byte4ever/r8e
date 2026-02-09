@@ -44,7 +44,8 @@ func (c *rateLimitClock) advance(d time.Duration) {
 }
 
 func (c *rateLimitClock) NewTimer(d time.Duration) Timer {
-	// For blocking mode tests: return a timer that fires after a short real sleep
+	// For blocking mode tests: return a timer that fires after a short real
+	// sleep
 	// to avoid indefinite blocking in tests.
 	ch := make(chan time.Time, 1)
 	go func() {
@@ -236,7 +237,11 @@ func TestRateLimiterTokenRefillCapsAtBucketCapacity(t *testing.T) {
 	// Should still only be able to acquire 5 (capacity cap).
 	for i := range 5 {
 		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf("Allow() after long refill, call %d = %v, want nil", i, err)
+			t.Fatalf(
+				"Allow() after long refill, call %d = %v, want nil",
+				i,
+				err,
+			)
 		}
 	}
 
@@ -333,7 +338,10 @@ func TestRateLimiterNoHookOnBlockingSuccess(t *testing.T) {
 	}
 
 	if got := rateLimitedCount.Load(); got != 0 {
-		t.Fatalf("OnRateLimited called %d times, want 0 for blocking success", got)
+		t.Fatalf(
+			"OnRateLimited called %d times, want 0 for blocking success",
+			got,
+		)
 	}
 }
 
@@ -400,7 +408,8 @@ func TestRateLimiterConcurrentAccess(t *testing.T) {
 		t.Fatalf("total calls = %d, want 500", total)
 	}
 
-	// With 100 tokens and 500 calls, we should have some allowed and some rejected.
+	// With 100 tokens and 500 calls, we should have some allowed and some
+	// rejected.
 	if allowed.Load() == 0 {
 		t.Fatal("expected some calls to be allowed")
 	}
@@ -526,7 +535,10 @@ func TestRateLimiterBlockingModeContextDeadlineExceeded(t *testing.T) {
 	_ = rl.Allow(context.Background())
 
 	// Use a context with a very short deadline.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Millisecond,
+	)
 	defer cancel()
 
 	err := rl.Allow(ctx)
@@ -544,7 +556,11 @@ func TestRateLimiterBlockingModeContextDeadlineExceeded(t *testing.T) {
 
 func BenchmarkRateLimiterAllow(b *testing.B) {
 	clk := newRateLimitClock(time.Now())
-	rl := NewRateLimiter(1e9, clk, &Hooks{}) // very high rate so tokens never run out
+	rl := NewRateLimiter(
+		1e9,
+		clk,
+		&Hooks{},
+	) // very high rate so tokens never run out
 	ctx := context.Background()
 
 	b.RunParallel(func(pb *testing.PB) {

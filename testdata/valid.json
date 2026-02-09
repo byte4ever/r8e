@@ -13,8 +13,7 @@
         "max_delay": "30s"
       },
       "rate_limit": 100,
-      "bulkhead": 10,
-      "stale_cache": "5m"
+      "bulkhead": 10
     },
     "notification-api": {
       "timeout": "5s",

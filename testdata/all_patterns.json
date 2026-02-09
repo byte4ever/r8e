@@ -15,7 +15,6 @@
       },
       "rate_limit": 100,
       "bulkhead": 10,
-      "stale_cache": "5m",
       "hedge": "200ms"
     }
   }

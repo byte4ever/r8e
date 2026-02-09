@@ -1,25 +1,32 @@
 package r8e
 
-import "time"
-
 // ---------------------------------------------------------------------------
 // HealthReporter interface
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-// HealthReporter is implemented by all Policy[T] instances.
-// The interface is non-generic, allowing policies with different type
-// parameters to be used as dependencies of one another.
-type HealthReporter interface {
-	Name() string
-	HealthStatus() PolicyStatus
-}
+type (
+	// HealthReporter is implemented by all Policy[T] instances.
+	// The interface is non-generic, allowing policies with different type
+	// parameters to be used as dependencies of one another.
+	HealthReporter interface {
+		// Name returns the policy's name.
+		Name() string
+		// HealthStatus returns the current health state of the policy.
+		HealthStatus() PolicyStatus
+	}
 
-// ---------------------------------------------------------------------------
-// Criticality
-// ---------------------------------------------------------------------------
+	// Criticality represents how a pattern's unhealthy state affects readiness.
+	Criticality int
 
-// Criticality represents how a pattern's unhealthy state affects readiness.
-type Criticality int
+	// PolicyStatus represents the current health state of a policy.
+	PolicyStatus struct {
+		Name         string         `json:"name"`
+		State        string         `json:"state"`
+		Dependencies []PolicyStatus `json:"dependencies,omitempty"`
+		Criticality  Criticality    `json:"criticality"`
+		Healthy      bool           `json:"healthy"`
+	}
+)
 
 const (
 	// CriticalityNone means the pattern has no persistent health state.
@@ -43,25 +50,11 @@ func (c Criticality) String() string {
 }
 
 // ---------------------------------------------------------------------------
-// PolicyStatus
-// ---------------------------------------------------------------------------
-
-// PolicyStatus represents the current health state of a policy.
-type PolicyStatus struct {
-	Name         string         `json:"name"`
-	Healthy      bool           `json:"healthy"`
-	Criticality  Criticality    `json:"criticality"`
-	State        string         `json:"state"`
-	ServingStale bool           `json:"serving_stale"`
-	StaleAge     time.Duration  `json:"stale_age"`
-	Dependencies []PolicyStatus `json:"dependencies,omitempty"`
-}
-
-// ---------------------------------------------------------------------------
 // HealthStatus on Policy[T]
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-// HealthStatus derives the policy's current health by inspecting stateful patterns.
+// HealthStatus derives the policy's current health by inspecting stateful
+// patterns.
 func (p *Policy[T]) HealthStatus() PolicyStatus {
 	status := PolicyStatus{
 		Name:    p.name,
@@ -70,44 +63,45 @@ func (p *Policy[T]) HealthStatus() PolicyStatus {
 	}
 
 	// Circuit breaker — Critical
-	if p.cb != nil {
-		s := p.cb.State()
-		if s == "open" {
+	if p.circuitBreaker != nil {
+		s := p.circuitBreaker.State()
+
+		switch s {
+		case "open":
 			status.Healthy = false
 			status.Criticality = CriticalityCritical
 			status.State = "circuit_open"
-		} else if s == "half_open" {
+		case "half_open":
 			status.State = "circuit_half_open"
 			// half_open is not unhealthy — it's recovering
+		default:
+			// closed — no action needed
 		}
 	}
 
 	// Rate limiter — Degraded (only if not already Critical)
-	if p.rl != nil && p.rl.Saturated() {
+	if p.rateLimiter != nil && p.rateLimiter.Saturated() {
 		if status.Criticality < CriticalityDegraded {
 			status.Criticality = CriticalityDegraded
 		}
+
 		if status.Healthy {
 			status.State = "rate_limited"
 		}
 		// Rate limiter saturation alone doesn't make the policy unhealthy
-		// (it's degraded, not down). But if combined with circuit open, stay unhealthy.
+		// (it's degraded, not down). But if combined with circuit open, stay
+		// unhealthy.
 	}
 
 	// Bulkhead — Degraded (only if not already Critical)
-	if p.bh != nil && p.bh.Full() {
+	if p.bulkhead != nil && p.bulkhead.Full() {
 		if status.Criticality < CriticalityDegraded {
 			status.Criticality = CriticalityDegraded
 		}
+
 		if status.Healthy && status.State == "healthy" {
 			status.State = "bulkhead_full"
 		}
-	}
-
-	// Stale cache — flag only, no criticality impact
-	if p.sc != nil && p.sc.ServingStale() {
-		status.ServingStale = true
-		status.StaleAge = p.sc.StaleAge()
 	}
 
 	// Dependencies — propagate health from sub-dependencies
@@ -115,11 +109,14 @@ func (p *Policy[T]) HealthStatus() PolicyStatus {
 		depStatus := dep.HealthStatus()
 		status.Dependencies = append(status.Dependencies, depStatus)
 
-		// If a dependency is critical → this policy becomes degraded (at minimum)
-		if depStatus.Criticality == CriticalityCritical && !depStatus.Healthy {
-			if status.Criticality < CriticalityDegraded {
-				status.Criticality = CriticalityDegraded
-			}
+		// If a dependency is critical → this policy becomes degraded (at
+		// minimum)
+		if depStatus.Criticality != CriticalityCritical || depStatus.Healthy {
+			continue
+		}
+
+		if status.Criticality < CriticalityDegraded {
+			status.Criticality = CriticalityDegraded
 		}
 	}
 

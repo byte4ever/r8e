@@ -1,9 +1,12 @@
 // Example 11-error-classification: Demonstrates Transient vs Permanent error
 // classification and how it affects retry behavior.
+//
+//nolint:forbidigo // This is an example program.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,42 +22,50 @@ func main() {
 
 	// --- Transient error: retried until success ---
 	fmt.Println("=== Transient Error (retried) ===")
+
 	attempt := 0
-	result, err := policy.Do(ctx, func(ctx context.Context) (string, error) {
+	result, err := policy.Do(ctx, func(_ context.Context) (string, error) {
 		attempt++
 		fmt.Printf("  attempt %d\n", attempt)
+
 		if attempt < 3 {
-			return "", r8e.Transient(fmt.Errorf("connection reset"))
+			return "", r8e.Transient(errors.New("connection reset"))
 		}
+
 		return "recovered", nil
 	})
 	fmt.Printf("  result: %q, err: %v\n\n", result, err)
 
 	// --- Permanent error: stops retries immediately ---
 	fmt.Println("=== Permanent Error (stops retries) ===")
+
 	attempt = 0
-	_, err = policy.Do(ctx, func(ctx context.Context) (string, error) {
+	_, err = policy.Do(ctx, func(_ context.Context) (string, error) {
 		attempt++
 		fmt.Printf("  attempt %d\n", attempt)
-		return "", r8e.Permanent(fmt.Errorf("invalid API key"))
+
+		return "", r8e.Permanent(errors.New("invalid API key"))
 	})
 	fmt.Printf("  err: %v\n\n", err)
 
 	// --- Unclassified error: treated as transient by default ---
 	fmt.Println("=== Unclassified Error (treated as transient) ===")
+
 	attempt = 0
-	_, err = policy.Do(ctx, func(ctx context.Context) (string, error) {
+	_, err = policy.Do(ctx, func(_ context.Context) (string, error) {
 		attempt++
 		fmt.Printf("  attempt %d\n", attempt)
-		return "", fmt.Errorf("some unclassified error")
+
+		return "", errors.New("some unclassified error")
 	})
 	fmt.Printf("  err: %v (retried all 5 attempts)\n\n", err)
 
 	// --- Classification checks ---
 	fmt.Println("=== Classification Checks ===")
-	transientErr := r8e.Transient(fmt.Errorf("timeout"))
-	permanentErr := r8e.Permanent(fmt.Errorf("bad request"))
-	plainErr := fmt.Errorf("unknown")
+
+	transientErr := r8e.Transient(errors.New("timeout"))
+	permanentErr := r8e.Permanent(errors.New("bad request"))
+	plainErr := errors.New("unknown")
 
 	fmt.Printf("  Transient(timeout): IsTransient=%v, IsPermanent=%v\n",
 		r8e.IsTransient(transientErr), r8e.IsPermanent(transientErr))

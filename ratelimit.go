@@ -8,47 +8,50 @@ import (
 
 // ---------------------------------------------------------------------------
 // Configuration
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-type rateLimitConfig struct {
-	blocking bool
-}
+type (
+	rateLimitConfig struct {
+		blocking bool
+	}
 
-// RateLimitOption configures rate limiter behavior.
-type RateLimitOption func(*rateLimitConfig)
+	// RateLimitOption configures rate limiter behavior.
+	RateLimitOption func(*rateLimitConfig)
 
-// RateLimitBlocking makes the rate limiter wait for a token instead of rejecting.
+	// RateLimiter controls the rate of calls using a token bucket algorithm.
+	//
+	// Pattern: Rate Limiter — token bucket controls call throughput;
+	// lock-free via atomic CAS for token acquisition and refill.
+	RateLimiter struct {
+		clock    Clock
+		hooks    *Hooks
+		rate     float64
+		capacity int64
+		tokens   atomic.Int64
+		lastNano atomic.Int64
+		cfg      rateLimitConfig
+	}
+)
+
+// fixedPointScale converts floating-point tokens to fixed-point integers.
+// Using 1e9 gives nanosecond-level precision for token fractions.
+const fixedPointScale int64 = 1_000_000_000
+
+// RateLimitBlocking makes the rate limiter wait for a token instead of
+// rejecting.
 func RateLimitBlocking() RateLimitOption {
 	return func(cfg *rateLimitConfig) {
 		cfg.blocking = true
 	}
 }
 
-// ---------------------------------------------------------------------------
-// RateLimiter
-// ---------------------------------------------------------------------------
-
-// fixedPointScale converts floating-point tokens to fixed-point integers.
-// Using 1e9 gives nanosecond-level precision for token fractions.
-const fixedPointScale int64 = 1_000_000_000
-
-// RateLimiter controls the rate of calls using a token bucket algorithm.
-//
-// Pattern: Rate Limiter — token bucket controls call throughput;
-// lock-free via atomic CAS for token acquisition and refill.
-type RateLimiter struct {
-	rate     float64 // tokens per second
-	capacity int64   // max tokens in fixed-point (rate * fixedPointScale)
-	clock    Clock
-	hooks    *Hooks
-	cfg      rateLimitConfig
-
-	tokens    atomic.Int64 // current tokens in fixed-point
-	lastNano  atomic.Int64 // last refill timestamp (unix nano)
-}
-
 // NewRateLimiter creates a rate limiter that allows rate tokens per second.
-func NewRateLimiter(rate float64, clock Clock, hooks *Hooks, opts ...RateLimitOption) *RateLimiter {
+func NewRateLimiter(
+	rate float64,
+	clock Clock,
+	hooks *Hooks,
+	opts ...RateLimitOption,
+) *RateLimiter {
 	var cfg rateLimitConfig
 	for _, o := range opts {
 		o(&cfg)
@@ -86,13 +89,15 @@ func (rl *RateLimiter) refill() {
 
 		// Try to claim this time window by updating lastNano.
 		if !rl.lastNano.CompareAndSwap(oldLastNano, nowNano) {
-			// Another goroutine refilled; retry to see if there's more elapsed time.
+			// Another goroutine refilled; retry to see if there's more elapsed
+			// time.
 			continue
 		}
 
 		// Calculate tokens to add: elapsed_seconds * rate, in fixed-point.
 		// elapsedNano * rate gives tokens in nanosecond-scaled units, which is
-		// already in our fixed-point representation (since scale = 1e9 = nanos/sec).
+		// already in our fixed-point representation (since scale = 1e9 =
+		// nanos/sec).
 		addTokens := int64(float64(elapsedNano) * rl.rate)
 
 		if addTokens <= 0 {
@@ -102,10 +107,12 @@ func (rl *RateLimiter) refill() {
 		// Add tokens atomically, capping at capacity.
 		for {
 			oldTokens := rl.tokens.Load()
+
 			newTokens := oldTokens + addTokens
 			if newTokens > rl.capacity {
 				newTokens = rl.capacity
 			}
+
 			if rl.tokens.CompareAndSwap(oldTokens, newTokens) {
 				return
 			}
@@ -120,20 +127,23 @@ func (rl *RateLimiter) tryAcquire() bool {
 
 	for {
 		current := rl.tokens.Load()
-		if current < int64(oneToken) {
+		if current < oneToken {
 			return false
 		}
-		if rl.tokens.CompareAndSwap(current, current-int64(oneToken)) {
+
+		if rl.tokens.CompareAndSwap(current, current-oneToken) {
 			return true
 		}
 	}
 }
 
-// Allow attempts to acquire a token. In reject mode (default), returns ErrRateLimited
-// if no token is available. In blocking mode, waits for a token (respects ctx cancellation).
+// Allow attempts to acquire a token. In reject mode (default), returns
+// ErrRateLimited if no token is available. In blocking mode, waits for a token
+// (respects ctx cancellation).
 func (rl *RateLimiter) Allow(ctx context.Context) error {
 	// Refill based on elapsed time, then try to acquire.
 	rl.refill()
+
 	if rl.tryAcquire() {
 		return nil
 	}
@@ -148,7 +158,7 @@ func (rl *RateLimiter) Allow(ctx context.Context) error {
 	for {
 		// Check context before sleeping.
 		if err := ctx.Err(); err != nil {
-			return err
+			return err //nolint:wrapcheck // preserving context error identity
 		}
 
 		// Sleep briefly, then retry.
@@ -156,12 +166,14 @@ func (rl *RateLimiter) Allow(ctx context.Context) error {
 		select {
 		case <-timer.C():
 			rl.refill()
+
 			if rl.tryAcquire() {
 				return nil
 			}
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+
+			return ctx.Err() //nolint:wrapcheck // preserving context error identity
 		}
 	}
 }

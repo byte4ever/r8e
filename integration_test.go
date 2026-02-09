@@ -2,7 +2,6 @@ package r8e
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,9 +23,9 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 	reg := NewRegistry()
 
 	var (
-		retryCount  atomic.Int32
-		bhAcquired  atomic.Int32
-		bhReleased  atomic.Int32
+		retryCount atomic.Int32
+		bhAcquired atomic.Int32
+		bhReleased atomic.Int32
 	)
 
 	hooks := Hooks{
@@ -36,7 +37,7 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 	p := NewPolicy[string]("full-chain",
 		WithClock(clk),
 		WithRegistry(reg),
-		WithHooks(hooks),
+		WithHooks(&hooks),
 		WithTimeout(5*time.Second),
 		WithCircuitBreaker(FailureThreshold(10), RecoveryTimeout(time.Hour)),
 		WithRetry(3, ConstantBackoff(10*time.Millisecond)),
@@ -45,14 +46,16 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 	)
 
 	attempt := 0
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		attempt++
-		if attempt < 2 {
-			return "", errors.New("transient failure")
-		}
-		return "success", nil
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			attempt++
+			if attempt < 2 {
+				return "", errors.New("transient failure")
+			}
+			return "success", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -74,79 +77,11 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 		t.Fatalf("OnBulkheadReleased called %d times, want >= 1", bh)
 	}
 
-	// Circuit breaker should still be closed (only 1 failure out of threshold 10).
+	// Circuit breaker should still be closed (only 1 failure out of threshold
+	// 10).
 	status := p.HealthStatus()
 	if !status.Healthy {
 		t.Fatalf("policy should be healthy, got state=%q", status.State)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestIntegrationCircuitOpenThenStaleCache — CB opens, stale cache serves
-// ---------------------------------------------------------------------------
-
-func TestIntegrationCircuitOpenThenStaleCache(t *testing.T) {
-	clk := newPolicyClock()
-	reg := NewRegistry()
-
-	p := NewPolicy[string]("cb-stale-cache",
-		WithClock(clk),
-		WithRegistry(reg),
-		WithCircuitBreaker(FailureThreshold(3), RecoveryTimeout(time.Hour)),
-		WithStaleCache(10*time.Minute),
-	)
-
-	// Step 1: First call succeeds, populating the cache.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "cached-value", nil
-	})
-	if err != nil {
-		t.Fatalf("first Do() error = %v, want nil", err)
-	}
-	if result != "cached-value" {
-		t.Fatalf("first Do() = %q, want %q", result, "cached-value")
-	}
-
-	// Step 2: Drive the circuit breaker to open state via failures.
-	clk.advance(1 * time.Second)
-	for range 3 {
-		_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("downstream failure")
-		})
-	}
-
-	// Verify circuit breaker is open.
-	if p.cb.State() != "open" {
-		t.Fatalf("circuit breaker state = %q, want %q", p.cb.State(), "open")
-	}
-
-	// Step 3: Next call should get circuit-open error, but stale cache should
-	// intercept and serve the cached value.
-	clk.advance(1 * time.Second)
-	result, err = p.Do(context.Background(), func(_ context.Context) (string, error) {
-		t.Fatal("fn should not be called when circuit is open")
-		return "unreachable", nil
-	})
-	if err != nil {
-		t.Fatalf("stale cache Do() error = %v, want nil (stale served)", err)
-	}
-	if result != "cached-value" {
-		t.Fatalf("stale cache Do() = %q, want %q", result, "cached-value")
-	}
-
-	// Step 4: Verify health reports unhealthy via the registry.
-	status := reg.CheckReadiness()
-	if status.Ready {
-		t.Fatal("registry should report not ready when circuit is open")
-	}
-
-	// Check the specific policy status.
-	policyStatus := p.HealthStatus()
-	if policyStatus.Healthy {
-		t.Fatal("policy health should be unhealthy when circuit is open")
-	}
-	if !policyStatus.ServingStale {
-		t.Fatal("policy should report serving stale")
 	}
 }
 
@@ -176,23 +111,26 @@ func TestIntegrationConfigWithCodeOverrides(t *testing.T) {
 		OnRetry: func(_ int, _ error) { hookCalled.Store(true) },
 	}
 
-	// GetPolicy from config, adding code-level overrides: clock, hooks, dependency.
+	// GetPolicy from config, adding code-level overrides: clock, hooks,
+	// dependency.
 	p := GetPolicy[string](reg, "notification-api",
 		WithClock(clk),
-		WithHooks(hooks),
+		WithHooks(&hooks),
 		DependsOn(child),
 	)
 
 	// The policy should work with both config-derived and code-level options.
 	attempt := 0
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		attempt++
-		if attempt < 2 {
-			return "", errors.New("transient")
-		}
-		return "config-override-success", nil
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			attempt++
+			if attempt < 2 {
+				return "", errors.New("transient")
+			}
+			return "config-override-success", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -203,13 +141,18 @@ func TestIntegrationConfigWithCodeOverrides(t *testing.T) {
 		t.Fatal("OnRetry hook should have been called from code override")
 	}
 
-	// Verify DependsOn is wired — health status should list the child dependency.
+	// Verify DependsOn is wired — health status should list the child
+	// dependency.
 	status := p.HealthStatus()
 	if len(status.Dependencies) == 0 {
 		t.Fatal("expected at least one dependency in health status")
 	}
 	if status.Dependencies[0].Name != "child-service" {
-		t.Fatalf("dependency name = %q, want %q", status.Dependencies[0].Name, "child-service")
+		t.Fatalf(
+			"dependency name = %q, want %q",
+			status.Dependencies[0].Name,
+			"child-service",
+		)
 	}
 }
 
@@ -234,9 +177,12 @@ func TestIntegrationPresetPolicy(t *testing.T) {
 	p := NewPolicy[string]("preset-policy", opts...)
 
 	// Successful call.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "from-preset", nil
-	})
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "from-preset", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -258,14 +204,20 @@ func TestIntegrationPresetPolicy(t *testing.T) {
 	// Verify the fallback override works: fail enough to exhaust retries +
 	// trigger circuit breaker, then fallback catches.
 	for range 10 {
-		_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("always fail")
-		})
+		_, _ = p.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "", errors.New("always fail")
+			},
+		)
 	}
 
-	result, err = p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("still failing")
-	})
+	result, err = p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", errors.New("still failing")
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() with fallback error = %v, want nil", err)
 	}
@@ -294,7 +246,6 @@ func TestIntegrationDoConvenience(t *testing.T) {
 		WithRetry(5, ConstantBackoff(10*time.Millisecond)),
 		WithTimeout(10*time.Second),
 	)
-
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -334,13 +285,17 @@ func TestIntegrationConcurrentPolicy(t *testing.T) {
 	for i := range numGoroutines {
 		go func(n int) {
 			defer wg.Done()
-			result, err := p.Do(context.Background(), func(_ context.Context) (int, error) {
-				// Alternate between success and failure to exercise both paths.
-				if n%3 == 0 {
-					return 0, errors.New("simulated failure")
-				}
-				return n, nil
-			})
+			result, err := p.Do(
+				context.Background(),
+				func(_ context.Context) (int, error) {
+					// Alternate between success and failure to exercise both
+					// paths.
+					if n%3 == 0 {
+						return 0, errors.New("simulated failure")
+					}
+					return n, nil
+				},
+			)
 			if err != nil {
 				failures.Add(1)
 			} else {
@@ -362,7 +317,11 @@ func TestIntegrationConcurrentPolicy(t *testing.T) {
 		t.Fatal("expected at least some successes")
 	}
 
-	t.Logf("concurrent results: %d successes, %d failures", successes.Load(), failures.Load())
+	t.Logf(
+		"concurrent results: %d successes, %d failures",
+		successes.Load(),
+		failures.Load(),
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -400,9 +359,12 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 
 	// Drive the child's circuit breaker to open.
 	for range 2 {
-		_, _ = child.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("child failure")
-		})
+		_, _ = child.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "", errors.New("child failure")
+			},
+		)
 	}
 
 	// Verify child is unhealthy.
@@ -411,13 +373,19 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 		t.Fatal("child should be unhealthy (circuit open)")
 	}
 	if childHealth.Criticality != CriticalityCritical {
-		t.Fatalf("child criticality = %v, want CriticalityCritical", childHealth.Criticality)
+		t.Fatalf(
+			"child criticality = %v, want CriticalityCritical",
+			childHealth.Criticality,
+		)
 	}
 
 	// Verify parent health reports degraded due to dependency.
 	parentHealth = parent.HealthStatus()
 	if parentHealth.Criticality < CriticalityDegraded {
-		t.Fatalf("parent criticality = %v, want >= CriticalityDegraded", parentHealth.Criticality)
+		t.Fatalf(
+			"parent criticality = %v, want >= CriticalityDegraded",
+			parentHealth.Criticality,
+		)
 	}
 	if len(parentHealth.Dependencies) == 0 {
 		t.Fatal("parent should have dependencies in health status")
@@ -427,7 +395,8 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 		t.Fatal("dependency health should report unhealthy")
 	}
 
-	// Verify registry-level readiness reports not ready (child is critical+unhealthy).
+	// Verify registry-level readiness reports not ready (child is
+	// critical+unhealthy).
 	readiness = reg.CheckReadiness()
 	if readiness.Ready {
 		t.Fatal("registry should report not ready when child circuit is open")
@@ -450,15 +419,21 @@ func TestIntegrationPermanentErrorStopsRetry(t *testing.T) {
 
 	attempt := 0
 	sentinel := errors.New("fatal database error")
-	_, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		attempt++
-		// Return a permanent error on the first attempt.
-		return "", Permanent(sentinel)
-	})
+	_, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			attempt++
+			// Return a permanent error on the first attempt.
+			return "", Permanent(sentinel)
+		},
+	)
 
 	// Should have been called exactly once — permanent stops retry immediately.
 	if attempt != 1 {
-		t.Fatalf("expected 1 attempt, got %d (permanent should stop retry)", attempt)
+		t.Fatalf(
+			"expected 1 attempt, got %d (permanent should stop retry)",
+			attempt,
+		)
 	}
 
 	// The error should be the permanent-wrapped sentinel.
@@ -496,9 +471,12 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 
 	// Exhaust retries several times to drive circuit to open.
 	for range 3 {
-		result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("always fail")
-		})
+		result, err := p.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "", errors.New("always fail")
+			},
+		)
 		if err != nil {
 			t.Fatalf("Do() error = %v, want nil (fallback should catch)", err)
 		}
@@ -508,15 +486,22 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 	}
 
 	// At this point, the circuit breaker should be open (3 failures recorded
-	// because retry exhausts 2 attempts per Do, and the CB sees the final failure
+	// because retry exhausts 2 attempts per Do, and the CB sees the final
+	// failure
 	// from the retry layer).
 	// The next call should get ErrCircuitOpen caught by fallback.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		t.Fatal("fn should not be called when circuit is open")
-		return "unreachable", nil
-	})
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			t.Fatal("fn should not be called when circuit is open")
+			return "unreachable", nil
+		},
+	)
 	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (fallback should catch circuit open)", err)
+		t.Fatalf(
+			"Do() error = %v, want nil (fallback should catch circuit open)",
+			err,
+		)
 	}
 	if result != "fallback-value" {
 		t.Fatalf("Do() = %q, want %q", result, "fallback-value")
@@ -526,10 +511,14 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(fallbackErrors) < 2 {
-		t.Fatalf("expected at least 2 fallback calls, got %d", len(fallbackErrors))
+		t.Fatalf(
+			"expected at least 2 fallback calls, got %d",
+			len(fallbackErrors),
+		)
 	}
 
-	// At least one should be ErrRetriesExhausted and at least one ErrCircuitOpen.
+	// At least one should be ErrRetriesExhausted and at least one
+	// ErrCircuitOpen.
 	var gotRetries, gotCircuit bool
 	for _, e := range fallbackErrors {
 		if errors.Is(e, ErrRetriesExhausted) {
@@ -596,15 +585,21 @@ func TestIntegrationReadinessHTTPEndpoint(t *testing.T) {
 
 	// Step 2: Drive the unhealthy service's circuit breaker to open.
 	for range 2 {
-		_, _ = unhealthy.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("failure")
-		})
+		_, _ = unhealthy.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "", errors.New("failure")
+			},
+		)
 	}
 
 	// Keep the healthy service healthy by making a successful call.
-	_, _ = healthy.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "ok", nil
-	})
+	_, _ = healthy.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "ok", nil
+		},
+	)
 
 	// Step 3: Hit the endpoint again — should return 503.
 	resp2, err := http.Get(srv.URL)
@@ -614,7 +609,11 @@ func TestIntegrationReadinessHTTPEndpoint(t *testing.T) {
 	defer resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", resp2.StatusCode, http.StatusServiceUnavailable)
+		t.Fatalf(
+			"status = %d, want %d",
+			resp2.StatusCode,
+			http.StatusServiceUnavailable,
+		)
 	}
 
 	body2, _ := io.ReadAll(resp2.Body)
@@ -634,6 +633,8 @@ func TestIntegrationReadinessHTTPEndpoint(t *testing.T) {
 		}
 	}
 	if !foundUnhealthy {
-		t.Fatal("expected unhealthy-service to appear as unhealthy in JSON body")
+		t.Fatal(
+			"expected unhealthy-service to appear as unhealthy in JSON body",
+		)
 	}
 }

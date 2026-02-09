@@ -1,9 +1,11 @@
-package r8e
+package r8e_test
 
 import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/byte4ever/r8e"
 )
 
 // ---------------------------------------------------------------------------
@@ -11,9 +13,9 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackSuccessPassesThrough(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoFallback[string](
+	result, err := r8e.DoFallback[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
@@ -21,7 +23,6 @@ func TestDoFallbackSuccessPassesThrough(t *testing.T) {
 		"fallback-value",
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoFallback() error = %v, want nil", err)
 	}
@@ -35,9 +36,9 @@ func TestDoFallbackSuccessPassesThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackErrorTriggersStaticFallback(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoFallback[string](
+	result, err := r8e.DoFallback[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "", errors.New("boom")
@@ -45,7 +46,6 @@ func TestDoFallbackErrorTriggersStaticFallback(t *testing.T) {
 		"safe-default",
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoFallback() error = %v, want nil", err)
 	}
@@ -59,9 +59,9 @@ func TestDoFallbackErrorTriggersStaticFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncSuccessPassesThrough(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoFallbackFunc[string](
+	result, err := r8e.DoFallbackFunc[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
@@ -71,7 +71,6 @@ func TestDoFallbackFuncSuccessPassesThrough(t *testing.T) {
 		},
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoFallbackFunc() error = %v, want nil", err)
 	}
@@ -85,9 +84,9 @@ func TestDoFallbackFuncSuccessPassesThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncErrorTriggersFunctionFallback(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoFallbackFunc[string](
+	result, err := r8e.DoFallbackFunc[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "", errors.New("boom")
@@ -97,12 +96,15 @@ func TestDoFallbackFuncErrorTriggersFunctionFallback(t *testing.T) {
 		},
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoFallbackFunc() error = %v, want nil", err)
 	}
 	if result != "recovered-from-boom" {
-		t.Fatalf("DoFallbackFunc() = %q, want %q", result, "recovered-from-boom")
+		t.Fatalf(
+			"DoFallbackFunc() = %q, want %q",
+			result,
+			"recovered-from-boom",
+		)
 	}
 }
 
@@ -111,10 +113,10 @@ func TestDoFallbackFuncErrorTriggersFunctionFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncFallbackCanReturnError(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	fallbackErr := errors.New("fallback also failed")
 
-	result, err := DoFallbackFunc[int](
+	result, err := r8e.DoFallbackFunc[int](
 		context.Background(),
 		func(_ context.Context) (int, error) {
 			return 0, errors.New("primary failed")
@@ -140,13 +142,13 @@ func TestDoFallbackFuncFallbackCanReturnError(t *testing.T) {
 func TestDoFallbackOnFallbackUsedHookFires(t *testing.T) {
 	origErr := errors.New("original error")
 	var hookErr error
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnFallbackUsed: func(err error) {
 			hookErr = err
 		},
 	}
 
-	_, _ = DoFallback[string](
+	_, _ = r8e.DoFallback[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "", origErr
@@ -156,7 +158,11 @@ func TestDoFallbackOnFallbackUsedHookFires(t *testing.T) {
 	)
 
 	if !errors.Is(hookErr, origErr) {
-		t.Fatalf("OnFallbackUsed hook received error = %v, want %v", hookErr, origErr)
+		t.Fatalf(
+			"OnFallbackUsed hook received error = %v, want %v",
+			hookErr,
+			origErr,
+		)
 	}
 }
 
@@ -167,13 +173,13 @@ func TestDoFallbackOnFallbackUsedHookFires(t *testing.T) {
 func TestDoFallbackFuncOnFallbackUsedHookFires(t *testing.T) {
 	origErr := errors.New("original error")
 	var hookErr error
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnFallbackUsed: func(err error) {
 			hookErr = err
 		},
 	}
 
-	_, _ = DoFallbackFunc[string](
+	_, _ = r8e.DoFallbackFunc[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "", origErr
@@ -185,7 +191,11 @@ func TestDoFallbackFuncOnFallbackUsedHookFires(t *testing.T) {
 	)
 
 	if !errors.Is(hookErr, origErr) {
-		t.Fatalf("OnFallbackUsed hook received error = %v, want %v", hookErr, origErr)
+		t.Fatalf(
+			"OnFallbackUsed hook received error = %v, want %v",
+			hookErr,
+			origErr,
+		)
 	}
 }
 
@@ -195,13 +205,13 @@ func TestDoFallbackFuncOnFallbackUsedHookFires(t *testing.T) {
 
 func TestDoFallbackHookNotFiredOnSuccess(t *testing.T) {
 	hookCalled := false
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnFallbackUsed: func(_ error) {
 			hookCalled = true
 		},
 	}
 
-	_, err := DoFallback[string](
+	_, err := r8e.DoFallback[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
@@ -209,7 +219,6 @@ func TestDoFallbackHookNotFiredOnSuccess(t *testing.T) {
 		"default",
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoFallback() error = %v, want nil", err)
 	}
@@ -224,13 +233,13 @@ func TestDoFallbackHookNotFiredOnSuccess(t *testing.T) {
 
 func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
 	hookCalled := false
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnFallbackUsed: func(_ error) {
 			hookCalled = true
 		},
 	}
 
-	_, err := DoFallbackFunc[string](
+	_, err := r8e.DoFallbackFunc[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
@@ -240,7 +249,6 @@ func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
 		},
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoFallbackFunc() error = %v, want nil", err)
 	}
@@ -254,10 +262,10 @@ func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
-	hooks := &Hooks{} // all fields nil
+	hooks := &r8e.Hooks{} // all fields nil
 
 	// Success path with nil hooks.
-	_, _ = DoFallback[string](
+	_, _ = r8e.DoFallback[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
@@ -267,7 +275,7 @@ func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
 	)
 
 	// Error path with nil hooks.
-	_, _ = DoFallback[string](
+	_, _ = r8e.DoFallback[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "", errors.New("fail")
@@ -283,10 +291,10 @@ func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncNilHooksDoNotPanic(t *testing.T) {
-	hooks := &Hooks{} // all fields nil
+	hooks := &r8e.Hooks{} // all fields nil
 
 	// Success path with nil hooks.
-	_, _ = DoFallbackFunc[string](
+	_, _ = r8e.DoFallbackFunc[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
@@ -298,7 +306,7 @@ func TestDoFallbackFuncNilHooksDoNotPanic(t *testing.T) {
 	)
 
 	// Error path with nil hooks.
-	_, _ = DoFallbackFunc[string](
+	_, _ = r8e.DoFallbackFunc[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "", errors.New("fail")
@@ -316,11 +324,11 @@ func TestDoFallbackFuncNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func BenchmarkDoFallback(b *testing.B) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	ctx := context.Background()
 
 	for b.Loop() {
-		_, _ = DoFallback[string](
+		_, _ = r8e.DoFallback[string](
 			ctx,
 			func(_ context.Context) (string, error) {
 				return "ok", nil
@@ -332,11 +340,11 @@ func BenchmarkDoFallback(b *testing.B) {
 }
 
 func BenchmarkDoFallbackFunc(b *testing.B) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	ctx := context.Background()
 
 	for b.Loop() {
-		_, _ = DoFallbackFunc[string](
+		_, _ = r8e.DoFallbackFunc[string](
 			ctx,
 			func(_ context.Context) (string, error) {
 				return "ok", nil

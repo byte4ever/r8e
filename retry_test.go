@@ -39,8 +39,8 @@ func (t *testTimer) fire() {
 
 // testClock records timer durations and returns controllable timers.
 type testClock struct {
-	mu       sync.Mutex
-	timers   []*testTimer
+	mu        sync.Mutex
+	timers    []*testTimer
 	durations []time.Duration
 }
 
@@ -48,8 +48,8 @@ func newTestClock() *testClock {
 	return &testClock{}
 }
 
-func (c *testClock) Now() time.Time                        { return time.Now() }
-func (c *testClock) Since(t time.Time) time.Duration       { return time.Since(t) }
+func (c *testClock) Now() time.Time                  { return time.Now() }
+func (c *testClock) Since(t time.Time) time.Duration { return time.Since(t) }
 func (c *testClock) NewTimer(d time.Duration) Timer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -87,8 +87,14 @@ func newImmediateTestClock() *immediateTestClock {
 	return &immediateTestClock{}
 }
 
-func (c *immediateTestClock) Now() time.Time                  { return time.Now() }
-func (c *immediateTestClock) Since(t time.Time) time.Duration { return time.Since(t) }
+func (c *immediateTestClock) Now() time.Time { return time.Now() }
+
+func (c *immediateTestClock) Since(
+	t time.Time,
+) time.Duration {
+	return time.Since(t)
+}
+
 func (c *immediateTestClock) NewTimer(d time.Duration) Timer {
 	c.mu.Lock()
 	c.durations = append(c.durations, d)
@@ -116,15 +122,16 @@ func TestDoRetrySuccessOnFirstAttempt(t *testing.T) {
 
 	result, err := DoRetry[string](
 		context.Background(),
-		3,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoRetry() error = %v, want nil", err)
 	}
@@ -148,8 +155,6 @@ func TestDoRetrySuccessOnThirdAttempt(t *testing.T) {
 
 	result, err := DoRetry[int](
 		context.Background(),
-		5,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (int, error) {
 			attempt++
 			if attempt < 3 {
@@ -157,10 +162,13 @@ func TestDoRetrySuccessOnThirdAttempt(t *testing.T) {
 			}
 			return 42, nil
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 5,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoRetry() error = %v, want nil", err)
 	}
@@ -183,14 +191,16 @@ func TestDoRetryPermanentErrorStopsImmediately(t *testing.T) {
 
 	_, err := DoRetry[string](
 		context.Background(),
-		5,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", Permanent(errors.New("bad request"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 5,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
 	if err == nil {
@@ -201,7 +211,9 @@ func TestDoRetryPermanentErrorStopsImmediately(t *testing.T) {
 	}
 	// Should NOT wrap with ErrRetriesExhausted.
 	if errors.Is(err, ErrRetriesExhausted) {
-		t.Fatal("permanent error should not be wrapped with ErrRetriesExhausted")
+		t.Fatal(
+			"permanent error should not be wrapped with ErrRetriesExhausted",
+		)
 	}
 	if !IsPermanent(err) {
 		t.Fatal("expected permanent error to be detectable")
@@ -219,14 +231,16 @@ func TestDoRetryAllRetriesExhausted(t *testing.T) {
 
 	_, err := DoRetry[string](
 		context.Background(),
-		3,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", Transient(errors.New("still failing"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
 	if err == nil {
@@ -255,15 +269,19 @@ func TestDoRetryMaxDelayCapsBackoff(t *testing.T) {
 
 	_, _ = DoRetry[string](
 		context.Background(),
-		4,
-		ExponentialBackoff(100*time.Millisecond), // delays: 100ms, 200ms, 400ms
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", Transient(errors.New("fail"))
 		},
-		hooks,
-		clk,
-		MaxDelay(150*time.Millisecond),
+		RetryParams{
+			MaxAttempts: 4,
+			Strategy: ExponentialBackoff(
+				100 * time.Millisecond,
+			), // delays: 100ms, 200ms, 400ms
+			Hooks: hooks,
+			Clock: clk,
+			Opts:  []RetryOption{MaxDelay(150 * time.Millisecond)},
+		},
 	)
 
 	durations := clk.getDurations()
@@ -292,22 +310,26 @@ func TestDoRetryPerAttemptTimeout(t *testing.T) {
 
 	result, err := DoRetry[string](
 		context.Background(),
-		3,
-		ConstantBackoff(1*time.Millisecond),
 		func(ctx context.Context) (string, error) {
 			attempt++
 			if attempt < 3 {
-				// Simulate a slow operation that will be cancelled by per-attempt timeout.
+				// Simulate a slow operation that will be cancelled by
+				// per-attempt timeout.
 				<-ctx.Done()
 				return "", ctx.Err()
 			}
 			return "done", nil
 		},
-		hooks,
-		clk,
-		PerAttemptTimeout(10*time.Millisecond),
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+			Opts: []RetryOption{
+				PerAttemptTimeout(10 * time.Millisecond),
+			},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoRetry() error = %v, want nil", err)
 	}
@@ -330,28 +352,35 @@ func TestDoRetryRetryIfPredicateStopsRetry(t *testing.T) {
 
 	_, err := DoRetry[string](
 		context.Background(),
-		5,
-		ConstantBackoff(1*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", errors.New("custom non-retryable")
 		},
-		hooks,
-		clk,
-		RetryIf(func(err error) bool {
-			return false // never retry
-		}),
+		RetryParams{
+			MaxAttempts: 5,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+			Opts: []RetryOption{RetryIf(func(err error) bool {
+				return false // never retry
+			})},
+		},
 	)
 
 	if err == nil {
 		t.Fatal("DoRetry() error = nil, want error")
 	}
 	if attempt != 1 {
-		t.Fatalf("expected 1 attempt when RetryIf returns false, got %d", attempt)
+		t.Fatalf(
+			"expected 1 attempt when RetryIf returns false, got %d",
+			attempt,
+		)
 	}
 	// Should NOT wrap with ErrRetriesExhausted.
 	if errors.Is(err, ErrRetriesExhausted) {
-		t.Fatal("non-retryable error should not be wrapped with ErrRetriesExhausted")
+		t.Fatal(
+			"non-retryable error should not be wrapped with ErrRetriesExhausted",
+		)
 	}
 }
 
@@ -362,8 +391,6 @@ func TestDoRetryRetryIfPredicateAllowsRetry(t *testing.T) {
 
 	result, err := DoRetry[string](
 		context.Background(),
-		5,
-		ConstantBackoff(1*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			if attempt < 3 {
@@ -371,13 +398,16 @@ func TestDoRetryRetryIfPredicateAllowsRetry(t *testing.T) {
 			}
 			return "success", nil
 		},
-		hooks,
-		clk,
-		RetryIf(func(err error) bool {
-			return true // always retry
-		}),
+		RetryParams{
+			MaxAttempts: 5,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+			Opts: []RetryOption{RetryIf(func(err error) bool {
+				return true // always retry
+			})},
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoRetry() error = %v, want nil", err)
 	}
@@ -406,14 +436,16 @@ func TestDoRetryContextCancellationDuringSleep(t *testing.T) {
 	go func() {
 		_, retErr = DoRetry[string](
 			ctx,
-			5,
-			ConstantBackoff(time.Hour), // very long backoff
 			func(_ context.Context) (string, error) {
 				attempt++
 				return "", Transient(errors.New("fail"))
 			},
-			hooks,
-			clk,
+			RetryParams{
+				MaxAttempts: 5,
+				Strategy:    ConstantBackoff(time.Hour), // very long backoff
+				Hooks:       hooks,
+				Clock:       clk,
+			},
 		)
 		close(done)
 	}()
@@ -454,20 +486,23 @@ func TestDoRetryZeroMaxAttemptsExecutesOnce(t *testing.T) {
 
 	_, err := DoRetry[string](
 		context.Background(),
-		0,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", Transient(errors.New("fail"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 0,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
 	if attempt != 1 {
 		t.Fatalf("expected 1 attempt with maxAttempts=0, got %d", attempt)
 	}
-	// With only one attempt and failure, no retries => should wrap with ErrRetriesExhausted.
+	// With only one attempt and failure, no retries => should wrap with
+	// ErrRetriesExhausted.
 	if !errors.Is(err, ErrRetriesExhausted) {
 		t.Fatalf("expected ErrRetriesExhausted, got %v", err)
 	}
@@ -480,14 +515,16 @@ func TestDoRetryOneMaxAttemptsExecutesOnce(t *testing.T) {
 
 	_, err := DoRetry[string](
 		context.Background(),
-		1,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", Transient(errors.New("fail"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 1,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
 	if attempt != 1 {
@@ -504,15 +541,16 @@ func TestDoRetryZeroMaxAttemptsSucceeds(t *testing.T) {
 
 	result, err := DoRetry[string](
 		context.Background(),
-		0,
-		ConstantBackoff(100*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 0,
+			Strategy:    ConstantBackoff(100 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoRetry() error = %v, want nil", err)
 	}
@@ -543,23 +581,28 @@ func TestDoRetryOnRetryHookCalledWithCorrectArgs(t *testing.T) {
 
 	_, _ = DoRetry[string](
 		context.Background(),
-		3,
-		ConstantBackoff(1*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			return "", Transient(errors.New("fail"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
-	// 3 attempts, but OnRetry should be called for attempts 1 and 2 (not after the last).
-	// Wait: the spec says "emit hooks.emitRetry(attempt, err) after each failed attempt (before sleeping)"
+	// 3 attempts, but OnRetry should be called for attempts 1 and 2 (not after
+	// the last). Wait: the spec says "emit hooks.emitRetry(attempt, err) after
+	// each failed attempt (before sleeping)"
 	// For 3 attempts, we have failures on attempt 0, 1, 2.
-	// After attempt 0 and 1, we retry (emit hook). After attempt 2, we're exhausted (no hook needed,
-	// but per spec it says "after each failed attempt before sleeping" - on last attempt there's no sleep).
-	// Actually, let me re-read: hooks are emitted after each failed attempt before sleeping.
-	// Attempt 0 fails -> emit hook(1, err) -> sleep -> attempt 1 fails -> emit hook(2, err) -> sleep -> attempt 2 fails -> exhausted.
+	// After attempt 0 and 1, we retry (emit hook). After attempt 2, we're
+	// exhausted (no hook needed, but per spec it says "after each failed
+	// attempt before sleeping" - on last attempt there's no sleep). Actually,
+	// let me re-read: hooks are emitted after each failed attempt before
+	// sleeping. Attempt 0 fails -> emit hook(1, err) -> sleep -> attempt 1
+	// fails -> emit hook(2, err) -> sleep -> attempt 2 fails -> exhausted.
 	// So 2 hook calls for 3 attempts.
 	if len(hookCalls) != 2 {
 		t.Fatalf("expected 2 OnRetry hook calls, got %d", len(hookCalls))
@@ -584,8 +627,6 @@ func TestDoRetryUnclassifiedErrorsAreRetried(t *testing.T) {
 
 	result, err := DoRetry[string](
 		context.Background(),
-		3,
-		ConstantBackoff(1*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			if attempt < 3 {
@@ -593,10 +634,13 @@ func TestDoRetryUnclassifiedErrorsAreRetried(t *testing.T) {
 			}
 			return "recovered", nil
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
-
 	if err != nil {
 		t.Fatalf("DoRetry() error = %v, want nil", err)
 	}
@@ -650,8 +694,6 @@ func TestDoRetryExhaustedErrorWrapsLastError(t *testing.T) {
 
 	_, err := DoRetry[string](
 		context.Background(),
-		2,
-		ConstantBackoff(1*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			attempt++
 			if attempt == 1 {
@@ -659,8 +701,12 @@ func TestDoRetryExhaustedErrorWrapsLastError(t *testing.T) {
 			}
 			return "", Transient(sentinel)
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 2,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
 	if !errors.Is(err, ErrRetriesExhausted) {
@@ -686,13 +732,15 @@ func TestDoRetryTimerStoppedOnCancel(t *testing.T) {
 	go func() {
 		_, _ = DoRetry[string](
 			ctx,
-			5,
-			ConstantBackoff(time.Hour),
 			func(_ context.Context) (string, error) {
 				return "", Transient(errors.New("fail"))
 			},
-			hooks,
-			clk,
+			RetryParams{
+				MaxAttempts: 5,
+				Strategy:    ConstantBackoff(time.Hour),
+				Hooks:       hooks,
+				Clock:       clk,
+			},
 		)
 		close(done)
 	}()
@@ -739,23 +787,35 @@ func TestDoRetryBackoffStrategyReceivesCorrectAttempts(t *testing.T) {
 
 	_, _ = DoRetry[string](
 		context.Background(),
-		4,
-		strategy,
 		func(_ context.Context) (string, error) {
 			return "", Transient(errors.New("fail"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 4,
+			Strategy:    strategy,
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 
-	// 4 attempts, backoff called between attempts (3 times: after attempt 0, 1, 2).
+	// 4 attempts, backoff called between attempts (3 times: after attempt 0, 1,
+	// 2).
 	want := []int{0, 1, 2}
 	if len(receivedAttempts) != len(want) {
-		t.Fatalf("backoff called %d times, want %d", len(receivedAttempts), len(want))
+		t.Fatalf(
+			"backoff called %d times, want %d",
+			len(receivedAttempts),
+			len(want),
+		)
 	}
 	for i, w := range want {
 		if receivedAttempts[i] != w {
-			t.Fatalf("backoff call %d: attempt = %d, want %d", i, receivedAttempts[i], w)
+			t.Fatalf(
+				"backoff call %d: attempt = %d, want %d",
+				i,
+				receivedAttempts[i],
+				w,
+			)
 		}
 	}
 }
@@ -770,13 +830,15 @@ func TestDoRetryNilHooksDoNotPanic(t *testing.T) {
 
 	_, _ = DoRetry[string](
 		context.Background(),
-		3,
-		ConstantBackoff(1*time.Millisecond),
 		func(_ context.Context) (string, error) {
 			return "", Transient(errors.New("fail"))
 		},
-		hooks,
-		clk,
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(1 * time.Millisecond),
+			Hooks:       hooks,
+			Clock:       clk,
+		},
 	)
 	// If we get here without panicking, the test passes.
 }
@@ -794,13 +856,15 @@ func BenchmarkRetry(b *testing.B) {
 	for b.Loop() {
 		_, _ = DoRetry[string](
 			ctx,
-			3,
-			strategy,
 			func(_ context.Context) (string, error) {
 				return "ok", nil
 			},
-			hooks,
-			clk,
+			RetryParams{
+				MaxAttempts: 3,
+				Strategy:    strategy,
+				Hooks:       hooks,
+				Clock:       clk,
+			},
 		)
 	}
 }

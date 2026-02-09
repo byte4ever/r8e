@@ -7,12 +7,13 @@ import "sync/atomic"
 // Pattern: Bulkhead — semaphore-based concurrency limiter prevents
 // resource exhaustion; lock-free via atomic CAS for slot acquisition.
 type Bulkhead struct {
+	hooks         *Hooks
 	maxConcurrent int64
 	current       atomic.Int64
-	hooks         *Hooks
 }
 
-// NewBulkhead creates a bulkhead that allows at most maxConcurrent simultaneous calls.
+// NewBulkhead creates a bulkhead that allows at most maxConcurrent simultaneous
+// calls.
 func NewBulkhead(maxConcurrent int, hooks *Hooks) *Bulkhead {
 	return &Bulkhead{
 		maxConcurrent: int64(maxConcurrent),
@@ -28,6 +29,7 @@ func (b *Bulkhead) Acquire() error {
 			b.hooks.emitBulkheadFull()
 			return ErrBulkheadFull
 		}
+
 		if b.current.CompareAndSwap(cur, cur+1) {
 			b.hooks.emitBulkheadAcquired()
 			return nil

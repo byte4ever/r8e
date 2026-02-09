@@ -26,17 +26,15 @@ func StandardHTTPClient() []any {
 func AggressiveHTTPClient() []any {
 	return []any{
 		WithTimeout(2 * time.Second),
-		WithRetry(5, ExponentialBackoff(50*time.Millisecond), MaxDelay(5*time.Second)),
+		WithRetry(
+			5,
+			ExponentialBackoff(50*time.Millisecond),
+			MaxDelay(5*time.Second),
+		),
 		WithCircuitBreaker(
 			FailureThreshold(3),
 			RecoveryTimeout(15*time.Second),
 		),
 		WithBulkhead(20),
 	}
-}
-
-// CachedClient returns options combining [StandardHTTPClient] with a 5-minute
-// stale cache, suitable for endpoints whose data can tolerate brief staleness.
-func CachedClient() []any {
-	return append(StandardHTTPClient(), WithStaleCache(5*time.Minute))
 }

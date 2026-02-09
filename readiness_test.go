@@ -2,12 +2,13 @@ package r8e
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // TestReadinessHandlerAllHealthy verifies that when all registered policies

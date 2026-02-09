@@ -1,0 +1,7 @@
+mode: set
+github.com/byte4ever/r8e/ristretto/ristretto.go:32.61,39.16 2 1
+github.com/byte4ever/r8e/ristretto/ristretto.go:39.16,40.64 1 0
+github.com/byte4ever/r8e/ristretto/ristretto.go:43.2,43.37 1 1
+github.com/byte4ever/r8e/ristretto/ristretto.go:49.46,51.2 1 1
+github.com/byte4ever/r8e/ristretto/ristretto.go:54.64,56.2 1 1
+github.com/byte4ever/r8e/ristretto/ristretto.go:59.39,61.2 1 1

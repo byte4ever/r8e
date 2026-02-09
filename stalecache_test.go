@@ -1,4 +1,4 @@
-package r8e
+package r8e_test
 
 import (
 	"context"
@@ -7,119 +7,107 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/byte4ever/r8e"
 )
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// staleClock is a fake clock that lets tests control time.
-type staleClock struct {
-	now    time.Time
-	offset time.Duration
+// testCache is a simple in-memory cache for testing.
+type testCache[K comparable, V any] struct {
+	mu   sync.RWMutex
+	data map[K]V
 }
 
-func newStaleClock() *staleClock {
-	return &staleClock{now: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)}
+func newTestCache[K comparable, V any]() *testCache[K, V] {
+	return &testCache[K, V]{data: make(map[K]V)}
 }
 
-func (c *staleClock) Now() time.Time                { return c.now.Add(c.offset) }
-func (c *staleClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
-func (c *staleClock) NewTimer(d time.Duration) Timer { return &fakeTimer{} }
+func (c *testCache[K, V]) Get(key K) (V, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
-func (c *staleClock) advance(d time.Duration) { c.offset += d }
+	v, ok := c.data[key]
+
+	return v, ok
+}
+
+func (c *testCache[K, V]) Set(key K, value V, _ time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.data[key] = value
+}
+
+func (c *testCache[K, V]) Delete(key K) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.data, key)
+}
 
 // ---------------------------------------------------------------------------
-// First call succeeds -> cached, ServingStale=false
+// First call succeeds -> cached
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheFirstCallSucceedsCachesResult(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, &Hooks{})
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
 
-	result, err := sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "hello", nil
-	})
-
+	result, err := sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, key string) (string, error) {
+			return "hello-" + key, nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
-	if result != "hello" {
-		t.Fatalf("Do() = %q, want %q", result, "hello")
+
+	if result != "hello-key1" {
+		t.Fatalf("Do() = %q, want %q", result, "hello-key1")
 	}
-	if sc.ServingStale() {
-		t.Fatal("ServingStale() = true after success, want false")
-	}
-	if sc.StaleAge() != 0 {
-		t.Fatalf("StaleAge() = %v, want 0", sc.StaleAge())
+
+	// Verify cache was populated.
+	if v, ok := cache.Get("key1"); !ok || v != "hello-key1" {
+		t.Fatalf("cache.Get(key1) = %q, %v; want %q, true", v, ok, "hello-key1")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Second call fails, cache within TTL -> returns cached value
+// Second call fails, cache available -> returns cached value
 // ---------------------------------------------------------------------------
 
-func TestStaleCacheFailWithinTTLReturnsCachedValue(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, &Hooks{})
+func TestStaleCacheFailWithCacheReturnsCachedValue(t *testing.T) {
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
 
 	// First call succeeds, populating cache.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "cached-value", nil
-	})
-
-	// Advance time but stay within TTL.
-	clk.advance(30 * time.Second)
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "cached-value", nil
+		},
+	)
 
 	// Second call fails.
-	result, err := sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("temporary failure")
-	})
-
+	result, err := sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("temporary failure")
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil (stale served)", err)
 	}
+
 	if result != "cached-value" {
 		t.Fatalf("Do() = %q, want %q", result, "cached-value")
-	}
-	if !sc.ServingStale() {
-		t.Fatal("ServingStale() = false, want true")
-	}
-	if sc.StaleAge() != 30*time.Second {
-		t.Fatalf("StaleAge() = %v, want %v", sc.StaleAge(), 30*time.Second)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Cache expired -> returns error
-// ---------------------------------------------------------------------------
-
-func TestStaleCacheExpiredReturnsError(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, &Hooks{})
-
-	// First call succeeds.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "cached-value", nil
-	})
-
-	// Advance beyond TTL.
-	clk.advance(2 * time.Minute)
-
-	sentinel := errors.New("failure after expiry")
-
-	result, err := sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", sentinel
-	})
-
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
-	if result != "" {
-		t.Fatalf("Do() = %q, want zero value", result)
-	}
-	if sc.ServingStale() {
-		t.Fatal("ServingStale() = true after expired cache, want false")
 	}
 }
 
@@ -128,23 +116,98 @@ func TestStaleCacheExpiredReturnsError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheFirstCallFailsNoCacheReturnsError(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[int](time.Minute, clk, &Hooks{})
+	cache := newTestCache[string, int]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
 
 	sentinel := errors.New("first call failure")
 
-	result, err := sc.Do(context.Background(), func(_ context.Context) (int, error) {
-		return 0, sentinel
-	})
+	result, err := sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (int, error) {
+			return 0, sentinel
+		},
+	)
 
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Do() error = %v, want %v", err, sentinel)
 	}
+
 	if result != 0 {
 		t.Fatalf("Do() = %d, want 0", result)
 	}
-	if sc.ServingStale() {
-		t.Fatal("ServingStale() = true with no cache, want false")
+}
+
+// ---------------------------------------------------------------------------
+// Different keys have separate cache entries
+// ---------------------------------------------------------------------------
+
+func TestStaleCacheDifferentKeysAreSeparate(t *testing.T) {
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
+
+	// Populate cache for key1.
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "value1", nil
+		},
+	)
+
+	// Populate cache for key2.
+	_, _ = sc.Do(
+		context.Background(),
+		"key2",
+		func(_ context.Context, _ string) (string, error) {
+			return "value2", nil
+		},
+	)
+
+	// Fail for key1 — should get value1.
+	result, err := sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("fail")
+		},
+	)
+	if err != nil {
+		t.Fatalf("Do(key1) error = %v, want nil", err)
+	}
+
+	if result != "value1" {
+		t.Fatalf("Do(key1) = %q, want %q", result, "value1")
+	}
+
+	// Fail for key2 — should get value2.
+	result, err = sc.Do(
+		context.Background(),
+		"key2",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("fail")
+		},
+	)
+	if err != nil {
+		t.Fatalf("Do(key2) error = %v, want nil", err)
+	}
+
+	if result != "value2" {
+		t.Fatalf("Do(key2) = %q, want %q", result, "value2")
+	}
+
+	// Fail for key3 — no cache entry, error propagates.
+	sentinel := errors.New("no cache")
+	_, err = sc.Do(
+		context.Background(),
+		"key3",
+		func(_ context.Context, _ string) (string, error) {
+			return "", sentinel
+		},
+	)
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Do(key3) error = %v, want %v", err, sentinel)
 	}
 }
 
@@ -153,34 +216,42 @@ func TestStaleCacheFirstCallFailsNoCacheReturnsError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheConcurrentAccess(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[int](time.Minute, clk, &Hooks{})
+	cache := newTestCache[string, int]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
 
 	// Seed the cache.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (int, error) {
-		return 42, nil
-	})
-
-	clk.advance(10 * time.Second)
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (int, error) {
+			return 42, nil
+		},
+	)
 
 	const goroutines = 100
+
 	var wg sync.WaitGroup
+
 	wg.Add(goroutines)
 
 	for range goroutines {
 		go func() {
 			defer wg.Done()
 
-			// Some calls succeed, some fail — all should be safe under race detector.
-			result, err := sc.Do(context.Background(), func(_ context.Context) (int, error) {
-				return 0, errors.New("fail")
-			})
-
-			// Should serve stale since cache is within TTL.
+			// All calls fail — should serve stale value 42.
+			result, err := sc.Do(
+				context.Background(),
+				"key1",
+				func(_ context.Context, _ string) (int, error) {
+					return 0, errors.New("fail")
+				},
+			)
 			if err != nil {
 				t.Errorf("Do() error = %v, want nil (stale served)", err)
+
 				return
 			}
+
 			if result != 42 {
 				t.Errorf("Do() = %d, want 42", result)
 			}
@@ -195,57 +266,76 @@ func TestStaleCacheConcurrentAccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheHookOnCacheRefreshed(t *testing.T) {
-	var refreshedCount atomic.Int64
-	hooks := &Hooks{
-		OnCacheRefreshed: func() { refreshedCount.Add(1) },
-	}
+	var refreshedKeys []string
 
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, hooks)
+	var mu sync.Mutex
 
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "ok", nil
-	})
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute,
+		r8e.OnCacheRefreshed[string, string](func(key string) {
+			mu.Lock()
+			refreshedKeys = append(refreshedKeys, key)
+			mu.Unlock()
+		}),
+	)
 
-	if got := refreshedCount.Load(); got != 1 {
-		t.Fatalf("OnCacheRefreshed called %d times, want 1", got)
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "ok", nil
+		},
+	)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(refreshedKeys) != 1 || refreshedKeys[0] != "key1" {
+		t.Fatalf("OnCacheRefreshed keys = %v, want [key1]", refreshedKeys)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Hook emission: OnStaleServed(age) on stale serve
+// Hook emission: OnStaleServed on stale serve
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheHookOnStaleServed(t *testing.T) {
-	var servedAge time.Duration
-	var servedCount atomic.Int64
-	hooks := &Hooks{
-		OnStaleServed: func(age time.Duration) {
-			servedAge = age
-			servedCount.Add(1)
-		},
-	}
+	var servedKeys []string
 
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, hooks)
+	var mu sync.Mutex
+
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute,
+		r8e.OnStaleServed[string, string](func(key string) {
+			mu.Lock()
+			servedKeys = append(servedKeys, key)
+			mu.Unlock()
+		}),
+	)
 
 	// Seed cache.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "value", nil
-	})
-
-	clk.advance(20 * time.Second)
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "value", nil
+		},
+	)
 
 	// Fail -> serve stale.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("fail")
-	})
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("fail")
+		},
+	)
 
-	if got := servedCount.Load(); got != 1 {
-		t.Fatalf("OnStaleServed called %d times, want 1", got)
-	}
-	if servedAge != 20*time.Second {
-		t.Fatalf("OnStaleServed age = %v, want %v", servedAge, 20*time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(servedKeys) != 1 || servedKeys[0] != "key1" {
+		t.Fatalf("OnStaleServed keys = %v, want [key1]", servedKeys)
 	}
 }
 
@@ -255,16 +345,23 @@ func TestStaleCacheHookOnStaleServed(t *testing.T) {
 
 func TestStaleCacheHookOnStaleServedNotFiredOnSuccess(t *testing.T) {
 	var servedCount atomic.Int64
-	hooks := &Hooks{
-		OnStaleServed: func(_ time.Duration) { servedCount.Add(1) },
-	}
 
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, hooks)
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(
+		cache,
+		time.Minute,
+		r8e.OnStaleServed[string, string](
+			func(_ string) { servedCount.Add(1) },
+		),
+	)
 
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "ok", nil
-	})
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "ok", nil
+		},
+	)
 
 	if got := servedCount.Load(); got != 0 {
 		t.Fatalf("OnStaleServed called %d times on success, want 0", got)
@@ -277,16 +374,23 @@ func TestStaleCacheHookOnStaleServedNotFiredOnSuccess(t *testing.T) {
 
 func TestStaleCacheHookOnCacheRefreshedNotFiredOnFailure(t *testing.T) {
 	var refreshedCount atomic.Int64
-	hooks := &Hooks{
-		OnCacheRefreshed: func() { refreshedCount.Add(1) },
-	}
 
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, hooks)
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(
+		cache,
+		time.Minute,
+		r8e.OnCacheRefreshed[string, string](
+			func(_ string) { refreshedCount.Add(1) },
+		),
+	)
 
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("fail")
-	})
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("fail")
+		},
+	)
 
 	if got := refreshedCount.Load(); got != 0 {
 		t.Fatalf("OnCacheRefreshed called %d times on failure, want 0", got)
@@ -298,129 +402,99 @@ func TestStaleCacheHookOnCacheRefreshedNotFiredOnFailure(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheNilHooksDoNotPanic(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, &Hooks{})
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute) // No hooks set.
 
-	// Success path (emits OnCacheRefreshed with nil hook).
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "ok", nil
-	})
+	// Success path.
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "ok", nil
+		},
+	)
 
-	clk.advance(10 * time.Second)
-
-	// Failure path with stale serve (emits OnStaleServed with nil hook).
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("fail")
-	})
+	// Failure path with stale serve.
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("fail")
+		},
+	)
 	// If we get here without panicking, the test passes.
 }
 
 // ---------------------------------------------------------------------------
-// Success after stale serve refreshes cache and clears stale flag
+// Success after stale serve refreshes cache
 // ---------------------------------------------------------------------------
 
 func TestStaleCacheSuccessAfterStaleRefreshesCache(t *testing.T) {
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Minute, clk, &Hooks{})
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
 
 	// Seed cache.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "old", nil
-	})
-
-	clk.advance(10 * time.Second)
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "old", nil
+		},
+	)
 
 	// Fail -> serve stale.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("fail")
-	})
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "", errors.New("fail")
+		},
+	)
 
-	if !sc.ServingStale() {
-		t.Fatal("ServingStale() = false, want true")
-	}
-
-	// Succeed again -> should refresh cache and clear stale flag.
-	result, err := sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "new", nil
-	})
-
+	// Succeed again -> should refresh cache.
+	result, err := sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "new", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
+
 	if result != "new" {
 		t.Fatalf("Do() = %q, want %q", result, "new")
 	}
-	if sc.ServingStale() {
-		t.Fatal("ServingStale() = true after refresh, want false")
-	}
-	if sc.StaleAge() != 0 {
-		t.Fatalf("StaleAge() = %v, want 0 after refresh", sc.StaleAge())
-	}
-}
 
-// ---------------------------------------------------------------------------
-// TTL boundary: exactly at TTL should still be served
-// ---------------------------------------------------------------------------
-
-func TestStaleCacheTTLBoundaryExactlyAtTTL(t *testing.T) {
-	clk := newStaleClock()
-	ttl := time.Minute
-	sc := NewStaleCache[string](ttl, clk, &Hooks{})
-
-	// Seed cache.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "boundary", nil
-	})
-
-	// Advance exactly to TTL.
-	clk.advance(ttl)
-
-	// Fail -> cache age equals TTL, should still serve.
-	result, err := sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("fail")
-	})
-
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (stale at exact TTL boundary)", err)
-	}
-	if result != "boundary" {
-		t.Fatalf("Do() = %q, want %q", result, "boundary")
-	}
-	if !sc.ServingStale() {
-		t.Fatal("ServingStale() = false, want true at TTL boundary")
+	// Verify cache was updated.
+	if v, ok := cache.Get("key1"); !ok || v != "new" {
+		t.Fatalf("cache.Get(key1) = %q, %v; want %q, true", v, ok, "new")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// TTL boundary: one nanosecond past TTL should expire
+// Key is passed through to the function
 // ---------------------------------------------------------------------------
 
-func TestStaleCacheTTLBoundaryJustPastTTL(t *testing.T) {
-	clk := newStaleClock()
-	ttl := time.Minute
-	sc := NewStaleCache[string](ttl, clk, &Hooks{})
+func TestStaleCacheKeyPassedToFunction(t *testing.T) {
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Minute)
 
-	// Seed cache.
-	_, _ = sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "expired", nil
-	})
+	var receivedKey string
 
-	// Advance one nanosecond past TTL.
-	clk.advance(ttl + time.Nanosecond)
+	_, _ = sc.Do(
+		context.Background(),
+		"my-key",
+		func(_ context.Context, key string) (string, error) {
+			receivedKey = key
 
-	sentinel := errors.New("fail")
-	result, err := sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", sentinel
-	})
+			return "ok", nil
+		},
+	)
 
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
-	if result != "" {
-		t.Fatalf("Do() = %q, want zero value", result)
-	}
-	if sc.ServingStale() {
-		t.Fatal("ServingStale() = true past TTL, want false")
+	if receivedKey != "my-key" {
+		t.Fatalf("fn received key = %q, want %q", receivedKey, "my-key")
 	}
 }
 
@@ -429,21 +503,27 @@ func TestStaleCacheTTLBoundaryJustPastTTL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func BenchmarkStaleCacheHit(b *testing.B) {
-	clk := newStaleClock()
-	sc := NewStaleCache[string](time.Hour, clk, &Hooks{})
+	cache := newTestCache[string, string]()
+	sc := r8e.NewStaleCache(cache, time.Hour)
 
 	// Seed the cache.
-	sc.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "cached", nil
-	})
-
-	clk.advance(time.Second)
+	_, _ = sc.Do(
+		context.Background(),
+		"key1",
+		func(_ context.Context, _ string) (string, error) {
+			return "cached", nil
+		},
+	)
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			sc.Do(context.Background(), func(_ context.Context) (string, error) {
-				return "", errors.New("fail")
-			})
+			_, _ = sc.Do(
+				context.Background(),
+				"key1",
+				func(_ context.Context, _ string) (string, error) {
+					return "", errors.New("fail")
+				},
+			)
 		}
 	})
 }

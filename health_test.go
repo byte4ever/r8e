@@ -24,7 +24,12 @@ func TestCriticalityString(t *testing.T) {
 
 	for _, tt := range tests {
 		if got := tt.c.String(); got != tt.want {
-			t.Errorf("Criticality(%d).String() = %q, want %q", tt.c, got, tt.want)
+			t.Errorf(
+				"Criticality(%d).String() = %q, want %q",
+				tt.c,
+				got,
+				tt.want,
+			)
 		}
 	}
 }
@@ -49,12 +54,6 @@ func TestHealthyPolicyNoPatterns(t *testing.T) {
 	}
 	if status.State != "healthy" {
 		t.Fatalf("State = %q, want %q", status.State, "healthy")
-	}
-	if status.ServingStale {
-		t.Fatal("ServingStale = true, want false")
-	}
-	if status.StaleAge != 0 {
-		t.Fatalf("StaleAge = %v, want 0", status.StaleAge)
 	}
 	if len(status.Dependencies) != 0 {
 		t.Fatalf("Dependencies = %v, want empty", status.Dependencies)
@@ -113,7 +112,10 @@ func TestUnhealthyCircuitBreakerOpen(t *testing.T) {
 		t.Fatal("Healthy = true, want false")
 	}
 	if status.Criticality != CriticalityCritical {
-		t.Fatalf("Criticality = %v, want CriticalityCritical", status.Criticality)
+		t.Fatalf(
+			"Criticality = %v, want CriticalityCritical",
+			status.Criticality,
+		)
 	}
 	if status.State != "circuit_open" {
 		t.Fatalf("State = %q, want %q", status.State, "circuit_open")
@@ -121,16 +123,22 @@ func TestUnhealthyCircuitBreakerOpen(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestCircuitBreakerHalfOpen — CB half-open → healthy, state "circuit_half_open"
+// TestCircuitBreakerHalfOpen — CB half-open → healthy, state
+// "circuit_half_open"
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerHalfOpen(t *testing.T) {
 	clk := newPolicyClock()
 
 	// Use HalfOpenMaxAttempts(2) so that one success keeps it in half_open.
-	p := NewPolicy[string]("cb-half",
+	p := NewPolicy[string](
+		"cb-half",
 		WithClock(clk),
-		WithCircuitBreaker(FailureThreshold(2), RecoveryTimeout(time.Second), HalfOpenMaxAttempts(2)),
+		WithCircuitBreaker(
+			FailureThreshold(2),
+			RecoveryTimeout(time.Second),
+			HalfOpenMaxAttempts(2),
+		),
 	)
 
 	ctx := context.Background()
@@ -183,7 +191,10 @@ func TestRateLimiterSaturated(t *testing.T) {
 	status := p.HealthStatus()
 
 	if status.Criticality != CriticalityDegraded {
-		t.Fatalf("Criticality = %v, want CriticalityDegraded", status.Criticality)
+		t.Fatalf(
+			"Criticality = %v, want CriticalityDegraded",
+			status.Criticality,
+		)
 	}
 	if status.State != "rate_limited" {
 		t.Fatalf("State = %q, want %q", status.State, "rate_limited")
@@ -208,11 +219,14 @@ func TestBulkheadFull(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
-			close(started)
-			<-done // Block until released.
-			return "first", nil
-		})
+		_, _ = p.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				close(started)
+				<-done // Block until released.
+				return "first", nil
+			},
+		)
 	}()
 
 	<-started // Wait for goroutine to acquire the slot.
@@ -222,7 +236,10 @@ func TestBulkheadFull(t *testing.T) {
 	close(done) // Release the slot.
 
 	if status.Criticality != CriticalityDegraded {
-		t.Fatalf("Criticality = %v, want CriticalityDegraded", status.Criticality)
+		t.Fatalf(
+			"Criticality = %v, want CriticalityDegraded",
+			status.Criticality,
+		)
 	}
 	if status.State != "bulkhead_full" {
 		t.Fatalf("State = %q, want %q", status.State, "bulkhead_full")
@@ -233,50 +250,8 @@ func TestBulkheadFull(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestStaleCacheServing — SC serving stale → ServingStale=true, healthy
-// ---------------------------------------------------------------------------
-
-func TestStaleCacheServing(t *testing.T) {
-	clk := newPolicyClock()
-
-	p := NewPolicy[string]("sc-stale",
-		WithClock(clk),
-		WithStaleCache(5*time.Minute),
-	)
-
-	ctx := context.Background()
-
-	// Populate cache.
-	_, _ = p.Do(ctx, func(_ context.Context) (string, error) {
-		return "cached", nil
-	})
-
-	// Advance time within TTL.
-	clk.advance(1 * time.Minute)
-
-	// Fail to trigger stale serving.
-	_, _ = p.Do(ctx, func(_ context.Context) (string, error) {
-		return "", errors.New("down")
-	})
-
-	status := p.HealthStatus()
-
-	if !status.Healthy {
-		t.Fatal("Healthy = false, want true")
-	}
-	if !status.ServingStale {
-		t.Fatal("ServingStale = false, want true")
-	}
-	if status.StaleAge <= 0 {
-		t.Fatalf("StaleAge = %v, want > 0", status.StaleAge)
-	}
-	if status.Criticality != CriticalityNone {
-		t.Fatalf("Criticality = %v, want CriticalityNone", status.Criticality)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestCircuitOpenOverridesRateLimited — CB open + RL saturated → CriticalityCritical
+// TestCircuitOpenOverridesRateLimited — CB open + RL saturated →
+// CriticalityCritical
 // ---------------------------------------------------------------------------
 
 func TestCircuitOpenOverridesRateLimited(t *testing.T) {
@@ -308,7 +283,10 @@ func TestCircuitOpenOverridesRateLimited(t *testing.T) {
 		t.Fatal("Healthy = true, want false")
 	}
 	if status.Criticality != CriticalityCritical {
-		t.Fatalf("Criticality = %v, want CriticalityCritical (circuit open overrides rate limited)", status.Criticality)
+		t.Fatalf(
+			"Criticality = %v, want CriticalityCritical (circuit open overrides rate limited)",
+			status.Criticality,
+		)
 	}
 	if status.State != "circuit_open" {
 		t.Fatalf("State = %q, want %q", status.State, "circuit_open")
@@ -316,7 +294,8 @@ func TestCircuitOpenOverridesRateLimited(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestDependencyPropagation — parent depends on child; child CB open → parent degraded
+// TestDependencyPropagation — parent depends on child; child CB open →
+// parent degraded
 // ---------------------------------------------------------------------------
 
 func TestDependencyPropagation(t *testing.T) {
@@ -354,12 +333,18 @@ func TestDependencyPropagation(t *testing.T) {
 		t.Fatal("dep.Healthy = true, want false")
 	}
 	if depStatus.Criticality != CriticalityCritical {
-		t.Fatalf("dep.Criticality = %v, want CriticalityCritical", depStatus.Criticality)
+		t.Fatalf(
+			"dep.Criticality = %v, want CriticalityCritical",
+			depStatus.Criticality,
+		)
 	}
 
 	// Parent should be degraded (not critical) due to child's critical status.
 	if status.Criticality < CriticalityDegraded {
-		t.Fatalf("parent Criticality = %v, want >= CriticalityDegraded", status.Criticality)
+		t.Fatalf(
+			"parent Criticality = %v, want >= CriticalityDegraded",
+			status.Criticality,
+		)
 	}
 }
 
@@ -381,15 +366,24 @@ func TestDependsOnOption(t *testing.T) {
 		t.Fatalf("Dependencies = %d, want 2", len(status.Dependencies))
 	}
 	if status.Dependencies[0].Name != "dep1" {
-		t.Fatalf("dep[0].Name = %q, want %q", status.Dependencies[0].Name, "dep1")
+		t.Fatalf(
+			"dep[0].Name = %q, want %q",
+			status.Dependencies[0].Name,
+			"dep1",
+		)
 	}
 	if status.Dependencies[1].Name != "dep2" {
-		t.Fatalf("dep[1].Name = %q, want %q", status.Dependencies[1].Name, "dep2")
+		t.Fatalf(
+			"dep[1].Name = %q, want %q",
+			status.Dependencies[1].Name,
+			"dep2",
+		)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// TestHealthReporterInterface — compile-time check that Policy implements HealthReporter
+// TestHealthReporterInterface — compile-time check that Policy implements
+// HealthReporter
 // ---------------------------------------------------------------------------
 
 func TestHealthReporterInterface(t *testing.T) {

@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -55,7 +56,11 @@ func TestLoadConfigFileNotFound(t *testing.T) {
 		t.Fatal("LoadConfig() error = nil, want error for missing file")
 	}
 	if !strings.Contains(err.Error(), "r8e: read config") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "r8e: read config")
+		t.Fatalf(
+			"error = %q, want to contain %q",
+			err.Error(),
+			"r8e: read config",
+		)
 	}
 }
 
@@ -81,7 +86,11 @@ func TestLoadConfigInvalidJSON(t *testing.T) {
 			t.Fatal("LoadConfig() error = nil, want error for invalid JSON")
 		}
 		if !strings.Contains(err.Error(), "r8e: parse config") {
-			t.Fatalf("error = %q, want to contain %q", err.Error(), "r8e: parse config")
+			t.Fatalf(
+				"error = %q, want to contain %q",
+				err.Error(),
+				"r8e: parse config",
+			)
 		}
 	})
 }
@@ -110,7 +119,11 @@ func TestLoadConfigUnknownBackoff(t *testing.T) {
 		t.Fatal("LoadConfig() error = nil, want error for unknown backoff")
 	}
 	if !strings.Contains(err.Error(), "unknown backoff strategy") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "unknown backoff strategy")
+		t.Fatalf(
+			"error = %q, want to contain %q",
+			err.Error(),
+			"unknown backoff strategy",
+		)
 	}
 }
 
@@ -127,9 +140,12 @@ func TestGetPolicyFromConfig(t *testing.T) {
 	clk := newPolicyClock()
 	p := GetPolicy[string](reg, "notification-api", WithClock(clk))
 
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "ok", nil
-	})
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "ok", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -157,9 +173,12 @@ func TestGetPolicyWithOverride(t *testing.T) {
 	}
 
 	// Policy should still work.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "payment", nil
-	})
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "payment", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -187,9 +206,12 @@ func TestGetPolicyNotInConfig(t *testing.T) {
 	}
 
 	// Should work as a bare passthrough policy.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "bare", nil
-	})
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "bare", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -220,7 +242,14 @@ func TestLoadConfigAllPatterns(t *testing.T) {
 		patternNames[e.Name] = true
 	}
 
-	expected := []string{"timeout", "circuit_breaker", "retry", "rate_limiter", "bulkhead", "stale_cache", "hedge"}
+	expected := []string{
+		"timeout",
+		"circuit_breaker",
+		"retry",
+		"rate_limiter",
+		"bulkhead",
+		"hedge",
+	}
 	for _, name := range expected {
 		if !patternNames[name] {
 			t.Errorf("missing pattern %q", name)
@@ -242,11 +271,14 @@ func TestLoadConfigCircuitBreakerHalfOpen(t *testing.T) {
 	p := GetPolicy[string](reg, "full-policy", WithClock(clk))
 
 	// Verify the circuit breaker was configured with half_open_max_attempts=2.
-	if p.cb == nil {
+	if p.circuitBreaker == nil {
 		t.Fatal("circuit breaker is nil")
 	}
-	if p.cb.cfg.halfOpenMaxAttempts != 2 {
-		t.Fatalf("halfOpenMaxAttempts = %d, want 2", p.cb.cfg.halfOpenMaxAttempts)
+	if p.circuitBreaker.cfg.halfOpenMaxAttempts != 2 {
+		t.Fatalf(
+			"halfOpenMaxAttempts = %d, want 2",
+			p.circuitBreaker.cfg.halfOpenMaxAttempts,
+		)
 	}
 }
 
@@ -291,7 +323,11 @@ func TestLoadConfigInvalidCBDuration(t *testing.T) {
 		t.Fatal("LoadConfig() error = nil, want error for invalid CB duration")
 	}
 	if !strings.Contains(err.Error(), "circuit_breaker.recovery_timeout") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "circuit_breaker.recovery_timeout")
+		t.Fatalf(
+			"error = %q, want to contain %q",
+			err.Error(),
+			"circuit_breaker.recovery_timeout",
+		)
 	}
 }
 
@@ -302,7 +338,9 @@ func TestLoadConfigInvalidCBDuration(t *testing.T) {
 func TestLoadConfigInvalidRetryBaseDelay(t *testing.T) {
 	_, err := LoadConfig("testdata/invalid_retry_base_delay.json")
 	if err == nil {
-		t.Fatal("LoadConfig() error = nil, want error for invalid retry base_delay")
+		t.Fatal(
+			"LoadConfig() error = nil, want error for invalid retry base_delay",
+		)
 	}
 	if !strings.Contains(err.Error(), "base_delay") {
 		t.Fatalf("error = %q, want to contain %q", err.Error(), "base_delay")
@@ -316,24 +354,16 @@ func TestLoadConfigInvalidRetryBaseDelay(t *testing.T) {
 func TestLoadConfigInvalidRetryMaxDelay(t *testing.T) {
 	_, err := LoadConfig("testdata/invalid_retry_max_delay.json")
 	if err == nil {
-		t.Fatal("LoadConfig() error = nil, want error for invalid retry max_delay")
+		t.Fatal(
+			"LoadConfig() error = nil, want error for invalid retry max_delay",
+		)
 	}
 	if !strings.Contains(err.Error(), "retry.max_delay") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "retry.max_delay")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestLoadConfigInvalidStaleCache — Invalid stale_cache duration
-// ---------------------------------------------------------------------------
-
-func TestLoadConfigInvalidStaleCache(t *testing.T) {
-	_, err := LoadConfig("testdata/invalid_stale_cache.json")
-	if err == nil {
-		t.Fatal("LoadConfig() error = nil, want error for invalid stale_cache")
-	}
-	if !strings.Contains(err.Error(), "stale_cache") {
-		t.Fatalf("error = %q, want to contain %q", err.Error(), "stale_cache")
+		t.Fatalf(
+			"error = %q, want to contain %q",
+			err.Error(),
+			"retry.max_delay",
+		)
 	}
 }
 
@@ -356,7 +386,12 @@ func TestLoadConfigInvalidHedge(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadConfigBackoffStrategies(t *testing.T) {
-	strategies := []string{"constant", "exponential", "linear", "exponential_jitter"}
+	strategies := []string{
+		"constant",
+		"exponential",
+		"linear",
+		"exponential_jitter",
+	}
 
 	for _, strat := range strategies {
 		t.Run(strat, func(t *testing.T) {
@@ -376,7 +411,11 @@ func TestLoadConfigBackoffStrategies(t *testing.T) {
 
 			reg, err := LoadConfig(path)
 			if err != nil {
-				t.Fatalf("LoadConfig() error = %v, want nil for backoff %q", err, strat)
+				t.Fatalf(
+					"LoadConfig() error = %v, want nil for backoff %q",
+					err,
+					strat,
+				)
 			}
 
 			clk := newPolicyClock()
@@ -419,7 +458,7 @@ func TestGetPolicyRegistersInRegistry(t *testing.T) {
 
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := writeFile(path, []byte(content)); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("writeTestFile: %v", err)
 	}
 }

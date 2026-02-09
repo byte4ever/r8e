@@ -17,10 +17,10 @@ import (
 // controllable Now/Since values and creates timers that fire immediately
 // so backoff sleeps don't block.
 type policyClock struct {
-	mu      sync.Mutex
-	now     time.Time
-	offset  time.Duration
-	timers  []*policyTimer
+	mu     sync.Mutex
+	now    time.Time
+	offset time.Duration
+	timers []*policyTimer
 }
 
 func newPolicyClock() *policyClock {
@@ -58,7 +58,8 @@ type policyTimer struct {
 	stopped bool
 }
 
-func (t *policyTimer) C() <-chan time.Time      { return t.ch }
+func (t *policyTimer) C() <-chan time.Time { return t.ch }
+
 func (t *policyTimer) Stop() bool               { t.stopped = true; return true }
 func (t *policyTimer) Reset(time.Duration) bool { return false }
 
@@ -82,10 +83,12 @@ func TestNewPolicyDefaultClock(t *testing.T) {
 func TestPolicyDoPassthrough(t *testing.T) {
 	p := NewPolicy[string]("passthrough")
 
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "hello", nil
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "hello", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -103,11 +106,14 @@ func TestPolicyWithTimeout(t *testing.T) {
 		WithTimeout(50*time.Millisecond),
 	)
 
-	_, err := p.Do(context.Background(), func(ctx context.Context) (string, error) {
-		// Block until context is cancelled (timeout).
-		<-ctx.Done()
-		return "", ctx.Err()
-	})
+	_, err := p.Do(
+		context.Background(),
+		func(ctx context.Context) (string, error) {
+			// Block until context is cancelled (timeout).
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	)
 
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("Do() error = %v, want ErrTimeout", err)
@@ -127,14 +133,16 @@ func TestPolicyWithRetry(t *testing.T) {
 		WithRetry(3, ConstantBackoff(10*time.Millisecond)),
 	)
 
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		attempt++
-		if attempt < 3 {
-			return "", errors.New("transient")
-		}
-		return "recovered", nil
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			attempt++
+			if attempt < 3 {
+				return "", errors.New("transient")
+			}
+			return "recovered", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -160,16 +168,22 @@ func TestPolicyWithCircuitBreaker(t *testing.T) {
 
 	// Cause 2 failures to open the circuit.
 	for range 2 {
-		_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("fail")
-		})
+		_, _ = p.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "", errors.New("fail")
+			},
+		)
 	}
 
 	// Next call should be rejected by the circuit breaker.
-	_, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		t.Fatal("fn should not be called when circuit is open")
-		return "unreachable", nil
-	})
+	_, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			t.Fatal("fn should not be called when circuit is open")
+			return "unreachable", nil
+		},
+	)
 
 	if !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("Do() error = %v, want ErrCircuitOpen", err)
@@ -190,9 +204,12 @@ func TestPolicyWithRateLimit(t *testing.T) {
 	)
 
 	// First call should succeed (consumes the 1 token).
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "ok", nil
-	})
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "ok", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("first Do() error = %v, want nil", err)
 	}
@@ -201,10 +218,13 @@ func TestPolicyWithRateLimit(t *testing.T) {
 	}
 
 	// Second call should be rate limited (no tokens left).
-	_, err = p.Do(context.Background(), func(_ context.Context) (string, error) {
-		t.Fatal("fn should not be called when rate limited")
-		return "unreachable", nil
-	})
+	_, err = p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			t.Fatal("fn should not be called when rate limited")
+			return "unreachable", nil
+		},
+	)
 
 	if !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("second Do() error = %v, want ErrRateLimited", err)
@@ -225,20 +245,26 @@ func TestPolicyWithBulkhead(t *testing.T) {
 	done := make(chan struct{})
 
 	go func() {
-		_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
-			close(started)
-			<-done // Block until we release.
-			return "first", nil
-		})
+		_, _ = p.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				close(started)
+				<-done // Block until we release.
+				return "first", nil
+			},
+		)
 	}()
 
 	<-started // Wait for goroutine to acquire the slot.
 
 	// Second call should be rejected.
-	_, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		t.Fatal("fn should not be called when bulkhead is full")
-		return "unreachable", nil
-	})
+	_, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			t.Fatal("fn should not be called when bulkhead is full")
+			return "unreachable", nil
+		},
+	)
 
 	close(done) // Release the slot.
 
@@ -258,16 +284,18 @@ func TestPolicyWithHedge(t *testing.T) {
 	}
 
 	p := NewPolicy[string]("hedge-test",
-		WithHooks(hooks),
+		WithHooks(&hooks),
 		WithHedge(10*time.Millisecond),
 	)
 
-	result, err := p.Do(context.Background(), func(ctx context.Context) (string, error) {
-		// Simulate a slow primary that takes longer than the hedge delay.
-		time.Sleep(100 * time.Millisecond)
-		return "done", nil
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(ctx context.Context) (string, error) {
+			// Simulate a slow primary that takes longer than the hedge delay.
+			time.Sleep(100 * time.Millisecond)
+			return "done", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -280,44 +308,6 @@ func TestPolicyWithHedge(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestPolicyWithStaleCache — serves cached value on failure
-// ---------------------------------------------------------------------------
-
-func TestPolicyWithStaleCache(t *testing.T) {
-	clk := newPolicyClock()
-
-	p := NewPolicy[string]("sc-test",
-		WithClock(clk),
-		WithStaleCache(5*time.Minute),
-	)
-
-	// First call succeeds, populating cache.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "cached-value", nil
-	})
-	if err != nil {
-		t.Fatalf("first Do() error = %v, want nil", err)
-	}
-	if result != "cached-value" {
-		t.Fatalf("first Do() = %q, want %q", result, "cached-value")
-	}
-
-	// Advance time but stay within TTL.
-	clk.advance(1 * time.Minute)
-
-	// Second call fails, should serve cached value.
-	result, err = p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("temporary failure")
-	})
-	if err != nil {
-		t.Fatalf("second Do() error = %v, want nil (stale served)", err)
-	}
-	if result != "cached-value" {
-		t.Fatalf("second Do() = %q, want %q", result, "cached-value")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // TestPolicyWithFallback — returns fallback value on error
 // ---------------------------------------------------------------------------
 
@@ -326,10 +316,12 @@ func TestPolicyWithFallback(t *testing.T) {
 		WithFallback("default-user"),
 	)
 
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("service down")
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", errors.New("service down")
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil (fallback served)", err)
 	}
@@ -349,10 +341,12 @@ func TestPolicyWithFallbackFunc(t *testing.T) {
 		}),
 	)
 
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("down")
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", errors.New("down")
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil (fallback func served)", err)
 	}
@@ -375,14 +369,16 @@ func TestPolicyMultiplePatterns(t *testing.T) {
 		WithCircuitBreaker(FailureThreshold(10), RecoveryTimeout(time.Hour)),
 	)
 
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		attempt++
-		if attempt < 3 {
-			return "", errors.New("transient")
-		}
-		return "success", nil
-	})
-
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			attempt++
+			if attempt < 3 {
+				return "", errors.New("transient")
+			}
+			return "success", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -403,7 +399,8 @@ func TestPolicyAutoOrdering(t *testing.T) {
 	clk := newPolicyClock()
 
 	// Provide options in "wrong" order (retry before circuit breaker).
-	// The auto-ordering should put circuit breaker (priority 3) outside retry (priority 6).
+	// The auto-ordering should put circuit breaker (priority 3) outside retry
+	// (priority 6).
 	p := NewPolicy[string]("order-test",
 		WithClock(clk),
 		WithRetry(2, ConstantBackoff(10*time.Millisecond)),
@@ -415,19 +412,28 @@ func TestPolicyAutoOrdering(t *testing.T) {
 	// After enough policy.Do calls that exhaust retries, the circuit breaker
 	// accumulates failure records.
 	for range 3 {
-		_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
-			return "", errors.New("always fail")
-		})
+		_, _ = p.Do(
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "", errors.New("always fail")
+			},
+		)
 	}
 
-	// The fallback should catch the ErrCircuitOpen because fallback is outermost.
-	result, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		t.Fatal("fn should not be called when circuit is open")
-		return "unreachable", nil
-	})
-
+	// The fallback should catch the ErrCircuitOpen because fallback is
+	// outermost.
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			t.Fatal("fn should not be called when circuit is open")
+			return "unreachable", nil
+		},
+	)
 	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (fallback should handle circuit open)", err)
+		t.Fatalf(
+			"Do() error = %v, want nil (fallback should handle circuit open)",
+			err,
+		)
 	}
 	if result != "fallback-val" {
 		t.Fatalf("Do() = %q, want %q", result, "fallback-val")
@@ -448,7 +454,7 @@ func TestPolicyHooksWired(t *testing.T) {
 
 	p := NewPolicy[string]("hooks-test",
 		WithClock(clk),
-		WithHooks(hooks),
+		WithHooks(&hooks),
 		WithFallback("safe"),
 	)
 
@@ -507,9 +513,12 @@ func TestPolicyDoConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			_, _ = p.Do(context.Background(), func(_ context.Context) (int, error) {
-				return n, nil
-			})
+			_, _ = p.Do(
+				context.Background(),
+				func(_ context.Context) (int, error) {
+					return n, nil
+				},
+			)
 		}(i)
 	}
 
@@ -524,9 +533,12 @@ func TestPolicyPassthroughError(t *testing.T) {
 	p := NewPolicy[string]("error-test")
 
 	sentinel := errors.New("something went wrong")
-	_, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
-		return "", sentinel
-	})
+	_, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", sentinel
+		},
+	)
 
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Do() error = %v, want %v", err, sentinel)

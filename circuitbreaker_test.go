@@ -18,9 +18,16 @@ type stubClock struct {
 
 func (c *stubClock) Now() time.Time                { return c.now }
 func (c *stubClock) Since(time.Time) time.Duration { return c.elapsed }
-func (c *stubClock) NewTimer(d time.Duration) Timer {
-	return &fakeTimer{}
+func (c *stubClock) NewTimer(_ time.Duration) Timer {
+	return &stubTimer{}
 }
+
+// stubTimer is a minimal Timer stub for circuit breaker tests.
+type stubTimer struct{}
+
+func (*stubTimer) C() <-chan time.Time      { return make(chan time.Time) }
+func (*stubTimer) Stop() bool               { return false }
+func (*stubTimer) Reset(time.Duration) bool { return false }
 
 // setElapsed sets the exact elapsed duration returned by Since.
 func (c *stubClock) setElapsed(d time.Duration) {
@@ -41,7 +48,10 @@ func TestCircuitBreakerDefaultConfig(t *testing.T) {
 		cb.RecordFailure()
 	}
 	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() after 4 failures = %v, want nil (threshold is 5)", err)
+		t.Fatalf(
+			"Allow() after 4 failures = %v, want nil (threshold is 5)",
+			err,
+		)
 	}
 
 	// The 5th failure should open it.
@@ -73,7 +83,10 @@ func TestCircuitBreakerCustomConfig(t *testing.T) {
 	// Advance past custom recovery timeout (10s).
 	clk.setElapsed(11 * time.Second)
 	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() after recovery timeout = %v, want nil (half-open)", err)
+		t.Fatalf(
+			"Allow() after recovery timeout = %v, want nil (half-open)",
+			err,
+		)
 	}
 	if got := cb.State(); got != "half_open" {
 		t.Fatalf("State() = %q, want %q", got, "half_open")
@@ -82,15 +95,27 @@ func TestCircuitBreakerCustomConfig(t *testing.T) {
 	// Half-open: need 3 successes to close (custom halfOpenMaxAttempts = 3).
 	cb.RecordSuccess()
 	if got := cb.State(); got != "half_open" {
-		t.Fatalf("State() after 1 success in half-open = %q, want %q", got, "half_open")
+		t.Fatalf(
+			"State() after 1 success in half-open = %q, want %q",
+			got,
+			"half_open",
+		)
 	}
 	cb.RecordSuccess()
 	if got := cb.State(); got != "half_open" {
-		t.Fatalf("State() after 2 successes in half-open = %q, want %q", got, "half_open")
+		t.Fatalf(
+			"State() after 2 successes in half-open = %q, want %q",
+			got,
+			"half_open",
+		)
 	}
 	cb.RecordSuccess()
 	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() after 3 successes in half-open = %q, want %q", got, "closed")
+		t.Fatalf(
+			"State() after 3 successes in half-open = %q, want %q",
+			got,
+			"closed",
+		)
 	}
 }
 
@@ -166,7 +191,10 @@ func TestOpenToHalfOpenAfterRecoveryTimeout(t *testing.T) {
 	// Still within recovery timeout.
 	clk.setElapsed(4 * time.Second)
 	if err := cb.Allow(); err != ErrCircuitOpen {
-		t.Fatalf("Allow() before recovery timeout = %v, want ErrCircuitOpen", err)
+		t.Fatalf(
+			"Allow() before recovery timeout = %v, want ErrCircuitOpen",
+			err,
+		)
 	}
 
 	// Past recovery timeout.
@@ -202,7 +230,11 @@ func TestHalfOpenSuccessClosesCircuit(t *testing.T) {
 	cb.RecordSuccess()
 
 	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() after success in half-open = %q, want %q", got, "closed")
+		t.Fatalf(
+			"State() after success in half-open = %q, want %q",
+			got,
+			"closed",
+		)
 	}
 }
 
@@ -228,7 +260,11 @@ func TestHalfOpenFailureReopensCircuit(t *testing.T) {
 	cb.RecordFailure()
 
 	if got := cb.State(); got != "open" {
-		t.Fatalf("State() after failure in half-open = %q, want %q", got, "open")
+		t.Fatalf(
+			"State() after failure in half-open = %q, want %q",
+			got,
+			"open",
+		)
 	}
 }
 
@@ -249,7 +285,11 @@ func TestSuccessInClosedStateResetsFailureCount(t *testing.T) {
 	cb.RecordFailure()
 	cb.RecordFailure()
 	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() = %q, want %q after reset and 2 failures", got, "closed")
+		t.Fatalf(
+			"State() = %q, want %q after reset and 2 failures",
+			got,
+			"closed",
+		)
 	}
 
 	// The 3rd failure after reset should open.
@@ -352,7 +392,10 @@ func TestCircuitBreakerHookOnReopenFromHalfOpen(t *testing.T) {
 	// Failure in half-open should re-open and fire hook again.
 	cb.RecordFailure()
 	if got := openCount.Load(); got != 2 {
-		t.Fatalf("OnCircuitOpen called %d times, want 2 (reopened from half-open)", got)
+		t.Fatalf(
+			"OnCircuitOpen called %d times, want 2 (reopened from half-open)",
+			got,
+		)
 	}
 }
 
@@ -383,7 +426,8 @@ func TestCircuitBreakerConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 
-	// Just verify it didn't panic or race — the race detector will catch issues.
+	// Just verify it didn't panic or race — the race detector will catch
+	// issues.
 	state := cb.State()
 	if state != "closed" && state != "open" && state != "half_open" {
 		t.Fatalf("State() = %q, want one of closed/open/half_open", state)

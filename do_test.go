@@ -12,10 +12,12 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDoBasic(t *testing.T) {
-	result, err := Do[string](context.Background(), func(_ context.Context) (string, error) {
-		return "hello", nil
-	})
-
+	result, err := Do[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "hello", nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -32,14 +34,18 @@ func TestDoWithRetry(t *testing.T) {
 	clk := newPolicyClock()
 	attempt := 0
 
-	result, err := Do[string](context.Background(), func(_ context.Context) (string, error) {
-		attempt++
-		if attempt < 3 {
-			return "", errors.New("transient")
-		}
-		return "recovered", nil
-	}, WithClock(clk), WithRetry(3, ConstantBackoff(10*time.Millisecond)))
-
+	result, err := Do[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			attempt++
+			if attempt < 3 {
+				return "", errors.New("transient")
+			}
+			return "recovered", nil
+		},
+		WithClock(clk),
+		WithRetry(3, ConstantBackoff(10*time.Millisecond)),
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil", err)
 	}
@@ -56,10 +62,14 @@ func TestDoWithRetry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoWithTimeout(t *testing.T) {
-	_, err := Do[string](context.Background(), func(ctx context.Context) (string, error) {
-		<-ctx.Done()
-		return "", ctx.Err()
-	}, WithTimeout(50*time.Millisecond))
+	_, err := Do[string](
+		context.Background(),
+		func(ctx context.Context) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		WithTimeout(50*time.Millisecond),
+	)
 
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("Do() error = %v, want ErrTimeout", err)
@@ -71,10 +81,13 @@ func TestDoWithTimeout(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoWithFallback(t *testing.T) {
-	result, err := Do[string](context.Background(), func(_ context.Context) (string, error) {
-		return "", errors.New("service down")
-	}, WithFallback("default-value"))
-
+	result, err := Do[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", errors.New("service down")
+		},
+		WithFallback("default-value"),
+	)
 	if err != nil {
 		t.Fatalf("Do() error = %v, want nil (fallback served)", err)
 	}
@@ -90,9 +103,12 @@ func TestDoWithFallback(t *testing.T) {
 func TestDoErrorPropagation(t *testing.T) {
 	sentinel := errors.New("something went wrong")
 
-	_, err := Do[string](context.Background(), func(_ context.Context) (string, error) {
-		return "", sentinel
-	})
+	_, err := Do[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", sentinel
+		},
+	)
 
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Do() error = %v, want %v", err, sentinel)

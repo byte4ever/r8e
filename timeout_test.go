@@ -1,4 +1,4 @@
-package r8e
+package r8e_test
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/byte4ever/r8e"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,9 +15,9 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutSuccessBeforeDeadline(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoTimeout[string](
+	result, err := r8e.DoTimeout[string](
 		context.Background(),
 		time.Second,
 		func(_ context.Context) (string, error) {
@@ -23,7 +25,6 @@ func TestDoTimeoutSuccessBeforeDeadline(t *testing.T) {
 		},
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoTimeout() error = %v, want nil", err)
 	}
@@ -37,10 +38,10 @@ func TestDoTimeoutSuccessBeforeDeadline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutFnErrorBeforeDeadline(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	sentinel := errors.New("application error")
 
-	result, err := DoTimeout[int](
+	result, err := r8e.DoTimeout[int](
 		context.Background(),
 		time.Second,
 		func(_ context.Context) (int, error) {
@@ -58,13 +59,13 @@ func TestDoTimeoutFnErrorBeforeDeadline(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Function exceeds timeout -> ErrTimeout
+// Tests: Function exceeds timeout -> r8e.ErrTimeout
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutExceedsDeadline(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoTimeout[string](
+	result, err := r8e.DoTimeout[string](
 		context.Background(),
 		10*time.Millisecond,
 		func(ctx context.Context) (string, error) {
@@ -75,8 +76,8 @@ func TestDoTimeoutExceedsDeadline(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("DoTimeout() error = %v, want ErrTimeout", err)
+	if !errors.Is(err, r8e.ErrTimeout) {
+		t.Fatalf("DoTimeout() error = %v, want r8e.ErrTimeout", err)
 	}
 	// Zero-value should be returned on timeout.
 	if result != "" {
@@ -89,12 +90,12 @@ func TestDoTimeoutExceedsDeadline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutParentContextAlreadyCancelled(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	result, err := DoTimeout[int](
+	result, err := r8e.DoTimeout[int](
 		ctx,
 		time.Second,
 		func(ctx context.Context) (int, error) {
@@ -116,11 +117,11 @@ func TestDoTimeoutParentContextAlreadyCancelled(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutParentContextCancelledDuringExecution(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result, err := DoTimeout[string](
+	result, err := r8e.DoTimeout[string](
 		ctx,
 		5*time.Second, // long timeout, parent cancels first
 		func(ctx context.Context) (string, error) {
@@ -145,13 +146,13 @@ func TestDoTimeoutParentContextCancelledDuringExecution(t *testing.T) {
 
 func TestDoTimeoutOnTimeoutHookFired(t *testing.T) {
 	var hookCalled atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnTimeout: func() {
 			hookCalled.Store(true)
 		},
 	}
 
-	_, _ = DoTimeout[string](
+	_, _ = r8e.DoTimeout[string](
 		context.Background(),
 		10*time.Millisecond,
 		func(ctx context.Context) (string, error) {
@@ -172,13 +173,13 @@ func TestDoTimeoutOnTimeoutHookFired(t *testing.T) {
 
 func TestDoTimeoutOnTimeoutHookNotFiredOnSuccess(t *testing.T) {
 	var hookCalled atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnTimeout: func() {
 			hookCalled.Store(true)
 		},
 	}
 
-	_, err := DoTimeout[string](
+	_, err := r8e.DoTimeout[string](
 		context.Background(),
 		time.Second,
 		func(_ context.Context) (string, error) {
@@ -186,7 +187,6 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnSuccess(t *testing.T) {
 		},
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoTimeout() error = %v, want nil", err)
 	}
@@ -201,13 +201,13 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnSuccess(t *testing.T) {
 
 func TestDoTimeoutOnTimeoutHookNotFiredOnFnError(t *testing.T) {
 	var hookCalled atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnTimeout: func() {
 			hookCalled.Store(true)
 		},
 	}
 
-	_, _ = DoTimeout[string](
+	_, _ = r8e.DoTimeout[string](
 		context.Background(),
 		time.Second,
 		func(_ context.Context) (string, error) {
@@ -226,9 +226,9 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnFnError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutZeroValueOnTimeoutInt(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoTimeout[int](
+	result, err := r8e.DoTimeout[int](
 		context.Background(),
 		10*time.Millisecond,
 		func(ctx context.Context) (int, error) {
@@ -238,8 +238,8 @@ func TestDoTimeoutZeroValueOnTimeoutInt(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("DoTimeout() error = %v, want ErrTimeout", err)
+	if !errors.Is(err, r8e.ErrTimeout) {
+		t.Fatalf("DoTimeout() error = %v, want r8e.ErrTimeout", err)
 	}
 	if result != 0 {
 		t.Fatalf("DoTimeout() = %d, want 0 (zero value for int)", result)
@@ -251,9 +251,9 @@ func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
 		Name  string
 		Count int
 	}
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoTimeout[payload](
+	result, err := r8e.DoTimeout[payload](
 		context.Background(),
 		10*time.Millisecond,
 		func(ctx context.Context) (payload, error) {
@@ -263,8 +263,8 @@ func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("DoTimeout() error = %v, want ErrTimeout", err)
+	if !errors.Is(err, r8e.ErrTimeout) {
+		t.Fatalf("DoTimeout() error = %v, want r8e.ErrTimeout", err)
 	}
 	if result != (payload{}) {
 		t.Fatalf("DoTimeout() = %+v, want zero value", result)
@@ -276,9 +276,9 @@ func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutNilHooksDoNotPanic(t *testing.T) {
-	hooks := &Hooks{} // all nil
+	hooks := &r8e.Hooks{} // all nil
 
-	_, _ = DoTimeout[string](
+	_, _ = r8e.DoTimeout[string](
 		context.Background(),
 		10*time.Millisecond,
 		func(ctx context.Context) (string, error) {
@@ -295,9 +295,9 @@ func TestDoTimeoutNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutSlowButWithinDeadline(t *testing.T) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 
-	result, err := DoTimeout[string](
+	result, err := r8e.DoTimeout[string](
 		context.Background(),
 		500*time.Millisecond,
 		func(_ context.Context) (string, error) {
@@ -306,7 +306,6 @@ func TestDoTimeoutSlowButWithinDeadline(t *testing.T) {
 		},
 		hooks,
 	)
-
 	if err != nil {
 		t.Fatalf("DoTimeout() error = %v, want nil", err)
 	}
@@ -321,7 +320,7 @@ func TestDoTimeoutSlowButWithinDeadline(t *testing.T) {
 
 func TestDoTimeoutOnTimeoutHookNotFiredOnParentCancel(t *testing.T) {
 	var hookCalled atomic.Bool
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnTimeout: func() {
 			hookCalled.Store(true)
 		},
@@ -330,7 +329,7 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnParentCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, _ = DoTimeout[string](
+	_, _ = r8e.DoTimeout[string](
 		ctx,
 		time.Second,
 		func(ctx context.Context) (string, error) {
@@ -340,7 +339,9 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnParentCancel(t *testing.T) {
 	)
 
 	if hookCalled.Load() {
-		t.Fatal("OnTimeout hook should not fire when parent context is cancelled")
+		t.Fatal(
+			"OnTimeout hook should not fire when parent context is cancelled",
+		)
 	}
 }
 
@@ -349,11 +350,11 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnParentCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func BenchmarkTimeout(b *testing.B) {
-	hooks := &Hooks{}
+	hooks := &r8e.Hooks{}
 	ctx := context.Background()
 
 	for b.Loop() {
-		_, _ = DoTimeout[string](
+		_, _ = r8e.DoTimeout[string](
 			ctx,
 			time.Second,
 			func(_ context.Context) (string, error) {

@@ -1,4 +1,7 @@
 // Example 04-timeout: Demonstrates global timeout with context cancellation.
+// Shows how ErrTimeout is distinguished from parent context cancellation.
+//
+//nolint:forbidigo // This is an example program.
 package main
 
 import (
@@ -19,13 +22,15 @@ func main() {
 
 	// --- Fast call: completes within the timeout ---
 	fmt.Println("=== Fast call (completes within timeout) ===")
-	result, err := policy.Do(ctx, func(ctx context.Context) (string, error) {
+
+	result, err := policy.Do(ctx, func(_ context.Context) (string, error) {
 		return "fast response", nil
 	})
 	fmt.Printf("  result: %q, err: %v\n\n", result, err)
 
 	// --- Slow call: exceeds the timeout ---
 	fmt.Println("=== Slow call (exceeds 200ms timeout) ===")
+
 	_, err = policy.Do(ctx, func(ctx context.Context) (string, error) {
 		select {
 		case <-time.After(1 * time.Second):
@@ -40,11 +45,14 @@ func main() {
 
 	// --- Timeout distinguishes from parent context cancellation ---
 	fmt.Println("=== Parent context cancelled ===")
+
 	parentCtx, cancel := context.WithCancel(ctx)
+
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
+
 	_, err = policy.Do(parentCtx, func(ctx context.Context) (string, error) {
 		select {
 		case <-time.After(1 * time.Second):

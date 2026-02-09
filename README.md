@@ -2,7 +2,7 @@
 
 **Stop writing retry loops. Start shipping resilient services.**
 
-r8e (_resilience_) gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, stale cache, and fallback — all composable into a single policy with one line of code. Zero dependencies. Lock-free internals. 100% test coverage.
+r8e (_resilience_) gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, and fallback — all composable into a single policy with one line of code. A standalone keyed stale cache with pluggable cache backends complements the policy chain. Zero dependencies. Lock-free internals. 100% test coverage.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/byte4ever/r8e.svg)](https://pkg.go.dev/github.com/byte4ever/r8e)
 [![Go Report Card](https://goreportcard.com/badge/github.com/byte4ever/r8e)](https://goreportcard.com/report/github.com/byte4ever/r8e)
@@ -29,7 +29,7 @@ go get github.com/byte4ever/r8e
 - **One policy, all patterns** — compose any combination; r8e handles the ordering
 - **Production-grade** — lock-free atomics, zero allocations on the hot path, 100% test coverage
 - **Kubernetes-native** — built-in health reporting with hierarchical dependencies and a `/readyz` handler
-- **Observable** — 14 lifecycle hooks for logging, metrics, and alerting
+- **Observable** — 12 lifecycle hooks on Policy, plus per-StaleCache hooks
 - **Testable** — `Clock` interface lets you control time in tests, no `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON, or use ready-made presets
 - **Zero dependencies** — only the Go standard library
@@ -44,7 +44,7 @@ go get github.com/byte4ever/r8e
 | **Rate Limiter** | Token-bucket throughput control (reject or blocking mode) |
 | **Bulkhead** | Semaphore-based concurrency limiting |
 | **Hedged Requests** | Fire a second call after a delay to reduce tail latency |
-| **Stale Cache** | Serve last-known-good value on failure |
+| **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper with pluggable cache backends) |
 | **Fallback** | Static value or function fallback as last resort |
 
 Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, `Clock` for deterministic tests.
@@ -177,13 +177,72 @@ policy := r8e.NewPolicy[string]("hedge-example",
 
 ### Stale Cache
 
-Cache successful results and serve them when subsequent calls fail, as long as the cached value is within TTL.
+`StaleCache[K, V]` is a standalone, keyed stale-on-error wrapper. On success it stores the result in a pluggable `Cache[K, V]` backend. On failure it serves the last-known-good value for that key (if within TTL).
+
+The `Cache[K, V]` interface that backends must implement:
 
 ```go
-policy := r8e.NewPolicy[string]("cache-example",
-    r8e.WithStaleCache(5*time.Minute),
-)
+type Cache[K comparable, V any] interface {
+    Get(key K) (V, bool)
+    Set(key K, value V, ttl time.Duration)
+    Delete(key K)
+}
 ```
+
+Usage with the Otter adapter:
+
+```go
+import (
+    "github.com/byte4ever/r8e"
+    otteradapter "github.com/byte4ever/r8e/otter"
+)
+
+// Create cache backend
+cache := otteradapter.New[string, string](r8e.CacheConfig{MaxSize: 10_000})
+
+// Create stale cache with hooks
+sc := r8e.NewStaleCache(cache, 5*time.Minute,
+    r8e.OnStaleServed[string, string](func(key string) {
+        log.Printf("served stale value for key %q", key)
+    }),
+    r8e.OnCacheRefreshed[string, string](func(key string) {
+        log.Printf("refreshed cache for key %q", key)
+    }),
+)
+
+// Compose with a Policy — call policy.Do inside staleCache.Do
+policy := r8e.NewPolicy[string]("pricing-api",
+    r8e.WithTimeout(2*time.Second),
+    r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
+    r8e.WithCircuitBreaker(),
+)
+
+result, err := sc.Do(ctx, "product-42", func(ctx context.Context, key string) (string, error) {
+    return policy.Do(ctx, func(ctx context.Context) (string, error) {
+        return fetchPrice(ctx, key)
+    })
+})
+```
+
+### Cache Adapters
+
+Adapter sub-packages implement `Cache[K, V]` for popular cache libraries. Each is a separate Go module so the main `r8e` package stays dependency-free.
+
+| Adapter | Install | Description |
+|---|---|---|
+| **Otter** | `go get github.com/byte4ever/r8e/otter` | High-performance, contention-free cache with per-entry TTL |
+| **Ristretto** | `go get github.com/byte4ever/r8e/ristretto` | Admission-based cache from Dgraph with cost-aware eviction |
+
+Both adapters accept an `r8e.CacheConfig` to configure capacity:
+
+```go
+cfg := r8e.CacheConfig{MaxSize: 50_000}
+
+otterCache := otteradapter.New[string, string](cfg)
+risCache   := ristrettoadapter.New[string, string](cfg)
+```
+
+Cache configuration can also be loaded from JSON (see [Configuration](#configuration)).
 
 ### Fallback
 
@@ -227,15 +286,16 @@ Patterns are auto-sorted by priority. The outermost middleware executes first:
 ```
 Request
   → Fallback          (outermost — catches final error)
-    → Stale Cache     (serves cached value on failure)
-      → Timeout       (global deadline)
-        → Circuit Breaker  (fast-fail if open)
-          → Rate Limiter   (throttle throughput)
-            → Bulkhead     (limit concurrency)
-              → Retry       (retry transient failures)
-                → Hedge     (innermost — races redundant calls)
-                  → fn()    (your function)
+    → Timeout         (global deadline)
+      → Circuit Breaker  (fast-fail if open)
+        → Rate Limiter   (throttle throughput)
+          → Bulkhead     (limit concurrency)
+            → Retry       (retry transient failures)
+              → Hedge     (innermost — races redundant calls)
+                → fn()    (your function)
 ```
+
+StaleCache is standalone and wraps the entire policy call from the outside (see [Stale Cache](#stale-cache)).
 
 ## Error Classification
 
@@ -261,7 +321,7 @@ Set lifecycle callbacks to integrate with your logging, metrics, or alerting sys
 policy := r8e.NewPolicy[string]("observed",
     r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
     r8e.WithCircuitBreaker(),
-    r8e.WithHooks(r8e.Hooks{
+    r8e.WithHooks(&r8e.Hooks{
         OnRetry:        func(attempt int, err error) { log.Printf("retry #%d: %v", attempt, err) },
         OnCircuitOpen:  func() { log.Println("circuit breaker opened") },
         OnCircuitClose: func() { log.Println("circuit breaker closed") },
@@ -272,7 +332,9 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks: `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnStaleServed`, `OnCacheRefreshed`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`.
+Available hooks on `Hooks` (12): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`.
+
+StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
 ## Health & Readiness
 
@@ -323,8 +385,7 @@ Load policies from a JSON file:
         "max_delay": "30s"
       },
       "rate_limit": 100,
-      "bulkhead": 10,
-      "stale_cache": "5m"
+      "bulkhead": 10
     }
   }
 }
@@ -344,6 +405,66 @@ policy := r8e.GetPolicy[string](reg, "payment-api",
 
 Supported backoff strategies in config: `"constant"`, `"exponential"`, `"linear"`, `"exponential_jitter"`.
 
+Cache backends can be configured separately via `LoadCacheConfig`:
+
+```json
+{
+  "caches": {
+    "pricing": {
+      "ttl": "5m",
+      "max_size": 10000
+    }
+  }
+}
+```
+
+```go
+cfg, err := r8e.LoadCacheConfig("caches.json", "pricing")
+if err != nil {
+    log.Fatal(err)
+}
+cache := otteradapter.New[string, string](cfg)
+sc := r8e.NewStaleCache(cache, cfg.TTL)
+```
+
+## Custom Configuration
+
+The exported `PolicyConfig`, `CircuitBreakerConfig`, and `RetryConfig` structs carry both `json` and `yaml` tags, so you can embed them in your own application config and unmarshal from any format. Call `BuildOptions` to convert a `PolicyConfig` into functional options without going through `LoadConfig`.
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+
+    "github.com/byte4ever/r8e"
+    "gopkg.in/yaml.v3"
+)
+
+type AppConfig struct {
+    Addr    string          `yaml:"addr"`
+    Payment r8e.PolicyConfig `yaml:"payment"`
+}
+
+func main() {
+    data, _ := os.ReadFile("app.yaml")
+
+    var cfg AppConfig
+    if err := yaml.Unmarshal(data, &cfg); err != nil {
+        log.Fatal(err)
+    }
+
+    opts, err := r8e.BuildOptions(&cfg.Payment)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    policy := r8e.NewPolicy[string]("payment", opts...)
+    _ = policy
+}
+```
+
 ## Presets
 
 Ready-made option bundles for common scenarios:
@@ -354,9 +475,6 @@ p := r8e.NewPolicy[string]("api", r8e.StandardHTTPClient()...)
 
 // Aggressive: 2s timeout, 5 retries (50ms exp, 5s cap), CB (3 failures, 15s), bulkhead(20)
 p = r8e.NewPolicy[string]("fast-api", r8e.AggressiveHTTPClient()...)
-
-// Cached: StandardHTTPClient + 5min stale cache
-p = r8e.NewPolicy[string]("cached-api", r8e.CachedClient()...)
 ```
 
 ## Convenience Function

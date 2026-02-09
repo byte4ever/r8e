@@ -1,9 +1,11 @@
-package r8e
+package r8e_test
 
 import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/byte4ever/r8e"
 )
 
 // ---------------------------------------------------------------------------
@@ -12,7 +14,7 @@ import (
 
 func TestTransientWrapsError(t *testing.T) {
 	cause := errors.New("connection reset")
-	err := Transient(cause)
+	err := r8e.Transient(cause)
 
 	if err == nil {
 		t.Fatal("Transient(non-nil) returned nil")
@@ -23,34 +25,34 @@ func TestTransientWrapsError(t *testing.T) {
 }
 
 func TestTransientNilReturnsNil(t *testing.T) {
-	if err := Transient(nil); err != nil {
+	if err := r8e.Transient(nil); err != nil {
 		t.Fatalf("Transient(nil) = %v, want nil", err)
 	}
 }
 
 func TestIsTransientDetectsTransient(t *testing.T) {
-	err := Transient(errors.New("oops"))
-	if !IsTransient(err) {
+	err := r8e.Transient(errors.New("oops"))
+	if !r8e.IsTransient(err) {
 		t.Fatal("IsTransient(Transient(err)) = false, want true")
 	}
 }
 
 func TestIsTransientUnclassifiedTreatedAsTransient(t *testing.T) {
 	err := errors.New("some random error")
-	if !IsTransient(err) {
+	if !r8e.IsTransient(err) {
 		t.Fatal("IsTransient(unclassified) = false, want true")
 	}
 }
 
 func TestIsTransientNilReturnsFalse(t *testing.T) {
-	if IsTransient(nil) {
+	if r8e.IsTransient(nil) {
 		t.Fatal("IsTransient(nil) = true, want false")
 	}
 }
 
 func TestIsTransientPermanentReturnsFalse(t *testing.T) {
-	err := Permanent(errors.New("bad request"))
-	if IsTransient(err) {
+	err := r8e.Permanent(errors.New("bad request"))
+	if r8e.IsTransient(err) {
 		t.Fatal("IsTransient(Permanent(err)) = true, want false")
 	}
 }
@@ -61,7 +63,7 @@ func TestIsTransientPermanentReturnsFalse(t *testing.T) {
 
 func TestPermanentWrapsError(t *testing.T) {
 	cause := errors.New("invalid argument")
-	err := Permanent(cause)
+	err := r8e.Permanent(cause)
 
 	if err == nil {
 		t.Fatal("Permanent(non-nil) returned nil")
@@ -72,34 +74,34 @@ func TestPermanentWrapsError(t *testing.T) {
 }
 
 func TestPermanentNilReturnsNil(t *testing.T) {
-	if err := Permanent(nil); err != nil {
+	if err := r8e.Permanent(nil); err != nil {
 		t.Fatalf("Permanent(nil) = %v, want nil", err)
 	}
 }
 
 func TestIsPermanentDetectsPermanent(t *testing.T) {
-	err := Permanent(errors.New("oops"))
-	if !IsPermanent(err) {
+	err := r8e.Permanent(errors.New("oops"))
+	if !r8e.IsPermanent(err) {
 		t.Fatal("IsPermanent(Permanent(err)) = false, want true")
 	}
 }
 
 func TestIsPermanentUnclassifiedReturnsFalse(t *testing.T) {
 	err := errors.New("some random error")
-	if IsPermanent(err) {
+	if r8e.IsPermanent(err) {
 		t.Fatal("IsPermanent(unclassified) = true, want false")
 	}
 }
 
 func TestIsPermanentNilReturnsFalse(t *testing.T) {
-	if IsPermanent(nil) {
+	if r8e.IsPermanent(nil) {
 		t.Fatal("IsPermanent(nil) = true, want false")
 	}
 }
 
 func TestIsPermanentTransientReturnsFalse(t *testing.T) {
-	err := Transient(errors.New("timeout"))
-	if IsPermanent(err) {
+	err := r8e.Transient(errors.New("timeout"))
+	if r8e.IsPermanent(err) {
 		t.Fatal("IsPermanent(Transient(err)) = true, want false")
 	}
 }
@@ -110,7 +112,7 @@ func TestIsPermanentTransientReturnsFalse(t *testing.T) {
 
 func TestTransientUnwrap(t *testing.T) {
 	cause := errors.New("root cause")
-	err := Transient(cause)
+	err := r8e.Transient(cause)
 
 	if !errors.Is(err, cause) {
 		t.Fatal("errors.Is(Transient(cause), cause) = false, want true")
@@ -119,7 +121,7 @@ func TestTransientUnwrap(t *testing.T) {
 
 func TestPermanentUnwrap(t *testing.T) {
 	cause := errors.New("root cause")
-	err := Permanent(cause)
+	err := r8e.Permanent(cause)
 
 	if !errors.Is(err, cause) {
 		t.Fatal("errors.Is(Permanent(cause), cause) = false, want true")
@@ -136,7 +138,7 @@ func (e *codedError) Error() string { return e.msg }
 
 func TestTransientErrorsAsCustomType(t *testing.T) {
 	cause := &codedError{code: 42, msg: "bad thing"}
-	err := Transient(cause)
+	err := r8e.Transient(cause)
 
 	var target *codedError
 	if !errors.As(err, &target) {
@@ -149,7 +151,7 @@ func TestTransientErrorsAsCustomType(t *testing.T) {
 
 func TestPermanentErrorsAsCustomType(t *testing.T) {
 	cause := &codedError{code: 99, msg: "really bad"}
-	err := Permanent(cause)
+	err := r8e.Permanent(cause)
 
 	var target *codedError
 	if !errors.As(err, &target) {
@@ -166,19 +168,19 @@ func TestPermanentErrorsAsCustomType(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsTransientDetectsWrappedTransient(t *testing.T) {
-	inner := Transient(errors.New("timeout"))
+	inner := r8e.Transient(errors.New("timeout"))
 	wrapped := fmt.Errorf("layer: %w", inner)
 
-	if !IsTransient(wrapped) {
+	if !r8e.IsTransient(wrapped) {
 		t.Fatal("IsTransient on wrapped transient = false, want true")
 	}
 }
 
 func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
-	inner := Permanent(errors.New("bad input"))
+	inner := r8e.Permanent(errors.New("bad input"))
 	wrapped := fmt.Errorf("layer: %w", inner)
 
-	if !IsPermanent(wrapped) {
+	if !r8e.IsPermanent(wrapped) {
 		t.Fatal("IsPermanent on wrapped permanent = false, want true")
 	}
 }
@@ -192,11 +194,11 @@ func TestSentinelErrorMessages(t *testing.T) {
 		err  error
 		want string
 	}{
-		{ErrCircuitOpen, "circuit breaker is open"},
-		{ErrRateLimited, "rate limited"},
-		{ErrBulkheadFull, "bulkhead full"},
-		{ErrTimeout, "timeout"},
-		{ErrRetriesExhausted, "retries exhausted"},
+		{r8e.ErrCircuitOpen, "circuit breaker is open"},
+		{r8e.ErrRateLimited, "rate limited"},
+		{r8e.ErrBulkheadFull, "bulkhead full"},
+		{r8e.ErrTimeout, "timeout"},
+		{r8e.ErrRetriesExhausted, "retries exhausted"},
 	}
 	for _, tt := range tests {
 		if got := tt.err.Error(); got != tt.want {
@@ -207,14 +209,14 @@ func TestSentinelErrorMessages(t *testing.T) {
 
 func TestSentinelErrorsImplementResilienceError(t *testing.T) {
 	sentinels := []error{
-		ErrCircuitOpen,
-		ErrRateLimited,
-		ErrBulkheadFull,
-		ErrTimeout,
-		ErrRetriesExhausted,
+		r8e.ErrCircuitOpen,
+		r8e.ErrRateLimited,
+		r8e.ErrBulkheadFull,
+		r8e.ErrTimeout,
+		r8e.ErrRetriesExhausted,
 	}
 	for _, sentinel := range sentinels {
-		var re ResilienceError
+		var re r8e.ResilienceError
 		if !errors.As(sentinel, &re) {
 			t.Errorf("errors.As(%T, &ResilienceError) = false", sentinel)
 			continue
@@ -227,11 +229,11 @@ func TestSentinelErrorsImplementResilienceError(t *testing.T) {
 
 func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
 	sentinels := []error{
-		ErrCircuitOpen,
-		ErrRateLimited,
-		ErrBulkheadFull,
-		ErrTimeout,
-		ErrRetriesExhausted,
+		r8e.ErrCircuitOpen,
+		r8e.ErrRateLimited,
+		r8e.ErrBulkheadFull,
+		r8e.ErrTimeout,
+		r8e.ErrRetriesExhausted,
 	}
 	for _, sentinel := range sentinels {
 		wrapped := fmt.Errorf("context: %w", sentinel)
@@ -243,17 +245,20 @@ func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
 
 func TestSentinelResilienceErrorDetectableWhenWrapped(t *testing.T) {
 	sentinels := []error{
-		ErrCircuitOpen,
-		ErrRateLimited,
-		ErrBulkheadFull,
-		ErrTimeout,
-		ErrRetriesExhausted,
+		r8e.ErrCircuitOpen,
+		r8e.ErrRateLimited,
+		r8e.ErrBulkheadFull,
+		r8e.ErrTimeout,
+		r8e.ErrRetriesExhausted,
 	}
 	for _, sentinel := range sentinels {
 		wrapped := fmt.Errorf("context: %w", sentinel)
-		var re ResilienceError
+		var re r8e.ResilienceError
 		if !errors.As(wrapped, &re) {
-			t.Errorf("errors.As(wrapped %T, &ResilienceError) = false", sentinel)
+			t.Errorf(
+				"errors.As(wrapped %T, &ResilienceError) = false",
+				sentinel,
+			)
 		}
 	}
 }

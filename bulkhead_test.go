@@ -1,9 +1,11 @@
-package r8e
+package r8e_test
 
 import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/byte4ever/r8e"
 )
 
 // ---------------------------------------------------------------------------
@@ -11,7 +13,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestBulkheadAcquireUnderLimit(t *testing.T) {
-	bh := NewBulkhead(3, &Hooks{})
+	bh := r8e.NewBulkhead(3, &r8e.Hooks{})
 
 	if err := bh.Acquire(); err != nil {
 		t.Fatalf("Acquire() = %v, want nil (1st slot)", err)
@@ -29,7 +31,7 @@ func TestBulkheadAcquireUnderLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadAcquireAtLimitReturnsErrBulkheadFull(t *testing.T) {
-	bh := NewBulkhead(2, &Hooks{})
+	bh := r8e.NewBulkhead(2, &r8e.Hooks{})
 
 	// Fill up both slots.
 	if err := bh.Acquire(); err != nil {
@@ -40,7 +42,7 @@ func TestBulkheadAcquireAtLimitReturnsErrBulkheadFull(t *testing.T) {
 	}
 
 	// Third acquire should fail.
-	if err := bh.Acquire(); err != ErrBulkheadFull {
+	if err := bh.Acquire(); err != r8e.ErrBulkheadFull {
 		t.Fatalf("Acquire() = %v, want ErrBulkheadFull", err)
 	}
 }
@@ -50,14 +52,14 @@ func TestBulkheadAcquireAtLimitReturnsErrBulkheadFull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadReleaseFreesSlot(t *testing.T) {
-	bh := NewBulkhead(1, &Hooks{})
+	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
 	if err := bh.Acquire(); err != nil {
 		t.Fatalf("Acquire() = %v, want nil", err)
 	}
 
 	// At capacity — should fail.
-	if err := bh.Acquire(); err != ErrBulkheadFull {
+	if err := bh.Acquire(); err != r8e.ErrBulkheadFull {
 		t.Fatalf("Acquire() at capacity = %v, want ErrBulkheadFull", err)
 	}
 
@@ -74,7 +76,7 @@ func TestBulkheadReleaseFreesSlot(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadFullReturnsCorrectState(t *testing.T) {
-	bh := NewBulkhead(2, &Hooks{})
+	bh := r8e.NewBulkhead(2, &r8e.Hooks{})
 
 	if bh.Full() {
 		t.Fatal("Full() = true on fresh bulkhead, want false")
@@ -104,7 +106,7 @@ func TestBulkheadConcurrentAccess(t *testing.T) {
 	const maxConcurrent = 10
 	const goroutines = 100
 
-	bh := NewBulkhead(maxConcurrent, &Hooks{})
+	bh := r8e.NewBulkhead(maxConcurrent, &r8e.Hooks{})
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
@@ -139,13 +141,13 @@ func TestBulkheadConcurrentAccess(t *testing.T) {
 
 func TestBulkheadHookEmissions(t *testing.T) {
 	var acquiredCount, fullCount, releasedCount atomic.Int64
-	hooks := &Hooks{
+	hooks := &r8e.Hooks{
 		OnBulkheadAcquired: func() { acquiredCount.Add(1) },
 		OnBulkheadFull:     func() { fullCount.Add(1) },
 		OnBulkheadReleased: func() { releasedCount.Add(1) },
 	}
 
-	bh := NewBulkhead(1, hooks)
+	bh := r8e.NewBulkhead(1, hooks)
 
 	// Acquire — should fire Acquired hook.
 	bh.Acquire()
@@ -171,7 +173,7 @@ func TestBulkheadHookEmissions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadMultipleSequentialCycles(t *testing.T) {
-	bh := NewBulkhead(1, &Hooks{})
+	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
 	for i := range 10 {
 		if err := bh.Acquire(); err != nil {
@@ -180,8 +182,12 @@ func TestBulkheadMultipleSequentialCycles(t *testing.T) {
 		if !bh.Full() {
 			t.Fatalf("cycle %d: Full() = false at capacity, want true", i)
 		}
-		if err := bh.Acquire(); err != ErrBulkheadFull {
-			t.Fatalf("cycle %d: Acquire() at capacity = %v, want ErrBulkheadFull", i, err)
+		if err := bh.Acquire(); err != r8e.ErrBulkheadFull {
+			t.Fatalf(
+				"cycle %d: Acquire() at capacity = %v, want ErrBulkheadFull",
+				i,
+				err,
+			)
 		}
 		bh.Release()
 		if bh.Full() {
@@ -195,7 +201,7 @@ func TestBulkheadMultipleSequentialCycles(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadNilHooksDoNotPanic(t *testing.T) {
-	bh := NewBulkhead(1, &Hooks{})
+	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
 	bh.Acquire()
 	bh.Release()
@@ -207,7 +213,7 @@ func TestBulkheadNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadSingleSlot(t *testing.T) {
-	bh := NewBulkhead(1, &Hooks{})
+	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
 	if err := bh.Acquire(); err != nil {
 		t.Fatalf("Acquire() = %v, want nil", err)
@@ -217,7 +223,7 @@ func TestBulkheadSingleSlot(t *testing.T) {
 	}
 
 	err := bh.Acquire()
-	if err != ErrBulkheadFull {
+	if err != r8e.ErrBulkheadFull {
 		t.Fatalf("Acquire() = %v, want ErrBulkheadFull", err)
 	}
 
@@ -232,7 +238,7 @@ func TestBulkheadSingleSlot(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func BenchmarkBulkheadAcquireRelease(b *testing.B) {
-	bh := NewBulkhead(1000, &Hooks{})
+	bh := r8e.NewBulkhead(1000, &r8e.Hooks{})
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
