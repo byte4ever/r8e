@@ -102,8 +102,9 @@ func (c *Client) Do(
 			case Transient:
 				// Drain and close body so the underlying
 				// TCP connection can be reused on retry.
-				io.Copy(io.Discard, resp.Body)  //nolint:errcheck // best-effort drain before retry
-				resp.Body.Close()               //nolint:errcheck // best-effort close before retry
+				//nolint:errcheck // best-effort drain
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
 
 				return resp, r8e.Transient(
 					&StatusError{
