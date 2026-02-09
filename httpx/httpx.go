@@ -2,57 +2,63 @@ package httpx
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/byte4ever/r8e"
 )
 
-// ErrorClass tells the resilience layer how to treat an HTTP
-// status code.
-type ErrorClass int
+type (
+	// ErrorClass tells the resilience layer how to treat
+	// an HTTP status code.
+	ErrorClass int
+
+	// Classifier maps an HTTP status code to an ErrorClass.
+	//
+	// Pattern: Strategy — caller injects classification
+	// logic without modifying the adapter.
+	Classifier func(statusCode int) ErrorClass
+
+	// StatusError is returned when the Classifier marks a
+	// status code as Transient or Permanent. The original
+	// response remains accessible for header inspection.
+	// The body is drained and closed on transient errors
+	// during retries; only the permanent error path
+	// preserves an unread body.
+	StatusError struct {
+		Response   *http.Response
+		StatusCode int
+	}
+
+	// Client wraps an http.Client with an r8e resilience
+	// policy and HTTP status code classification.
+	//
+	// Pattern: Adapter — bridges net/http and r8e's
+	// resilience policy by translating HTTP status codes
+	// into r8e error classification.
+	Client struct {
+		hc *http.Client
+		p  *r8e.Policy[*http.Response]
+		cl Classifier
+	}
+)
 
 const (
 	// Success means the request succeeded (e.g. 2xx).
 	Success ErrorClass = iota
-	// Transient means the error is retriable (e.g. 429, 503).
+	// Transient means the error is retriable (e.g. 429,
+	// 503).
 	Transient
-	// Permanent means the error is non-retriable (e.g. 400).
+	// Permanent means the error is non-retriable
+	// (e.g. 400).
 	Permanent
 )
-
-// Classifier maps an HTTP status code to an ErrorClass.
-//
-// Pattern: Strategy — caller injects classification logic
-// without modifying the adapter.
-type Classifier func(statusCode int) ErrorClass
-
-// StatusError is returned when the Classifier marks a status
-// code as Transient or Permanent. The original response
-// remains accessible for header/body inspection.
-type StatusError struct {
-	// Response is the original HTTP response that triggered
-	// the error. The body has not been read or closed.
-	Response   *http.Response
-	StatusCode int
-}
 
 // Error returns a human-readable description of the status
 // error.
 func (e *StatusError) Error() string {
 	return "http status " + strconv.Itoa(e.StatusCode)
-}
-
-// Client wraps an http.Client with an r8e resilience policy
-// and HTTP status code classification.
-//
-// Pattern: Adapter — bridges net/http and r8e's resilience
-// policy by translating HTTP status codes into r8e error
-// classification.
-type Client struct {
-	hc *http.Client
-	p  *r8e.Policy[*http.Response]
-	cl Classifier
 }
 
 // NewClient creates a Client that executes HTTP requests
@@ -72,11 +78,11 @@ func NewClient(
 	}
 }
 
-// Do executes the HTTP request through the resilience policy.
-// Like http.Client.Do, it may return both a non-nil response
-// and a non-nil error. When the Classifier returns Transient
-// or Permanent, the response is wrapped in a StatusError
-// accessible via errors.As.
+// Do executes the HTTP request through the resilience
+// policy. Like http.Client.Do, it may return both a
+// non-nil response and a non-nil error. When the
+// Classifier returns Transient or Permanent, the response
+// is wrapped in a StatusError accessible via errors.As.
 func (c *Client) Do(
 	ctx context.Context,
 	req *http.Request,
@@ -94,6 +100,11 @@ func (c *Client) Do(
 
 			switch c.cl(resp.StatusCode) {
 			case Transient:
+				// Drain and close body so the underlying
+				// TCP connection can be reused on retry.
+				io.Copy(io.Discard, resp.Body)  //nolint:errcheck // best-effort drain before retry
+				resp.Body.Close()               //nolint:errcheck // best-effort close before retry
+
 				return resp, r8e.Transient(
 					&StatusError{
 						Response:   resp,

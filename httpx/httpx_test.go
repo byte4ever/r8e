@@ -259,6 +259,57 @@ func TestDoTransportError(t *testing.T) {
 	assert.False(t, errors.As(err, &se))
 }
 
+func TestDoTransientRetriesExhausted(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			},
+		),
+	)
+
+	defer srv.Close()
+
+	cl := httpx.NewClient(
+		"test-exhausted",
+		srv.Client(),
+		testClassifier,
+		r8e.WithRetry(
+			2,
+			r8e.ConstantBackoff(time.Millisecond),
+		),
+	)
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		srv.URL,
+		nil,
+	)
+	require.NoError(t, err)
+
+	resp, doErr := cl.Do(context.Background(), req)
+	require.Error(t, doErr)
+
+	// Retries exhausted wraps the underlying error.
+	assert.ErrorIs(t, doErr, r8e.ErrRetriesExhausted)
+
+	// StatusError should be extractable.
+	var statusErr *httpx.StatusError
+	require.ErrorAs(t, doErr, &statusErr)
+	assert.Equal(
+		t,
+		http.StatusServiceUnavailable,
+		statusErr.StatusCode,
+	)
+
+	// Response from Do itself may be nil (DoRetry
+	// returns zero value on exhaustion).
+	_ = resp
+}
+
 func TestStatusErrorMessage(t *testing.T) {
 	t.Parallel()
 
