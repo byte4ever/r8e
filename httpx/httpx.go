@@ -53,3 +53,20 @@ type Client struct {
 	p  *r8e.Policy[*http.Response]
 	cl Classifier
 }
+
+// NewClient creates a Client that executes HTTP requests
+// through the given r8e policy options. The classifier
+// determines how HTTP status codes map to transient or
+// permanent errors for retry decisions.
+func NewClient(
+	name string,
+	hc *http.Client,
+	cl Classifier,
+	opts ...any,
+) *Client {
+	return &Client{
+		hc: hc,
+		p:  r8e.NewPolicy[*http.Response](name, opts...),
+		cl: cl,
+	}
+}
