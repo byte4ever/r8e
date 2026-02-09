@@ -19,6 +19,29 @@ Three scenarios illustrate timeout behavior:
    `context.Canceled`, *not* `ErrTimeout`. This distinction lets callers
    differentiate between r8e timeouts and external cancellations.
 
+## How it works
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant T as Timeout MW
+    participant F as fn(ctx)
+
+    C->>T: Do(ctx, fn)
+    T->>T: Create deadline context
+    T->>F: fn(deadlineCtx)
+
+    alt fn completes in time
+        F-->>T: (result, nil)
+        T-->>C: (result, nil)
+    else deadline exceeded
+        T-->>C: ("", ErrTimeout)
+        T->>F: Cancel context
+    else parent ctx cancelled
+        T-->>C: ("", context.Canceled)
+    end
+```
+
 ## Key concepts
 
 | Concept | Detail |

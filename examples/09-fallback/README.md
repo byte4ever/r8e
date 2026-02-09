@@ -31,6 +31,19 @@ Four scenarios cover all fallback behaviors:
 | Error swallowing | Static fallback always returns `nil` error; function fallback may return an error |
 | Execution order | Fallback is the outermost middleware — it wraps timeout, circuit breaker, retry, etc. |
 
+## Decision flow
+
+```mermaid
+flowchart TD
+    A["Fallback MW"] --> B["Call inner chain"]
+    B -->|Success| C["Return result"]
+    B -->|Error| D{Fallback type?}
+    D -->|Static| E["Return static value, nil"]
+    D -->|Function| F["Call fallbackFn(err)"]
+    F -->|Success| G["Return computed value, nil"]
+    F -->|Error| H["Return fallbackFn error"]
+```
+
 ## When to use
 
 - Returning cached/default content when the primary source is unavailable

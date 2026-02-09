@@ -28,6 +28,20 @@ delayed until new tokens are replenished (one every 200ms at 5/sec).
 | `ErrRateLimited` | Sentinel error returned in reject mode when no tokens are available |
 | Token bucket | Tokens accumulate at `rate/sec`; burst capacity equals the rate |
 
+## How it works
+
+```mermaid
+flowchart TD
+    A[Incoming request] --> B{Token available?}
+    B -->|Yes| C[Consume token]
+    C --> D[Execute fn]
+
+    B -->|No| E{Mode?}
+    E -->|Reject| F[Return ErrRateLimited]
+    E -->|Blocking| G[Wait for next token]
+    G --> C
+```
+
 ## When to use each mode
 
 - **Reject mode** — API gateways, load shedding, or when callers can retry

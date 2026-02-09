@@ -32,8 +32,24 @@ Three scenarios run through the composed policy:
 
 Patterns are auto-sorted by priority. The outermost middleware executes first:
 
-```
-Fallback → Timeout → Circuit Breaker → Rate Limiter → Bulkhead → Retry → Hedge → fn()
+```mermaid
+flowchart LR
+    A[Fallback] --> B[Timeout]
+    B --> C[Circuit Breaker]
+    C --> D[Rate Limiter]
+    D --> E[Bulkhead]
+    E --> F[Retry]
+    F --> G[Hedge]
+    G --> H["fn()"]
+
+    style A fill:#e8daef
+    style B fill:#d5f5e3
+    style C fill:#fadbd8
+    style D fill:#d6eaf8
+    style E fill:#fdebd0
+    style F fill:#d5f5e3
+    style G fill:#d6eaf8
+    style H fill:#f9e79f
 ```
 
 This ordering ensures:

@@ -26,6 +26,24 @@ The example walks through the full lifecycle of a circuit breaker:
 Lifecycle hooks (`OnCircuitOpen`, `OnCircuitHalfOpen`, `OnCircuitClose`) log
 each state transition as it happens.
 
+## State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : failures >= threshold
+    Open --> HalfOpen : recovery timeout elapsed
+    HalfOpen --> Closed : probe succeeds
+    HalfOpen --> Open : probe fails
+
+    Closed : Calls flow normally
+    Closed : Failures counted
+    Open : All calls rejected
+    Open : Returns ErrCircuitOpen
+    HalfOpen : Single probe allowed
+    HalfOpen : Next call decides state
+```
+
 ## Key concepts
 
 | Concept | Detail |

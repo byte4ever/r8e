@@ -44,6 +44,33 @@ from all registered policies:
 The example uses `httptest.NewRecorder` to demonstrate the endpoint without
 starting a real server.
 
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Registry
+        R[Registry]
+    end
+
+    subgraph Policies
+        DB["database<br/>CircuitBreaker"]
+        API["api-gateway<br/>CircuitBreaker"]
+    end
+
+    API -->|DependsOn| DB
+    DB -->|Register| R
+    API -->|Register| R
+
+    subgraph Kubernetes
+        K8S["/readyz endpoint"]
+    end
+
+    R -->|CheckReadiness| K8S
+
+    K8S -->|All healthy| OK[HTTP 200]
+    K8S -->|Critical unhealthy| FAIL[HTTP 503]
+```
+
 ## Key concepts
 
 | Concept | Detail |

@@ -22,6 +22,34 @@ Over 5 calls, you can observe:
   If the hedge completes first, `OnHedgeWon` fires. Either way, the fastest
   response is returned.
 
+## How it works
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant P as Primary
+    participant H as Hedge
+    participant T as Timer
+
+    C->>P: Start primary call
+    C->>T: Start hedge timer (100ms)
+
+    alt Primary responds before timer
+        P-->>C: Result
+        C->>T: Cancel timer
+    else Timer fires first
+        T-->>C: Hedge delay elapsed
+        C->>H: Start hedge call
+        alt Primary wins
+            P-->>C: Result
+            C->>H: Cancel hedge
+        else Hedge wins
+            H-->>C: Result
+            C->>P: Cancel primary
+        end
+    end
+```
+
 ## Key concepts
 
 | Concept | Detail |

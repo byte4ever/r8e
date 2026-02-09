@@ -40,6 +40,21 @@ inspect error classification:
 | `IsPermanent(err)` | Returns `true` only for explicitly permanent errors |
 | Default behavior | Unclassified errors are treated as transient |
 
+## Decision tree
+
+```mermaid
+flowchart TD
+    A[Error returned] --> B{Wrapped with<br/>Permanent?}
+    B -->|Yes| C["IsPermanent = true<br/>IsTransient = false"]
+    C --> D[Stop retries immediately]
+
+    B -->|No| E{Wrapped with<br/>Transient?}
+    E -->|Yes| F["IsPermanent = false<br/>IsTransient = true"]
+    E -->|No| G["Unclassified<br/>(treated as transient)"]
+    F --> H[Retry if attempts remain]
+    G --> H
+```
+
 ## When to use
 
 - Wrap errors from HTTP calls: 5xx responses are transient, 4xx are permanent.

@@ -30,6 +30,21 @@ strategies and advanced retry controls.
 - **Permanent errors** (`r8e.Permanent(err)`) — wrapping an error as
   permanent stops all retries regardless of the retry budget.
 
+## Retry flow
+
+```mermaid
+flowchart TD
+    A[Call fn] --> B{Success?}
+    B -->|Yes| C[Return result]
+    B -->|No| D{Error type?}
+    D -->|Permanent| E[Stop — return error]
+    D -->|RetryIf returns false| E
+    D -->|Transient / unclassified| F{Attempts left?}
+    F -->|No| G[Return last error]
+    F -->|Yes| H[Wait backoff delay]
+    H --> A
+```
+
 ## Key concepts
 
 | Concept | Detail |

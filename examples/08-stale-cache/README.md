@@ -24,6 +24,18 @@ The example uses a simple in-memory `map` as the cache backend to show the
 `Cache[K, V]` interface in action. In production, use a proper cache adapter
 like `otter` or `ristretto`.
 
+## Decision flow
+
+```mermaid
+flowchart TD
+    A[StaleCache.Do] --> B{Call fn}
+    B -->|Success| C[Store in cache]
+    C --> D[Return result]
+    B -->|Failure| E{Cache has value<br/>for this key?}
+    E -->|Yes| F[Return stale value]
+    E -->|No| G[Return original error]
+```
+
 ## Key concepts
 
 | Concept | Detail |
