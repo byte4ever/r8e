@@ -508,6 +508,24 @@ policy := r8e.NewPolicy[string]("test",
 )
 ```
 
+## Claude Code Skill
+
+r8e ships with a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill file that teaches the AI assistant the full r8e API, patterns, and idioms. To enable it, symlink or copy the skill into your project's `.claude/skills/` directory:
+
+```bash
+mkdir -p .claude/skills
+cp -r ./vendor/github.com/byte4ever/r8e/claude-skill .claude/skills/r8e
+```
+
+Or if you cloned r8e directly:
+
+```bash
+mkdir -p .claude/skills
+ln -s "$(go list -m -f '{{.Dir}}' github.com/byte4ever/r8e)/claude-skill" .claude/skills/r8e
+```
+
+Once installed, Claude Code will automatically apply r8e knowledge when you work on resilience-related code.
+
 ## Examples
 
 See the [`examples/`](examples/) directory for runnable examples demonstrating each feature:

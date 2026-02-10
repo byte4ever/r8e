@@ -506,9 +506,27 @@ policy := r8e.NewPolicy[string]("test",
 )
 ```
 
+## Skill Claude Code
+
+r8e inclut un fichier skill [Claude Code](https://docs.anthropic.com/en/docs/claude-code) qui enseigne a l'assistant IA l'API complete de r8e, ses patterns et ses idiomes. Pour l'activer, creez un lien symbolique ou copiez le skill dans le repertoire `.claude/skills/` de votre projet :
+
+```bash
+mkdir -p .claude/skills
+cp -r ./vendor/github.com/byte4ever/r8e/claude-skill .claude/skills/r8e
+```
+
+Ou si vous avez clone r8e directement :
+
+```bash
+mkdir -p .claude/skills
+ln -s "$(go list -m -f '{{.Dir}}' github.com/byte4ever/r8e)/claude-skill" .claude/skills/r8e
+```
+
+Une fois installe, Claude Code appliquera automatiquement ses connaissances r8e lorsque vous travaillez sur du code lie a la resilience.
+
 ## Exemples
 
-Voir le répertoire [`examples/`](examples/) pour des exemples exécutables démontrant chaque fonctionnalité :
+Voir le repertoire [`examples/`](examples/) pour des exemples executables demontrant chaque fonctionnalite :
 
 ```bash
 go run ./examples/01-quickstart/
