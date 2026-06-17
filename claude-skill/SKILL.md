@@ -107,7 +107,7 @@ r8e.IsTransient(err) // true for unclassified AND explicitly transient
 r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
-**Sentinel errors** (all implement `ResilienceError` interface with `IsResilience() bool`):
+**Sentinel errors** (match with `errors.Is`, even when wrapped):
 `r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrTimeout`, `r8e.ErrRetriesExhausted`.
 
 ## Hooks

@@ -38,7 +38,8 @@ la sante de toutes les policies enregistrees :
 
 ### Endpoint HTTP `/readyz`
 
-`ReadinessHandler(reg)` retourne un `http.Handler` qui :
+`r8ehttp.ReadinessHandler(reg)` (le paquet edge HTTP) retourne un
+`http.Handler` qui :
 
 - Retourne HTTP 200 avec un corps JSON lorsque toutes les policies critiques
   sont en bonne sante
@@ -82,7 +83,7 @@ flowchart TD
 | `DependsOn(reporters...)` | Declare les dependances de sante hierarchiques |
 | `Registry` | Agrege la sante de toutes les policies enregistrees |
 | `CheckReadiness()` | Retourne un `ReadinessStatus` avec l'etat de readiness global |
-| `ReadinessHandler(reg)` | Handler HTTP pour les sondes Kubernetes `/readyz` |
+| `r8ehttp.ReadinessHandler(reg)` | Handler HTTP pour les sondes Kubernetes `/readyz` |
 
 ## Execution
 

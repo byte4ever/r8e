@@ -3,15 +3,17 @@
 # Example 14 — JSON Configuration
 
 Demonstrates loading policy configuration from a JSON file and retrieving
-typed policies at runtime with `GetPolicy`.
+typed policies at runtime with `r8econf.GetPolicy`. File loading lives in the
+`r8econf` edge package so the core `r8e` package stays dependency-free.
 
 ## What it demonstrates
 
 ### Loading configuration
 
-`LoadConfig("config.json")` reads and validates a JSON configuration file.
-All policies are validated eagerly at load time — invalid durations, unknown
-backoff strategies, or malformed JSON produce immediate errors.
+`r8econf.Load("config.json")` reads and validates a JSON configuration file
+and returns a `*r8econf.Store`. All policies are validated eagerly at load
+time — invalid durations, unknown backoff strategies, or malformed JSON
+produce immediate errors.
 
 The included `config.json` defines two policies:
 
@@ -21,15 +23,16 @@ The included `config.json` defines two policies:
 
 ### Retrieving typed policies
 
-`GetPolicy[string](reg, "payment-api", ...)` retrieves the named
-configuration and builds a `Policy[string]`. Additional code-level options
-(like `WithFallback`) can augment the config-loaded settings. Code-level
-options are applied after config options, so they take precedence.
+`r8econf.GetPolicy[string](store, "payment-api", ...)` retrieves the named
+configuration and builds a `Policy[string]` (returning an error if the stored
+config is invalid). Additional code-level options (like `WithFallback`) can
+augment the config-loaded settings. Code-level options are applied after config
+options, so they take precedence.
 
 ### Unknown policy names
 
-If `GetPolicy` is called with a name that doesn't exist in the config, it
-creates a bare policy with only the options provided in code. This allows
+If `r8econf.GetPolicy` is called with a name that doesn't exist in the config,
+it creates a bare policy with only the options provided in code. This allows
 gradual migration from code-only to config-driven policies.
 
 ## Configuration format
@@ -63,8 +66,8 @@ Supported backoff strategies: `"constant"`, `"exponential"`, `"linear"`,
 
 | Concept | Detail |
 |---|---|
-| `LoadConfig(path)` | Reads and validates a JSON config file, returns a `*Registry` |
-| `GetPolicy[T](reg, name, opts...)` | Retrieves a typed policy by name with optional overrides |
+| `r8econf.Load(path)` | Reads and validates a JSON config file, returns a `*r8econf.Store` |
+| `r8econf.GetPolicy[T](store, name, opts...)` | Retrieves a typed policy by name (returns an error) with optional overrides |
 | Eager validation | All policies are validated at load time |
 | Option precedence | Code-level options override config options |
 
