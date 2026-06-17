@@ -3,11 +3,8 @@ module github.com/byte4ever/r8e/r8eotel
 go 1.25.5
 
 require (
-	// NOTE: r8eotel uses core API added after v0.1.0 (r8e.PolicyMetrics,
-	// Registry.Snapshot). Locally it resolves via the replace directive below;
-	// before publishing this module, tag the core with the release that
-	// carries that API (e.g. v0.2.0) and bump this require to it.
-	github.com/byte4ever/r8e v0.1.0
+	// Needs core API introduced in v0.2.0 (r8e.PolicyMetrics, Registry.Snapshot).
+	github.com/byte4ever/r8e v0.2.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
@@ -28,4 +25,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
+// Local monorepo development convenience; ignored by external consumers, which
+// resolve the require version above.
 replace github.com/byte4ever/r8e => ../
