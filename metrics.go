@@ -64,6 +64,10 @@ type (
 // instrument wraps the caller's hooks so each lifecycle event also increments
 // the matching counter. The returned Hooks has non-nil fields for every
 // counted event; uncounted events pass through unchanged.
+//
+// Pattern: Decorator — wraps the caller's Hooks with metric-counting behaviour
+// while preserving the Hooks shape, so the wrapped value is substitutable for
+// the original throughout NewPolicy.
 func (m *policyMetrics) instrument(user *Hooks) Hooks {
 	return Hooks{
 		OnRetry: func(attempt int, err error) {

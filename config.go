@@ -92,14 +92,14 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	if pc.Retry != nil {
-		runtime, err := retryRuntimeFromConfig(pc.Retry)
+		rt, err := retryRuntimeFromConfig(pc.Retry)
 		if err != nil {
 			return nil, err
 		}
 
 		opts = append(
 			opts,
-			WithRetry(runtime.maxAttempts, runtime.strategy, runtime.opts...),
+			WithRetry(rt.maxAttempts, rt.strategy, rt.opts...),
 		)
 	}
 

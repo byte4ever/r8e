@@ -26,17 +26,33 @@ type (
 	RateLimiter struct {
 		clock    Clock
 		hooks    *Hooks
-		rate     atomic.Uint64 // math.Float64bits of tokens-per-second
+		rate     atomicFloat64 // tokens per second
 		capacity atomic.Int64
 		tokens   atomic.Int64
 		lastNano atomic.Int64
 		cfg      rateLimitConfig
+	}
+
+	// atomicFloat64 is a lock-free float64 cell, storing the value as its
+	// IEEE-754 bit pattern in an atomic.Uint64.
+	atomicFloat64 struct {
+		bits atomic.Uint64
 	}
 )
 
 // fixedPointScale converts floating-point tokens to fixed-point integers.
 // Using 1e9 gives nanosecond-level precision for token fractions.
 const fixedPointScale int64 = 1_000_000_000
+
+// Load returns the stored value.
+func (a *atomicFloat64) Load() float64 {
+	return math.Float64frombits(a.bits.Load())
+}
+
+// Store sets the value.
+func (a *atomicFloat64) Store(value float64) {
+	a.bits.Store(math.Float64bits(value))
+}
 
 // RateLimitBlocking makes the rate limiter wait for a token instead of
 // rejecting.
@@ -66,7 +82,7 @@ func NewRateLimiter(
 		cfg:   cfg,
 	}
 
-	rl.rate.Store(math.Float64bits(rate))
+	rl.rate.Store(rate)
 	rl.capacity.Store(capacity)
 	// Start with a full bucket.
 	rl.tokens.Store(capacity)
@@ -81,7 +97,7 @@ func NewRateLimiter(
 func (rl *RateLimiter) Reconfigure(rate float64) {
 	newCapacity := int64(rate * float64(fixedPointScale))
 
-	rl.rate.Store(math.Float64bits(rate))
+	rl.rate.Store(rate)
 	rl.capacity.Store(newCapacity)
 
 	// Clamp the current tokens down to the new capacity.
@@ -121,7 +137,7 @@ func (rl *RateLimiter) refill() {
 		// elapsedNano * rate gives tokens in nanosecond-scaled units, which is
 		// already in our fixed-point representation (since scale = 1e9 =
 		// nanos/sec).
-		rate := math.Float64frombits(rl.rate.Load())
+		rate := rl.rate.Load()
 		addTokens := int64(float64(elapsedNano) * rate)
 
 		if addTokens <= 0 {

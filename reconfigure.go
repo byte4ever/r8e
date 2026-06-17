@@ -52,13 +52,39 @@ func (r *Registry) Reconfigure(name string, cfg PolicyConfig) error {
 // is applied to its corresponding live pattern; nil fields leave that pattern
 // unchanged. In-flight calls are unaffected.
 //
-// It returns an error wrapping [ErrPatternAbsent] if cfg specifies a pattern
-// the policy does not have, or a parse error for an invalid duration or backoff
-// strategy. Patterns are applied in a fixed order; on error, changes already
-// applied are kept.
+// Reconfigure is transactional: the whole config is validated (presence of each
+// targeted pattern, plus duration/strategy parsing) before any change is
+// applied, so on error the policy is left exactly as it was. It returns an
+// error wrapping [ErrPatternAbsent] if cfg specifies a pattern the policy does
+// not have, or a parse error for an invalid duration or backoff strategy.
 func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
-	if err := p.reconfigureDurations(cfg); err != nil {
-		return err
+	// Phase 1 — validate everything into deferred apply actions; no mutation.
+	var actions []func()
+
+	if cfg.Timeout != nil {
+		if p.timeout == nil {
+			return absentPatternError("timeout")
+		}
+
+		dur, err := time.ParseDuration(*cfg.Timeout)
+		if err != nil {
+			return fmt.Errorf("r8e: reconfigure timeout: %w", err)
+		}
+
+		actions = append(actions, func() { p.timeout.Store(int64(dur)) })
+	}
+
+	if cfg.Hedge != nil {
+		if p.hedge == nil {
+			return absentPatternError("hedge")
+		}
+
+		dur, err := time.ParseDuration(*cfg.Hedge)
+		if err != nil {
+			return fmt.Errorf("r8e: reconfigure hedge: %w", err)
+		}
+
+		actions = append(actions, func() { p.hedge.Store(int64(dur)) })
 	}
 
 	if cfg.RateLimit != nil {
@@ -66,7 +92,9 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 			return absentPatternError("rate_limit")
 		}
 
-		p.rateLimiter.Reconfigure(*cfg.RateLimit)
+		rate := *cfg.RateLimit
+
+		actions = append(actions, func() { p.rateLimiter.Reconfigure(rate) })
 	}
 
 	if cfg.Bulkhead != nil {
@@ -74,7 +102,9 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 			return absentPatternError("bulkhead")
 		}
 
-		p.bulkhead.Reconfigure(*cfg.Bulkhead)
+		slots := *cfg.Bulkhead
+
+		actions = append(actions, func() { p.bulkhead.Reconfigure(slots) })
 	}
 
 	if cfg.CircuitBreaker != nil {
@@ -87,7 +117,7 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 			return fmt.Errorf("r8e: reconfigure: %w", err)
 		}
 
-		p.circuitBreaker.Reconfigure(opts...)
+		actions = append(actions, func() { p.circuitBreaker.Reconfigure(opts...) })
 	}
 
 	if cfg.Retry != nil {
@@ -95,43 +125,17 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 			return absentPatternError("retry")
 		}
 
-		runtime, err := retryRuntimeFromConfig(cfg.Retry)
+		rt, err := retryRuntimeFromConfig(cfg.Retry)
 		if err != nil {
 			return fmt.Errorf("r8e: reconfigure: %w", err)
 		}
 
-		p.retry.Store(runtime)
+		actions = append(actions, func() { p.retry.Store(rt) })
 	}
 
-	return nil
-}
-
-// reconfigureDurations applies the timeout and hedge duration cells.
-func (p *Policy[T]) reconfigureDurations(cfg PolicyConfig) error {
-	if cfg.Timeout != nil {
-		if p.timeout == nil {
-			return absentPatternError("timeout")
-		}
-
-		d, err := time.ParseDuration(*cfg.Timeout)
-		if err != nil {
-			return fmt.Errorf("r8e: reconfigure timeout: %w", err)
-		}
-
-		p.timeout.Store(int64(d))
-	}
-
-	if cfg.Hedge != nil {
-		if p.hedge == nil {
-			return absentPatternError("hedge")
-		}
-
-		d, err := time.ParseDuration(*cfg.Hedge)
-		if err != nil {
-			return fmt.Errorf("r8e: reconfigure hedge: %w", err)
-		}
-
-		p.hedge.Store(int64(d))
+	// Phase 2 — all validated; apply.
+	for _, apply := range actions {
+		apply()
 	}
 
 	return nil

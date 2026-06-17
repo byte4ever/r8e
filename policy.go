@@ -369,14 +369,14 @@ func newRetryEntry[T any](
 		Name:     "retry",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				runtime := cell.Load()
+				rt := cell.Load()
 
 				return DoRetry[T](ctx, next, RetryParams{
-					MaxAttempts: runtime.maxAttempts,
-					Strategy:    runtime.strategy,
+					MaxAttempts: rt.maxAttempts,
+					Strategy:    rt.strategy,
 					Hooks:       hooks,
 					Clock:       clock,
-					Opts:        runtime.opts,
+					Opts:        rt.opts,
 				})
 			}
 		},

@@ -1,6 +1,8 @@
 package r8e
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -8,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func intPtr(i int) *int          { return &i }
-func f64Ptr(f float64) *float64  { return &f }
+func intPtr(i int) *int         { return &i }
+func f64Ptr(f float64) *float64 { return &f }
 
 // kitchenSinkPolicy builds a policy with every reloadable pattern present.
 func kitchenSinkPolicy(t *testing.T) *Policy[string] {
@@ -28,6 +30,8 @@ func kitchenSinkPolicy(t *testing.T) *Policy[string] {
 }
 
 func TestPolicyReconfigureAllPatterns(t *testing.T) {
+	t.Parallel()
+
 	p := kitchenSinkPolicy(t)
 
 	err := p.Reconfigure(PolicyConfig{
@@ -60,6 +64,8 @@ func TestPolicyReconfigureAllPatterns(t *testing.T) {
 }
 
 func TestPolicyReconfigureNilFieldsLeaveUnchanged(t *testing.T) {
+	t.Parallel()
+
 	p := kitchenSinkPolicy(t)
 
 	require.NoError(t, p.Reconfigure(PolicyConfig{Bulkhead: intPtr(1)}))
@@ -70,7 +76,31 @@ func TestPolicyReconfigureNilFieldsLeaveUnchanged(t *testing.T) {
 	assert.Equal(t, 5, p.circuitBreaker.cfg.failureThreshold)
 }
 
+// TestPolicyReconfigureTransactional verifies that a validation failure on one
+// field leaves every pattern unchanged (no partial application).
+func TestPolicyReconfigureTransactional(t *testing.T) {
+	t.Parallel()
+
+	p := kitchenSinkPolicy(t)
+	beforeTimeout := p.timeout.Load()
+	beforeBulkhead := p.bulkhead.Cap()
+
+	// A valid timeout/bulkhead alongside an invalid retry strategy: the whole
+	// call must fail and nothing must change.
+	err := p.Reconfigure(PolicyConfig{
+		Timeout:  strPtr("9s"),
+		Bulkhead: intPtr(77),
+		Retry:    &RetryConfig{Backoff: strPtr("bogus"), BaseDelay: strPtr("1ms")},
+	})
+	require.Error(t, err)
+
+	assert.Equal(t, beforeTimeout, p.timeout.Load(), "timeout must be unchanged")
+	assert.Equal(t, beforeBulkhead, p.bulkhead.Cap(), "bulkhead must be unchanged")
+}
+
 func TestPolicyReconfigureAbsentPattern(t *testing.T) {
+	t.Parallel()
+
 	bare := NewPolicy[string]("bare", WithRegistry(NewRegistry()))
 
 	tests := map[string]PolicyConfig{
@@ -84,31 +114,54 @@ func TestPolicyReconfigureAbsentPattern(t *testing.T) {
 
 	for name, cfg := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			err := bare.Reconfigure(cfg)
 			require.ErrorIs(t, err, ErrPatternAbsent)
-			assert.Contains(t, err.Error(), name)
+			assert.ErrorContains(t, err, name)
 		})
 	}
 }
 
 func TestPolicyReconfigureParseErrors(t *testing.T) {
-	p := kitchenSinkPolicy(t)
+	t.Parallel()
 
-	tests := map[string]PolicyConfig{
-		"bad timeout":        {Timeout: strPtr("nope")},
-		"bad hedge":          {Hedge: strPtr("nope")},
-		"bad cb recovery":    {CircuitBreaker: &CircuitBreakerConfig{RecoveryTimeout: strPtr("nope")}},
-		"bad retry strategy": {Retry: &RetryConfig{Backoff: strPtr("weird"), BaseDelay: strPtr("1ms")}},
+	tests := map[string]struct {
+		cfg     PolicyConfig
+		wantSub string
+	}{
+		"bad timeout": {
+			PolicyConfig{Timeout: strPtr("nope")},
+			"reconfigure timeout",
+		},
+		"bad hedge": {
+			PolicyConfig{Hedge: strPtr("nope")},
+			"reconfigure hedge",
+		},
+		"bad cb recovery": {
+			PolicyConfig{CircuitBreaker: &CircuitBreakerConfig{RecoveryTimeout: strPtr("nope")}},
+			"circuit_breaker.recovery_timeout",
+		},
+		"bad retry strategy": {
+			PolicyConfig{Retry: &RetryConfig{Backoff: strPtr("weird"), BaseDelay: strPtr("1ms")}},
+			"unknown backoff strategy",
+		},
 	}
 
-	for name, cfg := range tests {
+	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			require.Error(t, p.Reconfigure(cfg))
+			t.Parallel()
+
+			err := kitchenSinkPolicy(t).Reconfigure(tt.cfg)
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.wantSub)
 		})
 	}
 }
 
 func TestRateLimiterReconfigureClampsTokens(t *testing.T) {
+	t.Parallel()
+
 	rl := NewRateLimiter(100, &stubClock{now: time.Now()}, &Hooks{})
 	// The bucket starts full at 100 tokens.
 
@@ -119,6 +172,8 @@ func TestRateLimiterReconfigureClampsTokens(t *testing.T) {
 }
 
 func TestRegistryReconfigure(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	_ = NewPolicy[string]("svc", WithRegistry(reg), WithBulkhead(2))
 
@@ -137,4 +192,64 @@ func TestRegistryReconfigure(t *testing.T) {
 
 	err := reg.Reconfigure("missing", PolicyConfig{Bulkhead: intPtr(1)})
 	require.ErrorIs(t, err, ErrPolicyNotRegistered)
+}
+
+// TestPolicyReconfigureConcurrentWithCalls hammers Reconfigure, Metrics, and
+// Do/Snapshot from many goroutines under -race to lock in the lock-free /
+// mutex-guarded reconfiguration guarantees against regression.
+func TestPolicyReconfigureConcurrentWithCalls(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	p := NewPolicy[string]("concurrent",
+		WithRegistry(reg),
+		WithClock(newPolicyClock()),
+		WithTimeout(time.Second),
+		WithRateLimit(1000),
+		WithBulkhead(100),
+		WithCircuitBreaker(FailureThreshold(1000)),
+		WithRetry(2, ConstantBackoff(time.Millisecond)),
+	)
+
+	const callers = 8
+
+	var wg sync.WaitGroup
+
+	stop := make(chan struct{})
+
+	for range callers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_, _ = p.Do(
+						context.Background(),
+						func(_ context.Context) (string, error) { return "ok", nil },
+					)
+					_ = p.Metrics()
+					_ = reg.Snapshot()
+				}
+			}
+		}()
+	}
+
+	for i := range 200 {
+		require.NoError(t, p.Reconfigure(PolicyConfig{
+			Timeout:   strPtr("2s"),
+			RateLimit: f64Ptr(float64(i%50 + 1)),
+			Bulkhead:  intPtr(i%20 + 1),
+			CircuitBreaker: &CircuitBreakerConfig{
+				FailureThreshold: intPtr(i%10 + 1),
+			},
+		}))
+	}
+
+	close(stop)
+	wg.Wait()
 }

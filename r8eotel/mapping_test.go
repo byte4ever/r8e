@@ -76,8 +76,15 @@ func (m erroringMeter) RegisterCallback(
 func TestRegisterPropagatesInstrumentError(t *testing.T) {
 	reg := r8e.NewRegistry()
 
-	for _, failOn := range []string{"counter", "gauge", "register"} {
+	cases := map[string]string{
+		"counter":  "counter create failed",
+		"gauge":    "gauge create failed",
+		"register": "register otel metrics callback", // wrapped
+	}
+
+	for failOn, wantSub := range cases {
 		_, err := Register(erroringMeter{failOn: failOn}, reg)
 		require.Error(t, err, "failOn=%s", failOn)
+		require.ErrorContains(t, err, wantSub)
 	}
 }

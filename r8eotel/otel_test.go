@@ -94,3 +94,47 @@ func TestRegisterReportsPolicyMetrics(t *testing.T) {
 	healthy, _ := collectInt64(t, rm, "r8e.policy.healthy")
 	assert.Equal(t, int64(0), healthy, "open critical breaker => unhealthy")
 }
+
+// TestRegisterEmitsAllInstruments guards every instrument name: a typo or a
+// dropped instrument would make the corresponding metric disappear.
+func TestRegisterEmitsAllInstruments(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	reg := r8e.NewRegistry()
+	_ = r8e.NewPolicy[string]("svc",
+		r8e.WithRegistry(reg),
+		r8e.WithCircuitBreaker(),
+		r8e.WithRateLimit(10),
+		r8e.WithBulkhead(4),
+	)
+
+	registration, err := r8eotel.Register(meter, reg)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, registration.Unregister()) }()
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	got := make(map[string]bool)
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			got[metric.Name] = true
+		}
+	}
+
+	want := []string{
+		"r8e.policy.retries", "r8e.policy.timeouts",
+		"r8e.policy.circuit_opens", "r8e.policy.circuit_closes",
+		"r8e.policy.circuit_half_opens", "r8e.policy.rate_limited",
+		"r8e.policy.bulkhead_rejected", "r8e.policy.hedges_triggered",
+		"r8e.policy.hedges_won", "r8e.policy.fallbacks_used",
+		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
+		"r8e.policy.circuit_state", "r8e.policy.healthy",
+		"r8e.policy.saturated",
+	}
+	for _, name := range want {
+		assert.Contains(t, got, name)
+	}
+}
