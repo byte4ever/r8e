@@ -6,15 +6,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"time"
 
-	json "github.com/goccy/go-json"
-
 	"github.com/byte4ever/r8e"
+	"github.com/byte4ever/r8e/r8ehttp"
 )
 
 func main() {
@@ -64,7 +64,7 @@ func main() {
 	// --- HTTP readiness endpoint ---
 	fmt.Println("\n=== HTTP /readyz Endpoint ===")
 
-	handler := r8e.ReadinessHandler(reg)
+	handler := r8ehttp.ReadinessHandler(reg)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", http.NoBody))
 	fmt.Printf("  HTTP %d\n", rec.Code)

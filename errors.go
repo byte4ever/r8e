@@ -7,18 +7,6 @@ import "errors"
 // ---------------------------------------------------------------------------.
 
 type (
-	// ResilienceError identifies errors produced by the resilience layer
-	// itself,
-	// as opposed to errors from the wrapped function.
-	//nolint:iface // exported for use in tests and consumer error
-	// classification.
-	ResilienceError interface {
-		error
-		// IsResilience reports whether this error originates from the
-		// resilience layer.
-		IsResilience() bool
-	}
-
 	// transientError marks a wrapped error as transient (retriable).
 	transientError struct {
 		err error
@@ -54,9 +42,6 @@ func (e *permanentError) Error() string { return "permanent: " + e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }
 
 func (e resilienceError) Error() string { return string(e) }
-
-// IsResilience reports whether the error is a resilience infrastructure error.
-func (resilienceError) IsResilience() bool { return true }
 
 // Transient wraps err to mark it as a transient (retriable) error.
 // Returns nil if err is nil.

@@ -5,6 +5,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,6 +42,8 @@ func (c *stubClock) setElapsed(d time.Duration) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerDefaultConfig(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{})
 
@@ -47,18 +52,11 @@ func TestCircuitBreakerDefaultConfig(t *testing.T) {
 	for range 4 {
 		cb.RecordFailure()
 	}
-	if err := cb.Allow(); err != nil {
-		t.Fatalf(
-			"Allow() after 4 failures = %v, want nil (threshold is 5)",
-			err,
-		)
-	}
+	require.NoError(t, cb.Allow())
 
 	// The 5th failure should open it.
 	cb.RecordFailure()
-	if err := cb.Allow(); err != ErrCircuitOpen {
-		t.Fatalf("Allow() after 5 failures = %v, want ErrCircuitOpen", err)
-	}
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +64,8 @@ func TestCircuitBreakerDefaultConfig(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerCustomConfig(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(2),
@@ -76,47 +76,20 @@ func TestCircuitBreakerCustomConfig(t *testing.T) {
 	// Two failures open the circuit (custom threshold = 2).
 	cb.RecordFailure()
 	cb.RecordFailure()
-	if err := cb.Allow(); err != ErrCircuitOpen {
-		t.Fatalf("Allow() after 2 failures = %v, want ErrCircuitOpen", err)
-	}
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 
 	// Advance past custom recovery timeout (10s).
 	clk.setElapsed(11 * time.Second)
-	if err := cb.Allow(); err != nil {
-		t.Fatalf(
-			"Allow() after recovery timeout = %v, want nil (half-open)",
-			err,
-		)
-	}
-	if got := cb.State(); got != "half_open" {
-		t.Fatalf("State() = %q, want %q", got, "half_open")
-	}
+	require.NoError(t, cb.Allow())
+	require.Equal(t, "half_open", cb.State())
 
 	// Half-open: need 3 successes to close (custom halfOpenMaxAttempts = 3).
 	cb.RecordSuccess()
-	if got := cb.State(); got != "half_open" {
-		t.Fatalf(
-			"State() after 1 success in half-open = %q, want %q",
-			got,
-			"half_open",
-		)
-	}
+	require.Equal(t, "half_open", cb.State())
 	cb.RecordSuccess()
-	if got := cb.State(); got != "half_open" {
-		t.Fatalf(
-			"State() after 2 successes in half-open = %q, want %q",
-			got,
-			"half_open",
-		)
-	}
+	require.Equal(t, "half_open", cb.State())
 	cb.RecordSuccess()
-	if got := cb.State(); got != "closed" {
-		t.Fatalf(
-			"State() after 3 successes in half-open = %q, want %q",
-			got,
-			"closed",
-		)
-	}
+	require.Equal(t, "closed", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -124,15 +97,13 @@ func TestCircuitBreakerCustomConfig(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClosedStateAllowsCalls(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{})
 
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() on fresh breaker = %v, want nil", err)
-	}
-	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() = %q, want %q", got, "closed")
-	}
+	require.NoError(t, cb.Allow())
+	require.Equal(t, "closed", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +111,8 @@ func TestClosedStateAllowsCalls(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClosedStateOpensAtThreshold(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{}, FailureThreshold(3))
 
@@ -147,16 +120,12 @@ func TestClosedStateOpensAtThreshold(t *testing.T) {
 	cb.RecordFailure()
 
 	// Still closed after 2 failures (threshold is 3).
-	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() after 2 failures = %q, want %q", got, "closed")
-	}
+	require.Equal(t, "closed", cb.State())
 
 	cb.RecordFailure()
 
 	// Now open.
-	if got := cb.State(); got != "open" {
-		t.Fatalf("State() after 3 failures = %q, want %q", got, "open")
-	}
+	require.Equal(t, "open", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -164,15 +133,14 @@ func TestClosedStateOpensAtThreshold(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOpenStateRejectsWithErrCircuitOpen(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{}, FailureThreshold(1))
 
 	cb.RecordFailure()
 
-	err := cb.Allow()
-	if err != ErrCircuitOpen {
-		t.Fatalf("Allow() in open state = %v, want ErrCircuitOpen", err)
-	}
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +148,8 @@ func TestOpenStateRejectsWithErrCircuitOpen(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOpenToHalfOpenAfterRecoveryTimeout(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(1),
@@ -190,21 +160,12 @@ func TestOpenToHalfOpenAfterRecoveryTimeout(t *testing.T) {
 
 	// Still within recovery timeout.
 	clk.setElapsed(4 * time.Second)
-	if err := cb.Allow(); err != ErrCircuitOpen {
-		t.Fatalf(
-			"Allow() before recovery timeout = %v, want ErrCircuitOpen",
-			err,
-		)
-	}
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 
 	// Past recovery timeout.
 	clk.setElapsed(6 * time.Second)
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() after recovery timeout = %v, want nil", err)
-	}
-	if got := cb.State(); got != "half_open" {
-		t.Fatalf("State() = %q, want %q", got, "half_open")
-	}
+	require.NoError(t, cb.Allow())
+	require.Equal(t, "half_open", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +173,8 @@ func TestOpenToHalfOpenAfterRecoveryTimeout(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHalfOpenSuccessClosesCircuit(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(1),
@@ -223,19 +186,11 @@ func TestHalfOpenSuccessClosesCircuit(t *testing.T) {
 	clk.setElapsed(2 * time.Second)
 
 	// Transition to half-open.
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() = %v, want nil", err)
-	}
+	require.NoError(t, cb.Allow())
 
 	cb.RecordSuccess()
 
-	if got := cb.State(); got != "closed" {
-		t.Fatalf(
-			"State() after success in half-open = %q, want %q",
-			got,
-			"closed",
-		)
-	}
+	require.Equal(t, "closed", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +198,8 @@ func TestHalfOpenSuccessClosesCircuit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHalfOpenFailureReopensCircuit(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(1),
@@ -253,19 +210,11 @@ func TestHalfOpenFailureReopensCircuit(t *testing.T) {
 	clk.setElapsed(2 * time.Second)
 
 	// Transition to half-open.
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() = %v, want nil", err)
-	}
+	require.NoError(t, cb.Allow())
 
 	cb.RecordFailure()
 
-	if got := cb.State(); got != "open" {
-		t.Fatalf(
-			"State() after failure in half-open = %q, want %q",
-			got,
-			"open",
-		)
-	}
+	require.Equal(t, "open", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +222,8 @@ func TestHalfOpenFailureReopensCircuit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSuccessInClosedStateResetsFailureCount(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{}, FailureThreshold(3))
 
@@ -284,19 +235,11 @@ func TestSuccessInClosedStateResetsFailureCount(t *testing.T) {
 	// Now record 2 more failures — should NOT open (count was reset).
 	cb.RecordFailure()
 	cb.RecordFailure()
-	if got := cb.State(); got != "closed" {
-		t.Fatalf(
-			"State() = %q, want %q after reset and 2 failures",
-			got,
-			"closed",
-		)
-	}
+	require.Equal(t, "closed", cb.State())
 
 	// The 3rd failure after reset should open.
 	cb.RecordFailure()
-	if got := cb.State(); got != "open" {
-		t.Fatalf("State() = %q, want %q", got, "open")
-	}
+	require.Equal(t, "open", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -304,26 +247,22 @@ func TestSuccessInClosedStateResetsFailureCount(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStateReturnsCorrectStrings(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(1),
 		RecoveryTimeout(1*time.Second),
 	)
 
-	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() = %q, want %q", got, "closed")
-	}
+	require.Equal(t, "closed", cb.State())
 
 	cb.RecordFailure()
-	if got := cb.State(); got != "open" {
-		t.Fatalf("State() = %q, want %q", got, "open")
-	}
+	require.Equal(t, "open", cb.State())
 
 	clk.setElapsed(2 * time.Second)
 	cb.Allow() // triggers half-open
-	if got := cb.State(); got != "half_open" {
-		t.Fatalf("State() = %q, want %q", got, "half_open")
-	}
+	require.Equal(t, "half_open", cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +270,8 @@ func TestStateReturnsCorrectStrings(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerHookEmissions(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 
 	var openCount, closeCount, halfOpenCount atomic.Int64
@@ -348,25 +289,21 @@ func TestCircuitBreakerHookEmissions(t *testing.T) {
 
 	// Trigger open.
 	cb.RecordFailure()
-	if got := openCount.Load(); got != 1 {
-		t.Fatalf("OnCircuitOpen called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), openCount.Load())
 
 	// Trigger half-open.
 	clk.setElapsed(2 * time.Second)
 	cb.Allow()
-	if got := halfOpenCount.Load(); got != 1 {
-		t.Fatalf("OnCircuitHalfOpen called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), halfOpenCount.Load())
 
 	// Trigger close.
 	cb.RecordSuccess()
-	if got := closeCount.Load(); got != 1 {
-		t.Fatalf("OnCircuitClose called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), closeCount.Load())
 }
 
 func TestCircuitBreakerHookOnReopenFromHalfOpen(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 
 	var openCount atomic.Int64
@@ -381,9 +318,7 @@ func TestCircuitBreakerHookOnReopenFromHalfOpen(t *testing.T) {
 
 	// Open.
 	cb.RecordFailure()
-	if got := openCount.Load(); got != 1 {
-		t.Fatalf("OnCircuitOpen called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), openCount.Load())
 
 	// Half-open.
 	clk.setElapsed(2 * time.Second)
@@ -391,12 +326,7 @@ func TestCircuitBreakerHookOnReopenFromHalfOpen(t *testing.T) {
 
 	// Failure in half-open should re-open and fire hook again.
 	cb.RecordFailure()
-	if got := openCount.Load(); got != 2 {
-		t.Fatalf(
-			"OnCircuitOpen called %d times, want 2 (reopened from half-open)",
-			got,
-		)
-	}
+	require.Equal(t, int64(2), openCount.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +334,8 @@ func TestCircuitBreakerHookOnReopenFromHalfOpen(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(10),
@@ -429,9 +361,7 @@ func TestCircuitBreakerConcurrentAccess(t *testing.T) {
 	// Just verify it didn't panic or race — the race detector will catch
 	// issues.
 	state := cb.State()
-	if state != "closed" && state != "open" && state != "half_open" {
-		t.Fatalf("State() = %q, want one of closed/open/half_open", state)
-	}
+	assert.Contains(t, []string{"closed", "open", "half_open"}, state)
 }
 
 // ---------------------------------------------------------------------------

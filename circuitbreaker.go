@@ -1,7 +1,7 @@
 package r8e
 
 import (
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -23,21 +23,25 @@ type (
 	// down.
 	//
 	// Pattern: Circuit Breaker — fast-fails calls to unhealthy downstream;
-	// auto-recovers via half-open probe after timeout. Lock-free via atomic
-	// CAS.
+	// auto-recovers via half-open probe after timeout. State transitions are
+	// guarded by a mutex so the (state, counters) tuple mutates atomically as a
+	// unit — the cheap, linearizable choice the Go concurrency guidance
+	// prescribes for a multi-field state machine.
 	CircuitBreaker struct {
-		clock Clock
-		hooks *Hooks
-		cfg   circuitBreakerConfig
+		clock       Clock
+		hooks       *Hooks
+		lastFailure time.Time
+		cfg         circuitBreakerConfig
 
-		state             atomic.Uint32 // stateClosed | stateOpen | stateHalfOpen
-		failureCount      atomic.Int64
-		lastFailureNano   atomic.Int64 // unix nano of last failure
-		halfOpenSuccesses atomic.Int64
+		failureCount      int
+		halfOpenSuccesses int
+		halfOpenInFlight  int // probes currently admitted in half-open
+		mu                sync.Mutex
+		state             uint32 // stateClosed | stateOpen | stateHalfOpen
 	}
 )
 
-// Circuit breaker states (stored in atomic.Uint32).
+// Circuit breaker states.
 const (
 	stateClosed   uint32 = 0
 	stateOpen     uint32 = 1
@@ -94,98 +98,149 @@ func NewCircuitBreaker(
 }
 
 // Allow checks if a call should be allowed. Returns nil if the breaker is
-// closed or half-open. Returns ErrCircuitOpen if the breaker is open and the
-// recovery timeout hasn't elapsed.
+// closed, or half-open with a probe slot available. Returns ErrCircuitOpen if
+// the breaker is open and the recovery timeout hasn't elapsed, or if half-open
+// already has halfOpenMaxAttempts probes in flight.
+// The state-transition methods capture the lifecycle hook to fire in a local
+// and invoke it AFTER releasing cb.mu, so a user-supplied callback can never
+// run inside the critical section (which would deadlock on re-entry or stall
+// every caller behind a slow hook).
+
 func (cb *CircuitBreaker) Allow() error {
-	s := cb.state.Load()
+	cb.mu.Lock()
 
-	if s == stateOpen {
-		// Check if recovery timeout has elapsed.
-		lastNano := cb.lastFailureNano.Load()
+	var (
+		emit func()
+		err  error
+	)
 
-		lastTime := time.Unix(0, lastNano)
-		if cb.clock.Since(lastTime) > cb.cfg.recoveryTimeout {
-			// Attempt CAS from open to half-open.
-			if cb.state.CompareAndSwap(stateOpen, stateHalfOpen) {
-				cb.halfOpenSuccesses.Store(0)
-				cb.hooks.emitCircuitHalfOpen()
-			}
-			// Even if CAS failed (another goroutine already transitioned),
-			// the state is now half-open, so allow the call.
-			return nil
+	switch cb.state {
+	case stateOpen:
+		if cb.clock.Since(cb.lastFailure) <= cb.cfg.recoveryTimeout {
+			err = ErrCircuitOpen
+
+			break
 		}
 
-		return ErrCircuitOpen
+		// Recovery timeout elapsed: transition to half-open and admit this
+		// call as the first probe.
+		cb.state = stateHalfOpen
+		cb.halfOpenSuccesses = 0
+		cb.halfOpenInFlight = 1
+		emit = cb.hooks.emitCircuitHalfOpen
+
+	case stateHalfOpen:
+		// Admit at most halfOpenMaxAttempts concurrent probes; reject the rest
+		// so a recovering downstream is not hit by a thundering herd.
+		if cb.halfOpenInFlight >= cb.cfg.halfOpenMaxAttempts {
+			err = ErrCircuitOpen
+
+			break
+		}
+
+		cb.halfOpenInFlight++
+
+	default:
+		// stateClosed: allow the call.
 	}
 
-	// stateClosed or stateHalfOpen: allow the call.
-	return nil
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
+	}
+
+	return err
 }
 
 // RecordSuccess records a successful call.
 func (cb *CircuitBreaker) RecordSuccess() {
-	s := cb.state.Load()
+	cb.mu.Lock()
 
-	switch s {
+	var emit func()
+
+	switch cb.state {
 	case stateClosed:
-		// Reset failure count on success.
-		cb.failureCount.Store(0)
+		cb.failureCount = 0
 
 	case stateHalfOpen:
-		newCount := cb.halfOpenSuccesses.Add(1)
-		if newCount < int64(cb.cfg.halfOpenMaxAttempts) {
+		cb.releaseProbe()
+
+		cb.halfOpenSuccesses++
+		if cb.halfOpenSuccesses < cb.cfg.halfOpenMaxAttempts {
 			break
 		}
 
-		if !cb.state.CompareAndSwap(stateHalfOpen, stateClosed) {
-			break
-		}
-
-		cb.failureCount.Store(0)
-		cb.halfOpenSuccesses.Store(0)
-		cb.hooks.emitCircuitClose()
+		cb.state = stateClosed
+		cb.failureCount = 0
+		cb.halfOpenSuccesses = 0
+		cb.halfOpenInFlight = 0
+		emit = cb.hooks.emitCircuitClose
 
 	default:
-		// stateOpen — no action on success
+		// stateOpen — no action on success.
+	}
+
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
 	}
 }
 
 // RecordFailure records a failed call.
 func (cb *CircuitBreaker) RecordFailure() {
-	// Record the failure time.
-	cb.lastFailureNano.Store(cb.clock.Now().UnixNano())
+	cb.mu.Lock()
 
-	s := cb.state.Load()
+	var emit func()
 
-	switch s {
+	cb.lastFailure = cb.clock.Now()
+
+	switch cb.state {
 	case stateClosed:
-		newCount := cb.failureCount.Add(1)
-		if newCount < int64(cb.cfg.failureThreshold) {
+		cb.failureCount++
+		if cb.failureCount < cb.cfg.failureThreshold {
 			break
 		}
 
-		if !cb.state.CompareAndSwap(stateClosed, stateOpen) {
-			break
-		}
-
-		cb.hooks.emitCircuitOpen()
+		cb.state = stateOpen
+		emit = cb.hooks.emitCircuitOpen
 
 	case stateHalfOpen:
-		// Any failure in half-open goes back to open.
-		if cb.state.CompareAndSwap(stateHalfOpen, stateOpen) {
-			cb.halfOpenSuccesses.Store(0)
-			cb.hooks.emitCircuitOpen()
-		}
+		// Any failure in half-open reopens the breaker.
+		cb.releaseProbe()
+		cb.state = stateOpen
+		cb.halfOpenSuccesses = 0
+		cb.halfOpenInFlight = 0
+		emit = cb.hooks.emitCircuitOpen
 
 	default:
-		// stateOpen — already open, no state change needed
+		// stateOpen — already open, no state change needed.
+	}
+
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
+	}
+}
+
+// releaseProbe decrements the in-flight half-open probe counter, flooring at
+// zero so RecordSuccess/RecordFailure calls without a matching Allow (or more
+// results than admitted probes) cannot drive it negative. Caller must hold mu.
+func (cb *CircuitBreaker) releaseProbe() {
+	if cb.halfOpenInFlight > 0 {
+		cb.halfOpenInFlight--
 	}
 }
 
 // State returns the current state as a string: "closed", "open", or
 // "half_open".
 func (cb *CircuitBreaker) State() string {
-	switch cb.state.Load() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
 	case stateOpen:
 		return "open"
 	case stateHalfOpen:

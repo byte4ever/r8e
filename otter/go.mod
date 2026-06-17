@@ -3,7 +3,7 @@ module github.com/byte4ever/r8e/otter
 go 1.25.5
 
 require (
-	github.com/byte4ever/r8e v0.0.0
+	github.com/byte4ever/r8e v0.1.0
 	github.com/maypok86/otter v1.2.4
 )
 

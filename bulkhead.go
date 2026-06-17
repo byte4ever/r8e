@@ -37,10 +37,21 @@ func (b *Bulkhead) Acquire() error {
 	}
 }
 
-// Release releases a slot.
+// Release releases a slot previously taken by a successful [Bulkhead.Acquire].
+// A Release with no matching Acquire (or a double Release) is a no-op rather
+// than driving the counter negative, which would silently disable the limiter.
 func (b *Bulkhead) Release() {
-	b.current.Add(-1)
-	b.hooks.emitBulkheadReleased()
+	for {
+		cur := b.current.Load()
+		if cur <= 0 {
+			return
+		}
+
+		if b.current.CompareAndSwap(cur, cur-1) {
+			b.hooks.emitBulkheadReleased()
+			return
+		}
+	}
 }
 
 // Full returns true if all slots are in use.

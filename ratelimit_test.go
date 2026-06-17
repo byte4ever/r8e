@@ -2,11 +2,12 @@ package r8e
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -68,24 +69,24 @@ func (t *rateLimitTimer) Reset(time.Duration) bool { return false }
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterAllowWithinLimit(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(10, clk, &Hooks{})
 
 	// The bucket starts full with 10 tokens. Acquiring once should succeed.
-	if err := rl.Allow(context.Background()); err != nil {
-		t.Fatalf("Allow() = %v, want nil", err)
-	}
+	require.NoError(t, rl.Allow(context.Background()))
 }
 
 func TestRateLimiterAllowMultipleWithinLimit(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(5, clk, &Hooks{})
 
 	// 5 tokens available, acquire all 5.
-	for i := range 5 {
-		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf("Allow() call %d = %v, want nil", i, err)
-		}
+	for range 5 {
+		require.NoError(t, rl.Allow(context.Background()))
 	}
 }
 
@@ -94,24 +95,20 @@ func TestRateLimiterAllowMultipleWithinLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterRejectModeExceedLimit(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(3, clk, &Hooks{})
 
 	// Drain all 3 tokens.
 	for range 3 {
-		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf("Allow() = %v, want nil", err)
-		}
+		require.NoError(t, rl.Allow(context.Background()))
 	}
 
 	// The 4th call should be rejected.
 	err := rl.Allow(context.Background())
-	if err == nil {
-		t.Fatal("Allow() = nil, want ErrRateLimited")
-	}
-	if !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("Allow() = %v, want ErrRateLimited", err)
-	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRateLimited)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,14 +116,14 @@ func TestRateLimiterRejectModeExceedLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterBlockingModeWaitsForToken(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(2, clk, &Hooks{}, RateLimitBlocking())
 
 	// Drain all tokens.
 	for range 2 {
-		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf("Allow() = %v, want nil", err)
-		}
+		require.NoError(t, rl.Allow(context.Background()))
 	}
 
 	// In blocking mode, the next Allow should wait. Advance time in background
@@ -140,10 +137,7 @@ func TestRateLimiterBlockingModeWaitsForToken(t *testing.T) {
 	}()
 
 	// Allow should eventually succeed after clock advances.
-	err := rl.Allow(context.Background())
-	if err != nil {
-		t.Fatalf("Allow() in blocking mode = %v, want nil", err)
-	}
+	require.NoError(t, rl.Allow(context.Background()))
 
 	<-done
 }
@@ -153,13 +147,13 @@ func TestRateLimiterBlockingModeWaitsForToken(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterBlockingModeContextCancellation(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(1, clk, &Hooks{}, RateLimitBlocking())
 
 	// Drain the single token.
-	if err := rl.Allow(context.Background()); err != nil {
-		t.Fatalf("Allow() = %v, want nil", err)
-	}
+	require.NoError(t, rl.Allow(context.Background()))
 
 	// Create a context that we cancel quickly.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -175,12 +169,8 @@ func TestRateLimiterBlockingModeContextCancellation(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("Allow() = nil, want context.Canceled")
-		}
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Allow() = %v, want context.Canceled", err)
-		}
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Allow() did not return after context cancellation")
 	}
@@ -191,38 +181,34 @@ func TestRateLimiterBlockingModeContextCancellation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterTokenRefillOverTime(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(10, clk, &Hooks{})
 
 	// Drain all 10 tokens.
 	for range 10 {
-		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf("Allow() = %v, want nil", err)
-		}
+		require.NoError(t, rl.Allow(context.Background()))
 	}
 
 	// No tokens left.
-	if err := rl.Allow(context.Background()); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("Allow() = %v, want ErrRateLimited", err)
-	}
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 
 	// Advance 500ms — should refill 5 tokens (rate=10/s).
 	clk.advance(500 * time.Millisecond)
 
 	// We should be able to acquire 5 tokens now.
-	for i := range 5 {
-		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf("Allow() after refill, call %d = %v, want nil", i, err)
-		}
+	for range 5 {
+		require.NoError(t, rl.Allow(context.Background()))
 	}
 
 	// 6th should fail.
-	if err := rl.Allow(context.Background()); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("Allow() = %v, want ErrRateLimited", err)
-	}
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 }
 
 func TestRateLimiterTokenRefillCapsAtBucketCapacity(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(5, clk, &Hooks{})
 
@@ -235,20 +221,12 @@ func TestRateLimiterTokenRefillCapsAtBucketCapacity(t *testing.T) {
 	clk.advance(10 * time.Second)
 
 	// Should still only be able to acquire 5 (capacity cap).
-	for i := range 5 {
-		if err := rl.Allow(context.Background()); err != nil {
-			t.Fatalf(
-				"Allow() after long refill, call %d = %v, want nil",
-				i,
-				err,
-			)
-		}
+	for range 5 {
+		require.NoError(t, rl.Allow(context.Background()))
 	}
 
 	// 6th should fail — tokens capped at 5.
-	if err := rl.Allow(context.Background()); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("Allow() = %v, want ErrRateLimited (capped at capacity)", err)
-	}
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 }
 
 // ---------------------------------------------------------------------------
@@ -256,30 +234,26 @@ func TestRateLimiterTokenRefillCapsAtBucketCapacity(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterSaturatedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(2, clk, &Hooks{})
 
 	// Not saturated initially.
-	if rl.Saturated() {
-		t.Fatal("Saturated() = true, want false on fresh limiter")
-	}
+	require.False(t, rl.Saturated())
 
 	// Drain all tokens.
 	_ = rl.Allow(context.Background())
 	_ = rl.Allow(context.Background())
 
 	// Now saturated.
-	if !rl.Saturated() {
-		t.Fatal("Saturated() = false, want true after draining all tokens")
-	}
+	require.True(t, rl.Saturated())
 
 	// Refill by advancing time.
 	clk.advance(1 * time.Second)
 
 	// No longer saturated.
-	if rl.Saturated() {
-		t.Fatal("Saturated() = true, want false after refill")
-	}
+	require.False(t, rl.Saturated())
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +261,8 @@ func TestRateLimiterSaturatedWhenEmpty(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterHookEmissionOnRejection(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 
 	var rateLimitedCount atomic.Int64
@@ -301,18 +277,16 @@ func TestRateLimiterHookEmissionOnRejection(t *testing.T) {
 
 	// Rejected — hook should fire.
 	_ = rl.Allow(context.Background())
-	if got := rateLimitedCount.Load(); got != 1 {
-		t.Fatalf("OnRateLimited called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), rateLimitedCount.Load())
 
 	// Rejected again.
 	_ = rl.Allow(context.Background())
-	if got := rateLimitedCount.Load(); got != 2 {
-		t.Fatalf("OnRateLimited called %d times, want 2", got)
-	}
+	require.Equal(t, int64(2), rateLimitedCount.Load())
 }
 
 func TestRateLimiterNoHookOnBlockingSuccess(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 
 	var rateLimitedCount atomic.Int64
@@ -332,17 +306,9 @@ func TestRateLimiterNoHookOnBlockingSuccess(t *testing.T) {
 	}()
 
 	// Blocking Allow should succeed without emitting hook.
-	err := rl.Allow(context.Background())
-	if err != nil {
-		t.Fatalf("Allow() = %v, want nil", err)
-	}
+	require.NoError(t, rl.Allow(context.Background()))
 
-	if got := rateLimitedCount.Load(); got != 0 {
-		t.Fatalf(
-			"OnRateLimited called %d times, want 0 for blocking success",
-			got,
-		)
-	}
+	require.Equal(t, int64(0), rateLimitedCount.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +316,8 @@ func TestRateLimiterNoHookOnBlockingSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(1, clk, &Hooks{})
 
@@ -364,11 +332,11 @@ func TestRateLimiterNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimitBlockingOption(t *testing.T) {
+	t.Parallel()
+
 	var cfg rateLimitConfig
 	RateLimitBlocking()(&cfg)
-	if !cfg.blocking {
-		t.Fatal("blocking = false, want true")
-	}
+	require.True(t, cfg.blocking)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +344,8 @@ func TestRateLimitBlockingOption(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(100, clk, &Hooks{})
 
@@ -404,21 +374,17 @@ func TestRateLimiterConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	total := allowed.Load() + rejected.Load()
-	if total != 500 {
-		t.Fatalf("total calls = %d, want 500", total)
-	}
+	require.Equal(t, int64(500), total)
 
 	// With 100 tokens and 500 calls, we should have some allowed and some
 	// rejected.
-	if allowed.Load() == 0 {
-		t.Fatal("expected some calls to be allowed")
-	}
-	if rejected.Load() == 0 {
-		t.Fatal("expected some calls to be rejected (500 calls > 100 tokens)")
-	}
+	require.NotZero(t, allowed.Load())
+	require.NotZero(t, rejected.Load())
 }
 
 func TestRateLimiterConcurrentAccessWithRefill(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(1000, clk, &Hooks{})
 
@@ -443,6 +409,8 @@ func TestRateLimiterConcurrentAccessWithRefill(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterBlockingModeAlreadyCancelledContext(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(1, clk, &Hooks{}, RateLimitBlocking())
 
@@ -454,12 +422,8 @@ func TestRateLimiterBlockingModeAlreadyCancelledContext(t *testing.T) {
 	cancel() // cancel before calling Allow
 
 	err := rl.Allow(ctx)
-	if err == nil {
-		t.Fatal("Allow() = nil, want context.Canceled")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Allow() = %v, want context.Canceled", err)
-	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +431,8 @@ func TestRateLimiterBlockingModeAlreadyCancelledContext(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterTinyRateRefill(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	// Use an incredibly small rate. With rate = 1e-18, even 1ns elapsed gives
 	// addTokens = 1 * 1e-18 which truncates to 0.
@@ -474,17 +440,11 @@ func TestRateLimiterTinyRateRefill(t *testing.T) {
 
 	// Drain the (extremely tiny) bucket — capacity is int64(1e-18 * 1e9) = 0,
 	// so the bucket starts with 0 tokens. Any Allow should fail.
-	err := rl.Allow(context.Background())
-	if !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("Allow() with tiny rate = %v, want ErrRateLimited", err)
-	}
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 
 	// Advance a tiny amount — refill should compute addTokens = 0.
 	clk.advance(1 * time.Nanosecond)
-	err = rl.Allow(context.Background())
-	if !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("Allow() after tiny advance = %v, want ErrRateLimited", err)
-	}
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +452,8 @@ func TestRateLimiterTinyRateRefill(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterConcurrentRefillContention(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(10000, clk, &Hooks{})
 
@@ -528,6 +490,8 @@ func TestRateLimiterConcurrentRefillContention(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterBlockingModeContextDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
 	clk := newRateLimitClock(time.Now())
 	rl := NewRateLimiter(1, clk, &Hooks{}, RateLimitBlocking())
 
@@ -542,12 +506,8 @@ func TestRateLimiterBlockingModeContextDeadlineExceeded(t *testing.T) {
 	defer cancel()
 
 	err := rl.Allow(ctx)
-	if err == nil {
-		t.Fatal("Allow() = nil, want context deadline exceeded")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Allow() = %v, want context.DeadlineExceeded", err)
-	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 // ---------------------------------------------------------------------------

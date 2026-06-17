@@ -38,7 +38,8 @@ from all registered policies:
 
 ### HTTP `/readyz` endpoint
 
-`ReadinessHandler(reg)` returns an `http.Handler` that:
+`r8ehttp.ReadinessHandler(reg)` (the HTTP edge package) returns an
+`http.Handler` that:
 
 - Returns HTTP 200 with JSON body when all critical policies are healthy
 - Returns HTTP 503 when any critical policy is unhealthy
@@ -81,7 +82,7 @@ flowchart TD
 | `DependsOn(reporters...)` | Declares hierarchical health dependencies |
 | `Registry` | Aggregates health from all registered policies |
 | `CheckReadiness()` | Returns `ReadinessStatus` with overall readiness |
-| `ReadinessHandler(reg)` | HTTP handler for Kubernetes `/readyz` probes |
+| `r8ehttp.ReadinessHandler(reg)` | HTTP handler for Kubernetes `/readyz` probes |
 
 ## Run
 

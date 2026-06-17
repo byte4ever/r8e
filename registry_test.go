@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,16 +16,14 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestNewRegistry(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 
 	status := reg.CheckReadiness()
 
-	if !status.Ready {
-		t.Fatal("Ready = false, want true for empty registry")
-	}
-	if len(status.Policies) != 0 {
-		t.Fatalf("Policies = %d, want 0", len(status.Policies))
-	}
+	require.True(t, status.Ready)
+	require.Empty(t, status.Policies)
 }
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,8 @@ func TestNewRegistry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryRegister(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -41,19 +44,9 @@ func TestRegistryRegister(t *testing.T) {
 
 	status := reg.CheckReadiness()
 
-	if len(status.Policies) != 1 {
-		t.Fatalf("Policies = %d, want 1", len(status.Policies))
-	}
-	if status.Policies[0].Name != "test-policy" {
-		t.Fatalf(
-			"Policies[0].Name = %q, want %q",
-			status.Policies[0].Name,
-			"test-policy",
-		)
-	}
-	if !status.Ready {
-		t.Fatal("Ready = false, want true")
-	}
+	require.Len(t, status.Policies, 1)
+	require.Equal(t, "test-policy", status.Policies[0].Name)
+	require.True(t, status.Ready)
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +54,8 @@ func TestRegistryRegister(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryAllHealthy(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -81,16 +76,10 @@ func TestRegistryAllHealthy(t *testing.T) {
 
 	status := reg.CheckReadiness()
 
-	if !status.Ready {
-		t.Fatal("Ready = false, want true when all healthy")
-	}
-	if len(status.Policies) != 3 {
-		t.Fatalf("Policies = %d, want 3", len(status.Policies))
-	}
+	require.True(t, status.Ready)
+	require.Len(t, status.Policies, 3)
 	for _, ps := range status.Policies {
-		if !ps.Healthy {
-			t.Fatalf("policy %q: Healthy = false, want true", ps.Name)
-		}
+		assert.Truef(t, ps.Healthy, "policy %q: Healthy = false, want true", ps.Name)
 	}
 }
 
@@ -99,6 +88,8 @@ func TestRegistryAllHealthy(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryOneCritical(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -125,29 +116,18 @@ func TestRegistryOneCritical(t *testing.T) {
 
 	status := reg.CheckReadiness()
 
-	if status.Ready {
-		t.Fatal("Ready = true, want false (one critical unhealthy policy)")
-	}
+	require.False(t, status.Ready)
 
 	// Verify the unhealthy policy is reported correctly.
 	var found bool
 	for _, ps := range status.Policies {
 		if ps.Name == "unhealthy-svc" {
 			found = true
-			if ps.Healthy {
-				t.Fatal("unhealthy-svc: Healthy = true, want false")
-			}
-			if ps.Criticality != CriticalityCritical {
-				t.Fatalf(
-					"unhealthy-svc: Criticality = %v, want CriticalityCritical",
-					ps.Criticality,
-				)
-			}
+			assert.False(t, ps.Healthy)
+			assert.Equal(t, CriticalityCritical, ps.Criticality)
 		}
 	}
-	if !found {
-		t.Fatal("unhealthy-svc not found in status.Policies")
-	}
+	require.True(t, found)
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +135,8 @@ func TestRegistryOneCritical(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryOneDegraded(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -174,20 +156,11 @@ func TestRegistryOneDegraded(t *testing.T) {
 	status := reg.CheckReadiness()
 
 	// Degraded does not make the service not-ready.
-	if !status.Ready {
-		t.Fatal("Ready = false, want true (degraded is not critical)")
-	}
+	require.True(t, status.Ready)
 
 	// Verify the policy reports degraded.
-	if len(status.Policies) != 1 {
-		t.Fatalf("Policies = %d, want 1", len(status.Policies))
-	}
-	if status.Policies[0].Criticality != CriticalityDegraded {
-		t.Fatalf(
-			"Criticality = %v, want CriticalityDegraded",
-			status.Policies[0].Criticality,
-		)
-	}
+	require.Len(t, status.Policies, 1)
+	require.Equal(t, CriticalityDegraded, status.Policies[0].Criticality)
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +168,8 @@ func TestRegistryOneDegraded(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryConcurrentReads(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -214,9 +189,7 @@ func TestRegistryConcurrentReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			status := reg.CheckReadiness()
-			if len(status.Policies) != 5 {
-				t.Errorf("Policies = %d, want 5", len(status.Policies))
-			}
+			assert.Len(t, status.Policies, 5)
 		}()
 	}
 
@@ -229,6 +202,8 @@ func TestRegistryConcurrentReads(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryConcurrentRegisterAndRead(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -261,9 +236,7 @@ func TestRegistryConcurrentRegisterAndRead(t *testing.T) {
 
 	// After all registrations, we should have 10 policies.
 	status := reg.CheckReadiness()
-	if len(status.Policies) != 10 {
-		t.Fatalf("Policies = %d, want 10", len(status.Policies))
-	}
+	require.Len(t, status.Policies, 10)
 }
 
 // ---------------------------------------------------------------------------
@@ -271,15 +244,13 @@ func TestRegistryConcurrentRegisterAndRead(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultRegistry(t *testing.T) {
+	t.Parallel()
+
 	r1 := DefaultRegistry()
 	r2 := DefaultRegistry()
 
-	if r1 != r2 {
-		t.Fatal("DefaultRegistry() returned different instances")
-	}
-	if r1 == nil {
-		t.Fatal("DefaultRegistry() returned nil")
-	}
+	require.Same(t, r1, r2)
+	require.NotNil(t, r1)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +258,8 @@ func TestDefaultRegistry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWithRegistry(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
@@ -295,22 +268,12 @@ func TestWithRegistry(t *testing.T) {
 		WithRegistry(reg),
 	)
 
-	if p.registry != reg {
-		t.Fatal("policy.registry does not match the explicit registry")
-	}
+	require.Same(t, reg, p.registry)
 
 	status := reg.CheckReadiness()
 
-	if len(status.Policies) != 1 {
-		t.Fatalf("Policies = %d, want 1", len(status.Policies))
-	}
-	if status.Policies[0].Name != "explicit-reg" {
-		t.Fatalf(
-			"Policies[0].Name = %q, want %q",
-			status.Policies[0].Name,
-			"explicit-reg",
-		)
-	}
+	require.Len(t, status.Policies, 1)
+	require.Equal(t, "explicit-reg", status.Policies[0].Name)
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +282,8 @@ func TestWithRegistry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAutoRegistration(t *testing.T) {
+	t.Parallel()
+
 	// Use an explicit registry to avoid polluting the global DefaultRegistry.
 	// The mechanism is the same — we just verify the auto-registration path.
 	reg := NewRegistry()
@@ -327,24 +292,11 @@ func TestAutoRegistration(t *testing.T) {
 		WithRegistry(reg),
 	)
 
-	if p.registry != reg {
-		t.Fatal("policy.registry should be set")
-	}
+	require.Same(t, reg, p.registry)
 
 	status := reg.CheckReadiness()
-	if len(status.Policies) != 1 {
-		t.Fatalf(
-			"Policies = %d, want 1 (auto-registered)",
-			len(status.Policies),
-		)
-	}
-	if status.Policies[0].Name != "auto-reg-test" {
-		t.Fatalf(
-			"Policies[0].Name = %q, want %q",
-			status.Policies[0].Name,
-			"auto-reg-test",
-		)
-	}
+	require.Len(t, status.Policies, 1)
+	require.Equal(t, "auto-reg-test", status.Policies[0].Name)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,23 +304,18 @@ func TestAutoRegistration(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAnonymousPolicyNotRegistered(t *testing.T) {
+	t.Parallel()
+
 	reg := NewRegistry()
 
 	p := NewPolicy[string]("",
 		WithRegistry(reg),
 	)
 
-	if p.registry != nil {
-		t.Fatal("anonymous policy should have nil registry")
-	}
+	require.Nil(t, p.registry)
 
 	status := reg.CheckReadiness()
-	if len(status.Policies) != 0 {
-		t.Fatalf(
-			"Policies = %d, want 0 (anonymous policy should not be registered)",
-			len(status.Policies),
-		)
-	}
+	require.Empty(t, status.Policies)
 }
 
 // ---------------------------------------------------------------------------

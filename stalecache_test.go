@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -63,18 +65,13 @@ func TestStaleCacheFirstCallSucceedsCachesResult(t *testing.T) {
 			return "hello-" + key, nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-
-	if result != "hello-key1" {
-		t.Fatalf("Do() = %q, want %q", result, "hello-key1")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "hello-key1", result)
 
 	// Verify cache was populated.
-	if v, ok := cache.Get("key1"); !ok || v != "hello-key1" {
-		t.Fatalf("cache.Get(key1) = %q, %v; want %q, true", v, ok, "hello-key1")
-	}
+	v, ok := cache.Get("key1")
+	require.True(t, ok)
+	require.Equal(t, "hello-key1", v)
 }
 
 // ---------------------------------------------------------------------------
@@ -102,13 +99,8 @@ func TestStaleCacheFailWithCacheReturnsCachedValue(t *testing.T) {
 			return "", errors.New("temporary failure")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (stale served)", err)
-	}
-
-	if result != "cached-value" {
-		t.Fatalf("Do() = %q, want %q", result, "cached-value")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "cached-value", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -129,13 +121,8 @@ func TestStaleCacheFirstCallFailsNoCacheReturnsError(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
-
-	if result != 0 {
-		t.Fatalf("Do() = %d, want 0", result)
-	}
+	require.ErrorIs(t, err, sentinel)
+	require.Equal(t, 0, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,13 +159,8 @@ func TestStaleCacheDifferentKeysAreSeparate(t *testing.T) {
 			return "", errors.New("fail")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do(key1) error = %v, want nil", err)
-	}
-
-	if result != "value1" {
-		t.Fatalf("Do(key1) = %q, want %q", result, "value1")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "value1", result)
 
 	// Fail for key2 — should get value2.
 	result, err = sc.Do(
@@ -188,13 +170,8 @@ func TestStaleCacheDifferentKeysAreSeparate(t *testing.T) {
 			return "", errors.New("fail")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do(key2) error = %v, want nil", err)
-	}
-
-	if result != "value2" {
-		t.Fatalf("Do(key2) = %q, want %q", result, "value2")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "value2", result)
 
 	// Fail for key3 — no cache entry, error propagates.
 	sentinel := errors.New("no cache")
@@ -206,9 +183,7 @@ func TestStaleCacheDifferentKeysAreSeparate(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do(key3) error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------
@@ -246,15 +221,11 @@ func TestStaleCacheConcurrentAccess(t *testing.T) {
 					return 0, errors.New("fail")
 				},
 			)
-			if err != nil {
-				t.Errorf("Do() error = %v, want nil (stale served)", err)
-
+			if !assert.NoError(t, err) {
 				return
 			}
 
-			if result != 42 {
-				t.Errorf("Do() = %d, want 42", result)
-			}
+			assert.Equal(t, 42, result)
 		}()
 	}
 
@@ -290,9 +261,7 @@ func TestStaleCacheHookOnCacheRefreshed(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(refreshedKeys) != 1 || refreshedKeys[0] != "key1" {
-		t.Fatalf("OnCacheRefreshed keys = %v, want [key1]", refreshedKeys)
-	}
+	require.Equal(t, []string{"key1"}, refreshedKeys)
 }
 
 // ---------------------------------------------------------------------------
@@ -334,9 +303,7 @@ func TestStaleCacheHookOnStaleServed(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(servedKeys) != 1 || servedKeys[0] != "key1" {
-		t.Fatalf("OnStaleServed keys = %v, want [key1]", servedKeys)
-	}
+	require.Equal(t, []string{"key1"}, servedKeys)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,9 +330,7 @@ func TestStaleCacheHookOnStaleServedNotFiredOnSuccess(t *testing.T) {
 		},
 	)
 
-	if got := servedCount.Load(); got != 0 {
-		t.Fatalf("OnStaleServed called %d times on success, want 0", got)
-	}
+	require.Zero(t, servedCount.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -392,9 +357,7 @@ func TestStaleCacheHookOnCacheRefreshedNotFiredOnFailure(t *testing.T) {
 		},
 	)
 
-	if got := refreshedCount.Load(); got != 0 {
-		t.Fatalf("OnCacheRefreshed called %d times on failure, want 0", got)
-	}
+	require.Zero(t, refreshedCount.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -459,18 +422,13 @@ func TestStaleCacheSuccessAfterStaleRefreshesCache(t *testing.T) {
 			return "new", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-
-	if result != "new" {
-		t.Fatalf("Do() = %q, want %q", result, "new")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "new", result)
 
 	// Verify cache was updated.
-	if v, ok := cache.Get("key1"); !ok || v != "new" {
-		t.Fatalf("cache.Get(key1) = %q, %v; want %q, true", v, ok, "new")
-	}
+	v, ok := cache.Get("key1")
+	require.True(t, ok)
+	require.Equal(t, "new", v)
 }
 
 // ---------------------------------------------------------------------------
@@ -493,9 +451,7 @@ func TestStaleCacheKeyPassedToFunction(t *testing.T) {
 		},
 	)
 
-	if receivedKey != "my-key" {
-		t.Fatalf("fn received key = %q, want %q", receivedKey, "my-key")
-	}
+	require.Equal(t, "my-key", receivedKey)
 }
 
 // ---------------------------------------------------------------------------

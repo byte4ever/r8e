@@ -1,0 +1,15 @@
+{
+  "caches": {
+    "users": {
+      "ttl": "5m",
+      "max_size": 1000,
+      "options": {
+        "reset_ttl_on_access": true
+      }
+    },
+    "bad-ttl": {
+      "ttl": "not-a-duration",
+      "max_size": 10
+    }
+  }
+}

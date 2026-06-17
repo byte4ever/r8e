@@ -8,12 +8,14 @@ import "context"
 // internally and calls [Policy.Do]. The policy is not registered with any
 // [Registry].
 //
-//nolint:ireturn,revive // generic type parameter T; Do name matches Policy.Do
-// convention.
+// confusing-naming rule flags Do against StaleCache.Do, but the shared name is
+// the intended convention for the resilience entry point.
+//
+//nolint:ireturn,revive // ireturn: generic type parameter T; revive: the
 func Do[T any](
 	ctx context.Context,
 	fn func(context.Context) (T, error),
-	opts ...any,
+	opts ...Option,
 ) (T, error) {
 	p := NewPolicy[T]("", opts...)
 

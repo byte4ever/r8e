@@ -1,11 +1,13 @@
 package r8e_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,6 +15,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestBackoffStrategyInterfaceCompliance(t *testing.T) {
+	t.Parallel()
+
 	var _ r8e.BackoffStrategy = r8e.ConstantBackoff(time.Second)
 	var _ r8e.BackoffStrategy = r8e.ExponentialBackoff(time.Second)
 	var _ r8e.BackoffStrategy = r8e.LinearBackoff(time.Second)
@@ -27,17 +31,12 @@ func TestBackoffStrategyInterfaceCompliance(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConstantBackoff(t *testing.T) {
+	t.Parallel()
+
 	b := r8e.ConstantBackoff(250 * time.Millisecond)
 	for attempt := range 10 {
 		got := b.Delay(attempt)
-		if got != 250*time.Millisecond {
-			t.Fatalf(
-				"attempt %d: Delay() = %v, want %v",
-				attempt,
-				got,
-				250*time.Millisecond,
-			)
-		}
+		require.Equalf(t, 250*time.Millisecond, got, "attempt %d", attempt)
 	}
 }
 
@@ -46,6 +45,8 @@ func TestConstantBackoff(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExponentialBackoff(t *testing.T) {
+	t.Parallel()
+
 	b := r8e.ExponentialBackoff(100 * time.Millisecond)
 
 	want := []time.Duration{
@@ -57,9 +58,7 @@ func TestExponentialBackoff(t *testing.T) {
 
 	for i, w := range want {
 		got := b.Delay(i)
-		if got != w {
-			t.Fatalf("attempt %d: Delay() = %v, want %v", i, got, w)
-		}
+		require.Equalf(t, w, got, "attempt %d", i)
 	}
 }
 
@@ -68,6 +67,8 @@ func TestExponentialBackoff(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLinearBackoff(t *testing.T) {
+	t.Parallel()
+
 	b := r8e.LinearBackoff(200 * time.Millisecond)
 
 	want := []time.Duration{
@@ -78,9 +79,7 @@ func TestLinearBackoff(t *testing.T) {
 
 	for i, w := range want {
 		got := b.Delay(i)
-		if got != w {
-			t.Fatalf("attempt %d: Delay() = %v, want %v", i, got, w)
-		}
+		require.Equalf(t, w, got, "attempt %d", i)
 	}
 }
 
@@ -89,6 +88,8 @@ func TestLinearBackoff(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExponentialJitterBackoff(t *testing.T) {
+	t.Parallel()
+
 	base := 100 * time.Millisecond
 	b := r8e.ExponentialJitterBackoff(base)
 
@@ -96,19 +97,15 @@ func TestExponentialJitterBackoff(t *testing.T) {
 		maxDelay := time.Duration(float64(base) * math.Pow(2, float64(attempt)))
 		for range 100 {
 			got := b.Delay(attempt)
-			if got < 0 || got > maxDelay {
-				t.Fatalf(
-					"attempt %d: Delay() = %v, want in [0, %v]",
-					attempt,
-					got,
-					maxDelay,
-				)
-			}
+			require.GreaterOrEqualf(t, got, time.Duration(0), "attempt %d", attempt)
+			require.LessOrEqualf(t, got, maxDelay, "attempt %d", attempt)
 		}
 	}
 }
 
 func TestExponentialJitterBackoffDistribution(t *testing.T) {
+	t.Parallel()
+
 	// Verify jitter produces some variation (not always zero or always max).
 	base := 100 * time.Millisecond
 	b := r8e.ExponentialJitterBackoff(base)
@@ -127,22 +124,18 @@ func TestExponentialJitterBackoffDistribution(t *testing.T) {
 			return
 		}
 	}
-	if !sawNonZero {
-		t.Fatal("jitter always returned 0")
-	}
-	if !sawNonMax {
-		t.Fatal("jitter always returned max")
-	}
+	require.True(t, sawNonZero, "jitter always returned 0")
+	require.True(t, sawNonMax, "jitter always returned max")
 }
 
 func TestExponentialJitterBackoffZeroBase(t *testing.T) {
+	t.Parallel()
+
 	// A zero base should always return 0 (exercises the max <= 0 guard).
 	b := r8e.ExponentialJitterBackoff(0)
 	for attempt := range 5 {
 		got := b.Delay(attempt)
-		if got != 0 {
-			t.Fatalf("attempt %d: Delay() = %v, want 0", attempt, got)
-		}
+		require.Equalf(t, time.Duration(0), got, "attempt %d", attempt)
 	}
 }
 
@@ -151,6 +144,8 @@ func TestExponentialJitterBackoffZeroBase(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBackoffFunc(t *testing.T) {
+	t.Parallel()
+
 	custom := r8e.BackoffFunc(func(attempt int) time.Duration {
 		return time.Duration(attempt*attempt) * time.Millisecond
 	})
@@ -167,15 +162,12 @@ func TestBackoffFunc(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := custom.Delay(tt.attempt)
-		if got != tt.want {
-			t.Fatalf(
-				"attempt %d: Delay() = %v, want %v",
-				tt.attempt,
-				got,
-				tt.want,
-			)
-		}
+		t.Run(fmt.Sprintf("attempt-%d", tt.attempt), func(t *testing.T) {
+			t.Parallel()
+
+			got := custom.Delay(tt.attempt)
+			require.Equal(t, tt.want, got)
+		})
 	}
 }
 

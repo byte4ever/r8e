@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -117,6 +120,7 @@ func (c *immediateTestClock) getDurations() []time.Duration {
 // ---------------------------------------------------------------------------
 
 func TestDoRetrySuccessOnFirstAttempt(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 
@@ -132,16 +136,10 @@ func TestDoRetrySuccessOnFirstAttempt(t *testing.T) {
 			Clock:       clk,
 		},
 	)
-	if err != nil {
-		t.Fatalf("DoRetry() error = %v, want nil", err)
-	}
-	if result != "ok" {
-		t.Fatalf("DoRetry() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 	// No timers should have been created (no backoff sleep needed).
-	if n := len(clk.getDurations()); n != 0 {
-		t.Fatalf("expected 0 timers, got %d", n)
-	}
+	require.Empty(t, clk.getDurations())
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +147,7 @@ func TestDoRetrySuccessOnFirstAttempt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetrySuccessOnThirdAttempt(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -169,15 +168,9 @@ func TestDoRetrySuccessOnThirdAttempt(t *testing.T) {
 			Clock:       clk,
 		},
 	)
-	if err != nil {
-		t.Fatalf("DoRetry() error = %v, want nil", err)
-	}
-	if result != 42 {
-		t.Fatalf("DoRetry() = %d, want 42", result)
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 42, result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +178,7 @@ func TestDoRetrySuccessOnThirdAttempt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryPermanentErrorStopsImmediately(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -203,21 +197,11 @@ func TestDoRetryPermanentErrorStopsImmediately(t *testing.T) {
 		},
 	)
 
-	if err == nil {
-		t.Fatal("DoRetry() error = nil, want permanent error")
-	}
-	if attempt != 1 {
-		t.Fatalf("expected 1 attempt, got %d", attempt)
-	}
+	require.Error(t, err)
+	require.Equal(t, 1, attempt)
 	// Should NOT wrap with ErrRetriesExhausted.
-	if errors.Is(err, ErrRetriesExhausted) {
-		t.Fatal(
-			"permanent error should not be wrapped with ErrRetriesExhausted",
-		)
-	}
-	if !IsPermanent(err) {
-		t.Fatal("expected permanent error to be detectable")
-	}
+	require.NotErrorIs(t, err, ErrRetriesExhausted)
+	require.True(t, IsPermanent(err), "expected permanent error to be detectable")
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +209,7 @@ func TestDoRetryPermanentErrorStopsImmediately(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryAllRetriesExhausted(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -243,19 +228,11 @@ func TestDoRetryAllRetriesExhausted(t *testing.T) {
 		},
 	)
 
-	if err == nil {
-		t.Fatal("DoRetry() error = nil, want ErrRetriesExhausted")
-	}
-	if !errors.Is(err, ErrRetriesExhausted) {
-		t.Fatalf("expected ErrRetriesExhausted, got %v", err)
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+	require.Equal(t, 3, attempt)
 	// The last error should be unwrappable.
-	if !errors.Is(err, ErrRetriesExhausted) {
-		t.Fatal("last error should be wrapped in ErrRetriesExhausted")
-	}
+	require.ErrorIs(t, err, ErrRetriesExhausted)
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +240,7 @@ func TestDoRetryAllRetriesExhausted(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryMaxDelayCapsBackoff(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -286,16 +264,14 @@ func TestDoRetryMaxDelayCapsBackoff(t *testing.T) {
 
 	durations := clk.getDurations()
 	for i, d := range durations {
-		if d > 150*time.Millisecond {
-			t.Fatalf("timer %d: duration = %v, want <= 150ms", i, d)
-		}
+		require.LessOrEqualf(t, d, 150*time.Millisecond, "timer %d: duration = %v, want <= 150ms", i, d)
 	}
 	// First delay is 100ms (under cap), second would be 200ms capped to 150ms.
-	if len(durations) >= 1 && durations[0] != 100*time.Millisecond {
-		t.Fatalf("timer 0: duration = %v, want 100ms", durations[0])
+	if len(durations) >= 1 {
+		require.Equal(t, 100*time.Millisecond, durations[0])
 	}
-	if len(durations) >= 2 && durations[1] != 150*time.Millisecond {
-		t.Fatalf("timer 1: duration = %v, want 150ms (capped)", durations[1])
+	if len(durations) >= 2 {
+		require.Equal(t, 150*time.Millisecond, durations[1])
 	}
 }
 
@@ -304,6 +280,7 @@ func TestDoRetryMaxDelayCapsBackoff(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryPerAttemptTimeout(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -330,15 +307,9 @@ func TestDoRetryPerAttemptTimeout(t *testing.T) {
 			},
 		},
 	)
-	if err != nil {
-		t.Fatalf("DoRetry() error = %v, want nil", err)
-	}
-	if result != "done" {
-		t.Fatalf("DoRetry() = %q, want %q", result, "done")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "done", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +317,7 @@ func TestDoRetryPerAttemptTimeout(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryRetryIfPredicateStopsRetry(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -367,24 +339,14 @@ func TestDoRetryRetryIfPredicateStopsRetry(t *testing.T) {
 		},
 	)
 
-	if err == nil {
-		t.Fatal("DoRetry() error = nil, want error")
-	}
-	if attempt != 1 {
-		t.Fatalf(
-			"expected 1 attempt when RetryIf returns false, got %d",
-			attempt,
-		)
-	}
+	require.Error(t, err)
+	require.Equalf(t, 1, attempt, "expected 1 attempt when RetryIf returns false, got %d", attempt)
 	// Should NOT wrap with ErrRetriesExhausted.
-	if errors.Is(err, ErrRetriesExhausted) {
-		t.Fatal(
-			"non-retryable error should not be wrapped with ErrRetriesExhausted",
-		)
-	}
+	require.NotErrorIs(t, err, ErrRetriesExhausted)
 }
 
 func TestDoRetryRetryIfPredicateAllowsRetry(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -408,15 +370,9 @@ func TestDoRetryRetryIfPredicateAllowsRetry(t *testing.T) {
 			})},
 		},
 	)
-	if err != nil {
-		t.Fatalf("DoRetry() error = %v, want nil", err)
-	}
-	if result != "success" {
-		t.Fatalf("DoRetry() = %q, want %q", result, "success")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "success", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +380,7 @@ func TestDoRetryRetryIfPredicateAllowsRetry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryContextCancellationDuringSleep(t *testing.T) {
+	t.Parallel()
 	clk := newTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -467,12 +424,8 @@ func TestDoRetryContextCancellationDuringSleep(t *testing.T) {
 		t.Fatal("DoRetry did not return after context cancellation")
 	}
 
-	if retErr == nil {
-		t.Fatal("DoRetry() error = nil, want context.Canceled")
-	}
-	if !errors.Is(retErr, context.Canceled) {
-		t.Fatalf("DoRetry() error = %v, want context.Canceled", retErr)
-	}
+	require.Error(t, retErr)
+	require.ErrorIs(t, retErr, context.Canceled)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +433,7 @@ func TestDoRetryContextCancellationDuringSleep(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryZeroMaxAttemptsExecutesOnce(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -498,17 +452,14 @@ func TestDoRetryZeroMaxAttemptsExecutesOnce(t *testing.T) {
 		},
 	)
 
-	if attempt != 1 {
-		t.Fatalf("expected 1 attempt with maxAttempts=0, got %d", attempt)
-	}
+	require.Equalf(t, 1, attempt, "expected 1 attempt with maxAttempts=0, got %d", attempt)
 	// With only one attempt and failure, no retries => should wrap with
 	// ErrRetriesExhausted.
-	if !errors.Is(err, ErrRetriesExhausted) {
-		t.Fatalf("expected ErrRetriesExhausted, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrRetriesExhausted)
 }
 
 func TestDoRetryOneMaxAttemptsExecutesOnce(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -527,15 +478,12 @@ func TestDoRetryOneMaxAttemptsExecutesOnce(t *testing.T) {
 		},
 	)
 
-	if attempt != 1 {
-		t.Fatalf("expected 1 attempt with maxAttempts=1, got %d", attempt)
-	}
-	if !errors.Is(err, ErrRetriesExhausted) {
-		t.Fatalf("expected ErrRetriesExhausted, got %v", err)
-	}
+	require.Equalf(t, 1, attempt, "expected 1 attempt with maxAttempts=1, got %d", attempt)
+	require.ErrorIs(t, err, ErrRetriesExhausted)
 }
 
 func TestDoRetryZeroMaxAttemptsSucceeds(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 
@@ -551,12 +499,8 @@ func TestDoRetryZeroMaxAttemptsSucceeds(t *testing.T) {
 			Clock:       clk,
 		},
 	)
-	if err != nil {
-		t.Fatalf("DoRetry() error = %v, want nil", err)
-	}
-	if result != "ok" {
-		t.Fatalf("DoRetry() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +508,7 @@ func TestDoRetryZeroMaxAttemptsSucceeds(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryOnRetryHookCalledWithCorrectArgs(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	var hookCalls []struct {
 		attempt int
@@ -604,16 +549,10 @@ func TestDoRetryOnRetryHookCalledWithCorrectArgs(t *testing.T) {
 	// sleeping. Attempt 0 fails -> emit hook(1, err) -> sleep -> attempt 1
 	// fails -> emit hook(2, err) -> sleep -> attempt 2 fails -> exhausted.
 	// So 2 hook calls for 3 attempts.
-	if len(hookCalls) != 2 {
-		t.Fatalf("expected 2 OnRetry hook calls, got %d", len(hookCalls))
-	}
+	require.Len(t, hookCalls, 2)
 	// Hooks receive 1-indexed attempt numbers.
-	if hookCalls[0].attempt != 1 {
-		t.Fatalf("first hook call attempt = %d, want 1", hookCalls[0].attempt)
-	}
-	if hookCalls[1].attempt != 2 {
-		t.Fatalf("second hook call attempt = %d, want 2", hookCalls[1].attempt)
-	}
+	require.Equal(t, 1, hookCalls[0].attempt)
+	require.Equal(t, 2, hookCalls[1].attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +560,7 @@ func TestDoRetryOnRetryHookCalledWithCorrectArgs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryUnclassifiedErrorsAreRetried(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 	attempt := 0
@@ -641,15 +581,9 @@ func TestDoRetryUnclassifiedErrorsAreRetried(t *testing.T) {
 			Clock:       clk,
 		},
 	)
-	if err != nil {
-		t.Fatalf("DoRetry() error = %v, want nil", err)
-	}
-	if result != "recovered" {
-		t.Fatalf("DoRetry() = %q, want %q", result, "recovered")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "recovered", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -657,28 +591,25 @@ func TestDoRetryUnclassifiedErrorsAreRetried(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMaxDelayOption(t *testing.T) {
+	t.Parallel()
 	var cfg retryConfig
 	MaxDelay(500 * time.Millisecond)(&cfg)
-	if cfg.maxDelay != 500*time.Millisecond {
-		t.Fatalf("maxDelay = %v, want 500ms", cfg.maxDelay)
-	}
+	require.Equal(t, 500*time.Millisecond, cfg.maxDelay)
 }
 
 func TestPerAttemptTimeoutOption(t *testing.T) {
+	t.Parallel()
 	var cfg retryConfig
 	PerAttemptTimeout(2 * time.Second)(&cfg)
-	if cfg.perAttemptTimeout != 2*time.Second {
-		t.Fatalf("perAttemptTimeout = %v, want 2s", cfg.perAttemptTimeout)
-	}
+	require.Equal(t, 2*time.Second, cfg.perAttemptTimeout)
 }
 
 func TestRetryIfOption(t *testing.T) {
+	t.Parallel()
 	var cfg retryConfig
 	fn := func(err error) bool { return true }
 	RetryIf(fn)(&cfg)
-	if cfg.retryIf == nil {
-		t.Fatal("retryIf = nil, want non-nil")
-	}
+	require.NotNil(t, cfg.retryIf)
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +617,7 @@ func TestRetryIfOption(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryExhaustedErrorWrapsLastError(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{}
 
@@ -709,13 +641,9 @@ func TestDoRetryExhaustedErrorWrapsLastError(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, ErrRetriesExhausted) {
-		t.Fatalf("expected ErrRetriesExhausted, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrRetriesExhausted)
 	// The sentinel (wrapped in transient) should be findable.
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("expected last error sentinel to be detectable via errors.Is")
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +651,7 @@ func TestDoRetryExhaustedErrorWrapsLastError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryTimerStoppedOnCancel(t *testing.T) {
+	t.Parallel()
 	clk := newTestClock()
 	hooks := &Hooks{}
 
@@ -766,9 +695,7 @@ func TestDoRetryTimerStoppedOnCancel(t *testing.T) {
 	timer.mu.Lock()
 	stopped := timer.stopped
 	timer.mu.Unlock()
-	if !stopped {
-		t.Fatal("expected timer to be stopped on context cancellation")
-	}
+	require.True(t, stopped, "expected timer to be stopped on context cancellation")
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +703,7 @@ func TestDoRetryTimerStoppedOnCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryBackoffStrategyReceivesCorrectAttempts(t *testing.T) {
+	t.Parallel()
 	var receivedAttempts []int
 	strategy := BackoffFunc(func(attempt int) time.Duration {
 		receivedAttempts = append(receivedAttempts, attempt)
@@ -801,23 +729,7 @@ func TestDoRetryBackoffStrategyReceivesCorrectAttempts(t *testing.T) {
 	// 4 attempts, backoff called between attempts (3 times: after attempt 0, 1,
 	// 2).
 	want := []int{0, 1, 2}
-	if len(receivedAttempts) != len(want) {
-		t.Fatalf(
-			"backoff called %d times, want %d",
-			len(receivedAttempts),
-			len(want),
-		)
-	}
-	for i, w := range want {
-		if receivedAttempts[i] != w {
-			t.Fatalf(
-				"backoff call %d: attempt = %d, want %d",
-				i,
-				receivedAttempts[i],
-				w,
-			)
-		}
-	}
+	assert.Equal(t, want, receivedAttempts)
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +737,7 @@ func TestDoRetryBackoffStrategyReceivesCorrectAttempts(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRetryNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
 	clk := newImmediateTestClock()
 	hooks := &Hooks{} // all nil
 

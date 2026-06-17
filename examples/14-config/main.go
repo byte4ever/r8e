@@ -13,6 +13,7 @@ import (
 	"runtime"
 
 	"github.com/byte4ever/r8e"
+	"github.com/byte4ever/r8e/r8econf"
 )
 
 func main() {
@@ -22,7 +23,7 @@ func main() {
 	configPath := configDir("config.json")
 
 	// Load configuration from JSON.
-	reg, err := r8e.LoadConfig(configPath)
+	store, err := r8econf.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
@@ -33,10 +34,14 @@ func main() {
 	// --- Get a typed policy from config ---
 	fmt.Println("\n=== Payment API Policy ===")
 
-	paymentPolicy := r8e.GetPolicy[string](reg, "payment-api",
+	paymentPolicy, err := r8econf.GetPolicy[string](store, "payment-api",
 		// Additional code-level options can augment the config.
 		r8e.WithFallback("payment service unavailable"),
 	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to build payment policy: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Successful call.
 	result, err := paymentPolicy.Do(
@@ -59,7 +64,11 @@ func main() {
 	// --- Notification API policy ---
 	fmt.Println("\n=== Notification API Policy ===")
 
-	notifyPolicy := r8e.GetPolicy[string](reg, "notification-api")
+	notifyPolicy, err := r8econf.GetPolicy[string](store, "notification-api")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to build notify policy: %v\n", err)
+		os.Exit(1)
+	}
 
 	attempt := 0
 	result, err = notifyPolicy.Do(ctx, func(_ context.Context) (string, error) {
@@ -80,7 +89,12 @@ func main() {
 	// --- Unknown policy name: creates a bare policy ---
 	fmt.Println("\n=== Unknown Policy (bare, no config) ===")
 
-	barePolicy := r8e.GetPolicy[string](reg, "unknown-service")
+	barePolicy, err := r8econf.GetPolicy[string](store, "unknown-service")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to build bare policy: %v\n", err)
+		os.Exit(1)
+	}
+
 	result, err = barePolicy.Do(ctx, func(_ context.Context) (string, error) {
 		return "bare policy works", nil
 	})

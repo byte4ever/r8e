@@ -11,6 +11,9 @@ import (
 )
 
 // adapter wraps an otter.CacheWithVariableTTL to implement r8e.Cache.
+//
+// Pattern: Adapter — exposes a third-party otter cache through the r8e.Cache
+// port the resilience layer consumes.
 type adapter[K comparable, V any] struct {
 	cache otter.CacheWithVariableTTL[K, V]
 }

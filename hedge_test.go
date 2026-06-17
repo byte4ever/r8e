@@ -5,206 +5,211 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/byte4ever/r8e"
 )
 
+// The hedge tests use r8e.RealClock and real durations, so they run inside a
+// testing/synctest bubble: time is virtual and deterministic, durations are
+// honoured in order without real waiting, and a leaked goroutine surfaces as a
+// bubble deadlock.
+
 // ---------------------------------------------------------------------------
-// Tests: Primary wins fast (before hedge delay) -> returns primary result
+// Primary wins fast (before hedge delay) -> returns primary result
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimaryWinsFast(t *testing.T) {
-	var hedgeTriggered atomic.Bool
-	hooks := &r8e.Hooks{
-		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
-	}
+	t.Parallel()
 
-	result, err := r8e.DoHedge[string](
-		context.Background(),
-		func(_ context.Context) (string, error) {
-			return "primary", nil
-		},
-		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
-	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "primary" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "primary")
-	}
-	if hedgeTriggered.Load() {
-		t.Fatal("OnHedgeTriggered should not be called when primary wins fast")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var hedgeTriggered atomic.Bool
+		hooks := &r8e.Hooks{
+			OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
+		}
+
+		result, err := r8e.DoHedge[string](
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				return "primary", nil
+			},
+			r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "primary", result)
+		require.False(
+			t,
+			hedgeTriggered.Load(),
+			"OnHedgeTriggered should not fire when primary wins fast",
+		)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Primary slow + hedge wins -> OnHedgeTriggered + OnHedgeWon emitted
+// Primary slow + hedge wins -> OnHedgeTriggered + OnHedgeWon emitted
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimarySlowHedgeWins(t *testing.T) {
-	var hedgeTriggered atomic.Bool
-	var hedgeWon atomic.Bool
-	hooks := &r8e.Hooks{
-		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
-		OnHedgeWon:       func() { hedgeWon.Store(true) },
-	}
+	t.Parallel()
 
-	callCount := atomic.Int32{}
+	synctest.Test(t, func(t *testing.T) {
+		var hedgeTriggered, hedgeWon atomic.Bool
+		hooks := &r8e.Hooks{
+			OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
+			OnHedgeWon:       func() { hedgeWon.Store(true) },
+		}
 
-	result, err := r8e.DoHedge[string](
-		context.Background(),
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: very slow, will be cancelled
-				select {
-				case <-time.After(5 * time.Second):
-					return "primary-late", nil
-				case <-ctx.Done():
-					return "", ctx.Err()
+		var callCount atomic.Int32
+
+		result, err := r8e.DoHedge[string](
+			context.Background(),
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					// Primary: very slow, will be cancelled.
+					select {
+					case <-time.After(5 * time.Second):
+						return "primary-late", nil
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
 				}
-			}
-			// Secondary: returns immediately
-			return "hedge", nil
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "hedge" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "hedge")
-	}
-	if !hedgeTriggered.Load() {
-		t.Fatal("OnHedgeTriggered should be called when hedge fires")
-	}
-	if !hedgeWon.Load() {
-		t.Fatal("OnHedgeWon should be called when hedge wins")
-	}
+
+				return "hedge", nil
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: hooks,
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "hedge", result)
+		require.True(t, hedgeTriggered.Load(), "OnHedgeTriggered should fire")
+		require.True(t, hedgeWon.Load(), "OnHedgeWon should fire")
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Primary slow + primary still wins after hedge triggered
+// Primary slow + primary still wins after hedge triggered
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimaryWinsAfterHedgeTriggered(t *testing.T) {
-	var hedgeTriggered atomic.Bool
-	var hedgeWon atomic.Bool
-	hooks := &r8e.Hooks{
-		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
-		OnHedgeWon:       func() { hedgeWon.Store(true) },
-	}
+	t.Parallel()
 
-	callCount := atomic.Int32{}
+	synctest.Test(t, func(t *testing.T) {
+		var hedgeTriggered, hedgeWon atomic.Bool
+		hooks := &r8e.Hooks{
+			OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
+			OnHedgeWon:       func() { hedgeWon.Store(true) },
+		}
 
-	result, err := r8e.DoHedge[string](
-		context.Background(),
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: a bit slow but completes
-				time.Sleep(40 * time.Millisecond)
-				return "primary", nil
-			}
-			// Secondary: very slow, will be cancelled
-			select {
-			case <-time.After(5 * time.Second):
-				return "hedge-late", nil
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "primary" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "primary")
-	}
-	if !hedgeTriggered.Load() {
-		t.Fatal("OnHedgeTriggered should be called when hedge fires")
-	}
-	if hedgeWon.Load() {
-		t.Fatal("OnHedgeWon should NOT be called when primary wins")
-	}
+		var callCount atomic.Int32
+
+		result, err := r8e.DoHedge[string](
+			context.Background(),
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					// Primary: a bit slow but completes.
+					select {
+					case <-time.After(40 * time.Millisecond):
+						return "primary", nil
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+				// Secondary: very slow, will be cancelled.
+				select {
+				case <-time.After(5 * time.Second):
+					return "hedge-late", nil
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: hooks,
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "primary", result)
+		require.True(t, hedgeTriggered.Load(), "OnHedgeTriggered should fire")
+		require.False(t, hedgeWon.Load(), "OnHedgeWon should not fire")
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Both fail -> returns error
+// Both fail -> returns error
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeBothFail(t *testing.T) {
-	hooks := &r8e.Hooks{}
-	callCount := atomic.Int32{}
+	t.Parallel()
 
-	_, err := r8e.DoHedge[string](
-		context.Background(),
-		func(_ context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: slow then fails
-				time.Sleep(40 * time.Millisecond)
-				return "", errors.New("primary error")
-			}
-			// Secondary: fails fast
-			return "", errors.New("hedge error")
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
+	synctest.Test(t, func(t *testing.T) {
+		var callCount atomic.Int32
 
-	if err == nil {
-		t.Fatal("DoHedge() error = nil, want non-nil")
-	}
+		_, err := r8e.DoHedge[string](
+			context.Background(),
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					select {
+					case <-time.After(40 * time.Millisecond):
+						return "", errors.New("primary error")
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+
+				return "", errors.New("hedge error")
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: &r8e.Hooks{},
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.Error(t, err)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Context cancellation -> returns ctx.Err()
+// Context cancellation -> returns ctx.Err()
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextCancellation(t *testing.T) {
-	hooks := &r8e.Hooks{}
+	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
 
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
 
-	_, err := r8e.DoHedge[string](
-		ctx,
-		func(ctx context.Context) (string, error) {
-			<-ctx.Done()
-			return "", ctx.Err()
-		},
-		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
-	)
+		_, err := r8e.DoHedge[string](
+			ctx,
+			func(ctx context.Context) (string, error) {
+				<-ctx.Done()
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DoHedge() error = %v, want context.Canceled", err)
-	}
+				return "", ctx.Err()
+			},
+			r8e.HedgeParams{Delay: time.Hour, Hooks: &r8e.Hooks{}, Clock: r8e.RealClock{}},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Context already cancelled -> returns ctx.Err() immediately
+// Context already cancelled -> returns ctx.Err() immediately
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextAlreadyCancelled(t *testing.T) {
-	hooks := &r8e.Hooks{}
+	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -214,75 +219,71 @@ func TestDoHedgeContextAlreadyCancelled(t *testing.T) {
 		func(_ context.Context) (string, error) {
 			return "should-not-run", nil
 		},
-		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: &r8e.Hooks{}, Clock: r8e.RealClock{}},
 	)
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DoHedge() error = %v, want context.Canceled", err)
-	}
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Nil hooks don't panic
+// Nil hooks don't panic
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeNilHooksDoNotPanic(t *testing.T) {
-	hooks := &r8e.Hooks{} // all nil callbacks
+	t.Parallel()
 
 	result, err := r8e.DoHedge[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
 		},
-		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
+		r8e.HedgeParams{Delay: time.Hour, Hooks: &r8e.Hooks{}, Clock: r8e.RealClock{}},
 	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "ok" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Primary errors but hedge succeeds
+// Primary errors but hedge succeeds
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimaryErrorHedgeSucceeds(t *testing.T) {
-	hooks := &r8e.Hooks{}
-	callCount := atomic.Int32{}
+	t.Parallel()
 
-	result, err := r8e.DoHedge[string](
-		context.Background(),
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: slow then errors
-				time.Sleep(40 * time.Millisecond)
-				return "", errors.New("primary failed")
-			}
-			// Secondary: succeeds
-			return "hedge-ok", nil
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "hedge-ok" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "hedge-ok")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var callCount atomic.Int32
+
+		result, err := r8e.DoHedge[string](
+			context.Background(),
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					select {
+					case <-time.After(40 * time.Millisecond):
+						return "", errors.New("primary failed")
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+
+				return "hedge-ok", nil
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: &r8e.Hooks{},
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "hedge-ok", result)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Primary fails fast (before hedge delay) -> returns error, no hedge
+// Primary fails fast (before hedge delay) -> returns error, no hedge
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimaryFailsFast(t *testing.T) {
+	t.Parallel()
+
 	var hedgeTriggered atomic.Bool
 	hooks := &r8e.Hooks{
 		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
@@ -296,164 +297,158 @@ func TestDoHedgePrimaryFailsFast(t *testing.T) {
 		},
 		r8e.HedgeParams{Delay: time.Hour, Hooks: hooks, Clock: r8e.RealClock{}},
 	)
-
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("DoHedge() error = %v, want %v", err, sentinel)
-	}
-	if hedgeTriggered.Load() {
-		t.Fatal("OnHedgeTriggered should not be called when primary fails fast")
-	}
+	require.ErrorIs(t, err, sentinel)
+	require.False(
+		t,
+		hedgeTriggered.Load(),
+		"OnHedgeTriggered should not fire when primary fails fast",
+	)
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Hedge fails first, primary succeeds second -> primary result returned
+// Hedge fails first, primary succeeds second -> primary result returned
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeHedgeFailsPrimarySucceeds(t *testing.T) {
-	hooks := &r8e.Hooks{}
-	callCount := atomic.Int32{}
+	t.Parallel()
 
-	result, err := r8e.DoHedge[string](
-		context.Background(),
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: slow but succeeds
-				time.Sleep(60 * time.Millisecond)
-				return "primary-ok", nil
-			}
-			// Secondary: fails fast
-			return "", errors.New("hedge failed")
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "primary-ok" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "primary-ok")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var callCount atomic.Int32
+
+		result, err := r8e.DoHedge[string](
+			context.Background(),
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					select {
+					case <-time.After(60 * time.Millisecond):
+						return "primary-ok", nil
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+				}
+
+				return "", errors.New("hedge failed")
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: &r8e.Hooks{},
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "primary-ok", result)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Context cancelled after hedge triggered (during wait for results)
+// Context cancelled after hedge triggered (during wait for results)
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextCancelledAfterHedgeTriggered(t *testing.T) {
-	hooks := &r8e.Hooks{}
+	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	callCount := atomic.Int32{}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
 
-	_, err := r8e.DoHedge[string](
-		ctx,
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: blocks until cancelled
+		var callCount atomic.Int32
+
+		_, err := r8e.DoHedge[string](
+			ctx,
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					<-ctx.Done()
+
+					return "", ctx.Err()
+				}
+				cancel()
 				<-ctx.Done()
-				return "", ctx.Err()
-			}
-			// Secondary: cancel the parent, then block
-			cancel()
-			<-ctx.Done()
-			return "", ctx.Err()
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DoHedge() error = %v, want context.Canceled", err)
-	}
+				return "", ctx.Err()
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: &r8e.Hooks{},
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Context cancelled while waiting for second result after first fails
+// Context cancelled while waiting for second result after first fails
 // ---------------------------------------------------------------------------
 
 func TestDoHedgeContextCancelledWhileWaitingSecondResult(t *testing.T) {
-	hooks := &r8e.Hooks{}
+	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	callCount := atomic.Int32{}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
 
-	_, err := r8e.DoHedge[string](
-		ctx,
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: blocks forever
-				<-ctx.Done()
-				return "", ctx.Err()
-			}
-			// Secondary: fail fast, then parent will be cancelled
-			go func() {
-				time.Sleep(30 * time.Millisecond)
-				cancel()
-			}()
-			return "", errors.New("hedge failed")
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
+		var callCount atomic.Int32
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DoHedge() error = %v, want context.Canceled", err)
-	}
+		_, err := r8e.DoHedge[string](
+			ctx,
+			func(ctx context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					<-ctx.Done()
+
+					return "", ctx.Err()
+				}
+				go func() {
+					time.Sleep(30 * time.Millisecond)
+					cancel()
+				}()
+
+				return "", errors.New("hedge failed")
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: &r8e.Hooks{},
+				Clock: r8e.RealClock{},
+			},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Primary errors first, hedge succeeds second (in waitForResults)
+// Primary errors first, hedge succeeds second (in waitForResults)
 // ---------------------------------------------------------------------------
 
 func TestDoHedgePrimaryFailsFirstHedgeSucceedsSecond(t *testing.T) {
-	var hedgeWon atomic.Bool
-	hooks := &r8e.Hooks{
-		OnHedgeWon: func() { hedgeWon.Store(true) },
-	}
-	callCount := atomic.Int32{}
+	t.Parallel()
 
-	result, err := r8e.DoHedge[string](
-		context.Background(),
-		func(ctx context.Context) (string, error) {
-			n := callCount.Add(1)
-			if n == 1 {
-				// Primary: fails quickly after hedge delay
-				time.Sleep(30 * time.Millisecond)
-				return "", errors.New("primary failed first")
-			}
-			// Secondary: succeeds, but takes a bit longer than primary's error
-			time.Sleep(40 * time.Millisecond)
-			return "hedge-won", nil
-		},
-		r8e.HedgeParams{
-			Delay: 20 * time.Millisecond,
-			Hooks: hooks,
-			Clock: r8e.RealClock{},
-		},
-	)
-	if err != nil {
-		t.Fatalf("DoHedge() error = %v, want nil", err)
-	}
-	if result != "hedge-won" {
-		t.Fatalf("DoHedge() = %q, want %q", result, "hedge-won")
-	}
-	if !hedgeWon.Load() {
-		t.Fatal(
-			"OnHedgeWon should be called when hedge succeeds as second result",
+	synctest.Test(t, func(t *testing.T) {
+		var hedgeWon atomic.Bool
+		hooks := &r8e.Hooks{
+			OnHedgeWon: func() { hedgeWon.Store(true) },
+		}
+
+		var callCount atomic.Int32
+
+		result, err := r8e.DoHedge[string](
+			context.Background(),
+			func(_ context.Context) (string, error) {
+				if callCount.Add(1) == 1 {
+					time.Sleep(30 * time.Millisecond)
+
+					return "", errors.New("primary failed first")
+				}
+				time.Sleep(40 * time.Millisecond)
+
+				return "hedge-won", nil
+			},
+			r8e.HedgeParams{
+				Delay: 20 * time.Millisecond,
+				Hooks: hooks,
+				Clock: r8e.RealClock{},
+			},
 		)
-	}
+		require.NoError(t, err)
+		require.Equal(t, "hedge-won", result)
+		assert.True(t, hedgeWon.Load(), "OnHedgeWon should fire")
+	})
 }
 
 // ---------------------------------------------------------------------------

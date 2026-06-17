@@ -3,11 +3,9 @@ package r8e
 // Hooks holds optional callback functions for resilience pattern lifecycle
 // events. All fields are nil by default; callers set only the hooks they care
 // about. Once constructed, a Hooks value must not be mutated — emit methods
-// read the function fields without synchronisation, which is safe as long as
-// the struct is read-only after initialisation.
-//
-// Pattern: Observer — decouples resilience event emission from consumers
-// (logging, metrics, alerting) without patterns knowing about observers.
+// read the function fields without synchronisation, which is safe only because
+// the struct is read-only after initialisation (there is no runtime
+// subscription, unlike a true Observer; it is a plain optional-callback set).
 type Hooks struct {
 	OnRetry            func(attempt int, err error)
 	OnCircuitOpen      func()

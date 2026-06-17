@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -12,6 +14,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestEmitRetryCallsHook(t *testing.T) {
+	t.Parallel()
+
 	var gotAttempt int
 	var gotErr error
 	h := Hooks{
@@ -23,114 +27,110 @@ func TestEmitRetryCallsHook(t *testing.T) {
 	cause := errors.New("retry me")
 	h.emitRetry(3, cause)
 
-	if gotAttempt != 3 {
-		t.Fatalf("OnRetry attempt = %d, want 3", gotAttempt)
-	}
-	if gotErr != cause {
-		t.Fatalf("OnRetry err = %v, want %v", gotErr, cause)
-	}
+	require.Equal(t, 3, gotAttempt)
+	require.Equal(t, cause, gotErr)
 }
 
 func TestEmitCircuitOpenCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnCircuitOpen: func() { called = true }}
 	h.emitCircuitOpen()
-	if !called {
-		t.Fatal("OnCircuitOpen not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitCircuitCloseCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnCircuitClose: func() { called = true }}
 	h.emitCircuitClose()
-	if !called {
-		t.Fatal("OnCircuitClose not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitCircuitHalfOpenCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnCircuitHalfOpen: func() { called = true }}
 	h.emitCircuitHalfOpen()
-	if !called {
-		t.Fatal("OnCircuitHalfOpen not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitRateLimitedCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnRateLimited: func() { called = true }}
 	h.emitRateLimited()
-	if !called {
-		t.Fatal("OnRateLimited not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitBulkheadFullCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnBulkheadFull: func() { called = true }}
 	h.emitBulkheadFull()
-	if !called {
-		t.Fatal("OnBulkheadFull not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitBulkheadAcquiredCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnBulkheadAcquired: func() { called = true }}
 	h.emitBulkheadAcquired()
-	if !called {
-		t.Fatal("OnBulkheadAcquired not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitBulkheadReleasedCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnBulkheadReleased: func() { called = true }}
 	h.emitBulkheadReleased()
-	if !called {
-		t.Fatal("OnBulkheadReleased not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitTimeoutCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnTimeout: func() { called = true }}
 	h.emitTimeout()
-	if !called {
-		t.Fatal("OnTimeout not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitHedgeTriggeredCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnHedgeTriggered: func() { called = true }}
 	h.emitHedgeTriggered()
-	if !called {
-		t.Fatal("OnHedgeTriggered not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitHedgeWonCallsHook(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	h := Hooks{OnHedgeWon: func() { called = true }}
 	h.emitHedgeWon()
-	if !called {
-		t.Fatal("OnHedgeWon not called")
-	}
+	require.True(t, called)
 }
 
 func TestEmitFallbackUsedCallsHook(t *testing.T) {
+	t.Parallel()
+
 	var gotErr error
 	h := Hooks{
 		OnFallbackUsed: func(err error) { gotErr = err },
 	}
 	cause := errors.New("primary failed")
 	h.emitFallbackUsed(cause)
-	if gotErr != cause {
-		t.Fatalf("OnFallbackUsed err = %v, want %v", gotErr, cause)
-	}
+	require.Equal(t, cause, gotErr)
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +138,8 @@ func TestEmitFallbackUsedCallsHook(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	var h Hooks // all fields nil
 
 	// None of these should panic.
@@ -160,6 +162,8 @@ func TestNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConcurrentEmissionIsSafe(t *testing.T) {
+	t.Parallel()
+
 	var count atomic.Int64
 	h := Hooks{
 		OnRetry:            func(int, error) { count.Add(1) },
@@ -203,7 +207,5 @@ func TestConcurrentEmissionIsSafe(t *testing.T) {
 	wg.Wait()
 
 	want := int64(goroutines * hooksPerGoroutine)
-	if got := count.Load(); got != want {
-		t.Fatalf("total hook calls = %d, want %d", got, want)
-	}
+	require.Equal(t, want, count.Load())
 }

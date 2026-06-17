@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/byte4ever/r8e"
 )
 
@@ -13,6 +16,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackSuccessPassesThrough(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoFallback[string](
@@ -23,12 +28,8 @@ func TestDoFallbackSuccessPassesThrough(t *testing.T) {
 		"fallback-value",
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoFallback() error = %v, want nil", err)
-	}
-	if result != "ok" {
-		t.Fatalf("DoFallback() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,8 @@ func TestDoFallbackSuccessPassesThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackErrorTriggersStaticFallback(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoFallback[string](
@@ -46,12 +49,8 @@ func TestDoFallbackErrorTriggersStaticFallback(t *testing.T) {
 		"safe-default",
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoFallback() error = %v, want nil", err)
-	}
-	if result != "safe-default" {
-		t.Fatalf("DoFallback() = %q, want %q", result, "safe-default")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "safe-default", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +58,8 @@ func TestDoFallbackErrorTriggersStaticFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncSuccessPassesThrough(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoFallbackFunc[string](
@@ -71,12 +72,8 @@ func TestDoFallbackFuncSuccessPassesThrough(t *testing.T) {
 		},
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoFallbackFunc() error = %v, want nil", err)
-	}
-	if result != "ok" {
-		t.Fatalf("DoFallbackFunc() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +81,8 @@ func TestDoFallbackFuncSuccessPassesThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncErrorTriggersFunctionFallback(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoFallbackFunc[string](
@@ -96,16 +95,8 @@ func TestDoFallbackFuncErrorTriggersFunctionFallback(t *testing.T) {
 		},
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoFallbackFunc() error = %v, want nil", err)
-	}
-	if result != "recovered-from-boom" {
-		t.Fatalf(
-			"DoFallbackFunc() = %q, want %q",
-			result,
-			"recovered-from-boom",
-		)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "recovered-from-boom", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +104,8 @@ func TestDoFallbackFuncErrorTriggersFunctionFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncFallbackCanReturnError(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 	fallbackErr := errors.New("fallback also failed")
 
@@ -127,12 +120,8 @@ func TestDoFallbackFuncFallbackCanReturnError(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, fallbackErr) {
-		t.Fatalf("DoFallbackFunc() error = %v, want %v", err, fallbackErr)
-	}
-	if result != -1 {
-		t.Fatalf("DoFallbackFunc() = %d, want -1", result)
-	}
+	require.ErrorIs(t, err, fallbackErr)
+	require.Equal(t, -1, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +129,8 @@ func TestDoFallbackFuncFallbackCanReturnError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackOnFallbackUsedHookFires(t *testing.T) {
+	t.Parallel()
+
 	origErr := errors.New("original error")
 	var hookErr error
 	hooks := &r8e.Hooks{
@@ -157,13 +148,7 @@ func TestDoFallbackOnFallbackUsedHookFires(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(hookErr, origErr) {
-		t.Fatalf(
-			"OnFallbackUsed hook received error = %v, want %v",
-			hookErr,
-			origErr,
-		)
-	}
+	require.ErrorIs(t, hookErr, origErr)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +156,8 @@ func TestDoFallbackOnFallbackUsedHookFires(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncOnFallbackUsedHookFires(t *testing.T) {
+	t.Parallel()
+
 	origErr := errors.New("original error")
 	var hookErr error
 	hooks := &r8e.Hooks{
@@ -190,13 +177,7 @@ func TestDoFallbackFuncOnFallbackUsedHookFires(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(hookErr, origErr) {
-		t.Fatalf(
-			"OnFallbackUsed hook received error = %v, want %v",
-			hookErr,
-			origErr,
-		)
-	}
+	require.ErrorIs(t, hookErr, origErr)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +185,8 @@ func TestDoFallbackFuncOnFallbackUsedHookFires(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackHookNotFiredOnSuccess(t *testing.T) {
+	t.Parallel()
+
 	hookCalled := false
 	hooks := &r8e.Hooks{
 		OnFallbackUsed: func(_ error) {
@@ -219,12 +202,8 @@ func TestDoFallbackHookNotFiredOnSuccess(t *testing.T) {
 		"default",
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoFallback() error = %v, want nil", err)
-	}
-	if hookCalled {
-		t.Fatal("OnFallbackUsed hook should not fire on success")
-	}
+	require.NoError(t, err)
+	assert.False(t, hookCalled, "OnFallbackUsed hook should not fire on success")
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +211,8 @@ func TestDoFallbackHookNotFiredOnSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
+	t.Parallel()
+
 	hookCalled := false
 	hooks := &r8e.Hooks{
 		OnFallbackUsed: func(_ error) {
@@ -249,12 +230,8 @@ func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
 		},
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoFallbackFunc() error = %v, want nil", err)
-	}
-	if hookCalled {
-		t.Fatal("OnFallbackUsed hook should not fire on success")
-	}
+	require.NoError(t, err)
+	assert.False(t, hookCalled, "OnFallbackUsed hook should not fire on success")
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +239,8 @@ func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{} // all fields nil
 
 	// Success path with nil hooks.
@@ -291,6 +270,8 @@ func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoFallbackFuncNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{} // all fields nil
 
 	// Success path with nil hooks.

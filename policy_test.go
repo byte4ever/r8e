@@ -6,7 +6,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -64,16 +67,20 @@ func (t *policyTimer) Stop() bool               { t.stopped = true; return true 
 func (t *policyTimer) Reset(time.Duration) bool { return false }
 
 // ---------------------------------------------------------------------------
-// TestNewPolicyDefaultClock — NewPolicy with no options uses RealClock
+// TestNewPolicyDefaultClock — NewPolicy with no clock builds and runs with the
+// default (real) clock. Fake-clock injection is verified behaviourally in
+// timeout_test.go.
 // ---------------------------------------------------------------------------
 
 func TestNewPolicyDefaultClock(t *testing.T) {
-	p := NewPolicy[string]("test")
+	p := NewPolicy[string]("test", WithTimeout(time.Second))
 
-	// The clock should be a RealClock by default.
-	if _, ok := p.clock.(RealClock); !ok {
-		t.Fatalf("default clock = %T, want RealClock", p.clock)
-	}
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) { return "ok", nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,12 +96,8 @@ func TestPolicyDoPassthrough(t *testing.T) {
 			return "hello", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "hello" {
-		t.Fatalf("Do() = %q, want %q", result, "hello")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "hello", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -115,9 +118,7 @@ func TestPolicyWithTimeout(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("Do() error = %v, want ErrTimeout", err)
-	}
+	require.ErrorIs(t, err, ErrTimeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -143,15 +144,9 @@ func TestPolicyWithRetry(t *testing.T) {
 			return "recovered", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "recovered" {
-		t.Fatalf("Do() = %q, want %q", result, "recovered")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "recovered", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,9 +180,7 @@ func TestPolicyWithCircuitBreaker(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("Do() error = %v, want ErrCircuitOpen", err)
-	}
+	require.ErrorIs(t, err, ErrCircuitOpen)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,12 +203,8 @@ func TestPolicyWithRateLimit(t *testing.T) {
 			return "ok", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("first Do() error = %v, want nil", err)
-	}
-	if result != "ok" {
-		t.Fatalf("first Do() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 
 	// Second call should be rate limited (no tokens left).
 	_, err = p.Do(
@@ -226,9 +215,7 @@ func TestPolicyWithRateLimit(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("second Do() error = %v, want ErrRateLimited", err)
-	}
+	require.ErrorIs(t, err, ErrRateLimited)
 }
 
 // ---------------------------------------------------------------------------
@@ -268,9 +255,7 @@ func TestPolicyWithBulkhead(t *testing.T) {
 
 	close(done) // Release the slot.
 
-	if !errors.Is(err, ErrBulkheadFull) {
-		t.Fatalf("Do() error = %v, want ErrBulkheadFull", err)
-	}
+	require.ErrorIs(t, err, ErrBulkheadFull)
 }
 
 // ---------------------------------------------------------------------------
@@ -278,33 +263,35 @@ func TestPolicyWithBulkhead(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPolicyWithHedge(t *testing.T) {
-	var hedgeTriggered atomic.Bool
-	hooks := Hooks{
-		OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
-	}
+	// RealClock + real durations, made deterministic and instant via synctest.
+	synctest.Test(t, func(t *testing.T) {
+		var hedgeTriggered atomic.Bool
+		hooks := Hooks{
+			OnHedgeTriggered: func() { hedgeTriggered.Store(true) },
+		}
 
-	p := NewPolicy[string]("hedge-test",
-		WithHooks(&hooks),
-		WithHedge(10*time.Millisecond),
-	)
+		p := NewPolicy[string]("hedge-test",
+			WithHooks(&hooks),
+			WithHedge(10*time.Millisecond),
+		)
 
-	result, err := p.Do(
-		context.Background(),
-		func(ctx context.Context) (string, error) {
-			// Simulate a slow primary that takes longer than the hedge delay.
-			time.Sleep(100 * time.Millisecond)
-			return "done", nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "done" {
-		t.Fatalf("Do() = %q, want %q", result, "done")
-	}
-	if !hedgeTriggered.Load() {
-		t.Fatal("OnHedgeTriggered should have been called")
-	}
+		result, err := p.Do(
+			context.Background(),
+			func(ctx context.Context) (string, error) {
+				// Slow primary that runs longer than the hedge delay; honours
+				// cancellation so the losing call exits promptly.
+				select {
+				case <-time.After(100 * time.Millisecond):
+					return "done", nil
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, "done", result)
+		require.True(t, hedgeTriggered.Load())
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -322,12 +309,8 @@ func TestPolicyWithFallback(t *testing.T) {
 			return "", errors.New("service down")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (fallback served)", err)
-	}
-	if result != "default-user" {
-		t.Fatalf("Do() = %q, want %q", result, "default-user")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "default-user", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,12 +330,8 @@ func TestPolicyWithFallbackFunc(t *testing.T) {
 			return "", errors.New("down")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (fallback func served)", err)
-	}
-	if result != "fallback-from-func:down" {
-		t.Fatalf("Do() = %q, want %q", result, "fallback-from-func:down")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "fallback-from-func:down", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -379,15 +358,9 @@ func TestPolicyMultiplePatterns(t *testing.T) {
 			return "success", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "success" {
-		t.Fatalf("Do() = %q, want %q", result, "success")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "success", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -429,15 +402,8 @@ func TestPolicyAutoOrdering(t *testing.T) {
 			return "unreachable", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf(
-			"Do() error = %v, want nil (fallback should handle circuit open)",
-			err,
-		)
-	}
-	if result != "fallback-val" {
-		t.Fatalf("Do() = %q, want %q", result, "fallback-val")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "fallback-val", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -462,9 +428,7 @@ func TestPolicyHooksWired(t *testing.T) {
 		return "", errors.New("fail")
 	})
 
-	if !fallbackUsed.Load() {
-		t.Fatal("OnFallbackUsed hook should have been called")
-	}
+	require.True(t, fallbackUsed.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -476,11 +440,17 @@ func TestPolicyWithClock(t *testing.T) {
 
 	p := NewPolicy[string]("clock-test",
 		WithClock(clk),
+		WithTimeout(time.Second),
 	)
 
-	if p.clock != clk {
-		t.Fatalf("clock = %T, want *policyClock", p.clock)
-	}
+	// The injected clock must be used by the patterns; a fast call completes.
+	// Fake-clock-driven timeout firing is covered in timeout_test.go.
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) { return "ok", nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -490,9 +460,7 @@ func TestPolicyWithClock(t *testing.T) {
 func TestPolicyName(t *testing.T) {
 	p := NewPolicy[string]("my-policy")
 
-	if got := p.Name(); got != "my-policy" {
-		t.Fatalf("Name() = %q, want %q", got, "my-policy")
-	}
+	require.Equal(t, "my-policy", p.Name())
 }
 
 // ---------------------------------------------------------------------------
@@ -540,9 +508,7 @@ func TestPolicyPassthroughError(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------
