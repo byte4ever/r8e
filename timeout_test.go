@@ -5,9 +5,11 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -15,6 +17,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutSuccessBeforeDeadline(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoTimeout[string](
@@ -25,12 +29,8 @@ func TestDoTimeoutSuccessBeforeDeadline(t *testing.T) {
 		},
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoTimeout() error = %v, want nil", err)
-	}
-	if result != "hello" {
-		t.Fatalf("DoTimeout() = %q, want %q", result, "hello")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "hello", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +38,8 @@ func TestDoTimeoutSuccessBeforeDeadline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutFnErrorBeforeDeadline(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 	sentinel := errors.New("application error")
 
@@ -50,12 +52,8 @@ func TestDoTimeoutFnErrorBeforeDeadline(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("DoTimeout() error = %v, want %v", err, sentinel)
-	}
-	if result != 0 {
-		t.Fatalf("DoTimeout() = %d, want 0", result)
-	}
+	require.ErrorIs(t, err, sentinel)
+	require.Equal(t, 0, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +61,8 @@ func TestDoTimeoutFnErrorBeforeDeadline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutExceedsDeadline(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoTimeout[string](
@@ -76,13 +76,9 @@ func TestDoTimeoutExceedsDeadline(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, r8e.ErrTimeout) {
-		t.Fatalf("DoTimeout() error = %v, want r8e.ErrTimeout", err)
-	}
+	require.ErrorIs(t, err, r8e.ErrTimeout)
 	// Zero-value should be returned on timeout.
-	if result != "" {
-		t.Fatalf("DoTimeout() = %q, want zero value %q", result, "")
-	}
+	require.Equal(t, "", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +86,8 @@ func TestDoTimeoutExceedsDeadline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutParentContextAlreadyCancelled(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -104,12 +102,8 @@ func TestDoTimeoutParentContextAlreadyCancelled(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DoTimeout() error = %v, want context.Canceled", err)
-	}
-	if result != 0 {
-		t.Fatalf("DoTimeout() = %d, want 0 (zero value)", result)
-	}
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 0, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +111,8 @@ func TestDoTimeoutParentContextAlreadyCancelled(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutParentContextCancelledDuringExecution(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,12 +128,8 @@ func TestDoTimeoutParentContextCancelledDuringExecution(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("DoTimeout() error = %v, want context.Canceled", err)
-	}
-	if result != "" {
-		t.Fatalf("DoTimeout() = %q, want zero value", result)
-	}
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, "", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +137,8 @@ func TestDoTimeoutParentContextCancelledDuringExecution(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutOnTimeoutHookFired(t *testing.T) {
+	t.Parallel()
+
 	var hookCalled atomic.Bool
 	hooks := &r8e.Hooks{
 		OnTimeout: func() {
@@ -162,9 +156,7 @@ func TestDoTimeoutOnTimeoutHookFired(t *testing.T) {
 		hooks,
 	)
 
-	if !hookCalled.Load() {
-		t.Fatal("OnTimeout hook was not called")
-	}
+	require.True(t, hookCalled.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +164,8 @@ func TestDoTimeoutOnTimeoutHookFired(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutOnTimeoutHookNotFiredOnSuccess(t *testing.T) {
+	t.Parallel()
+
 	var hookCalled atomic.Bool
 	hooks := &r8e.Hooks{
 		OnTimeout: func() {
@@ -187,12 +181,8 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnSuccess(t *testing.T) {
 		},
 		hooks,
 	)
-	if err != nil {
-		t.Fatalf("DoTimeout() error = %v, want nil", err)
-	}
-	if hookCalled.Load() {
-		t.Fatal("OnTimeout hook was called on success, should not be")
-	}
+	require.NoError(t, err)
+	require.False(t, hookCalled.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +190,8 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutOnTimeoutHookNotFiredOnFnError(t *testing.T) {
+	t.Parallel()
+
 	var hookCalled atomic.Bool
 	hooks := &r8e.Hooks{
 		OnTimeout: func() {
@@ -216,9 +208,7 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnFnError(t *testing.T) {
 		hooks,
 	)
 
-	if hookCalled.Load() {
-		t.Fatal("OnTimeout hook was called on fn error, should not be")
-	}
+	require.False(t, hookCalled.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +216,8 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnFnError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutZeroValueOnTimeoutInt(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{}
 
 	result, err := r8e.DoTimeout[int](
@@ -238,15 +230,13 @@ func TestDoTimeoutZeroValueOnTimeoutInt(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, r8e.ErrTimeout) {
-		t.Fatalf("DoTimeout() error = %v, want r8e.ErrTimeout", err)
-	}
-	if result != 0 {
-		t.Fatalf("DoTimeout() = %d, want 0 (zero value for int)", result)
-	}
+	require.ErrorIs(t, err, r8e.ErrTimeout)
+	require.Equal(t, 0, result)
 }
 
 func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
+	t.Parallel()
+
 	type payload struct {
 		Name  string
 		Count int
@@ -263,12 +253,8 @@ func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
 		hooks,
 	)
 
-	if !errors.Is(err, r8e.ErrTimeout) {
-		t.Fatalf("DoTimeout() error = %v, want r8e.ErrTimeout", err)
-	}
-	if result != (payload{}) {
-		t.Fatalf("DoTimeout() = %+v, want zero value", result)
-	}
+	require.ErrorIs(t, err, r8e.ErrTimeout)
+	require.Equal(t, payload{}, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +262,8 @@ func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	hooks := &r8e.Hooks{} // all nil
 
 	_, _ = r8e.DoTimeout[string](
@@ -295,23 +283,26 @@ func TestDoTimeoutNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutSlowButWithinDeadline(t *testing.T) {
-	hooks := &r8e.Hooks{}
+	t.Parallel()
 
-	result, err := r8e.DoTimeout[string](
-		context.Background(),
-		500*time.Millisecond,
-		func(_ context.Context) (string, error) {
-			time.Sleep(10 * time.Millisecond)
-			return "slow-ok", nil
-		},
-		hooks,
-	)
-	if err != nil {
-		t.Fatalf("DoTimeout() error = %v, want nil", err)
-	}
-	if result != "slow-ok" {
-		t.Fatalf("DoTimeout() = %q, want %q", result, "slow-ok")
-	}
+	// Deterministic virtual time: the 10ms of work resolves before the 500ms
+	// deadline without any real waiting.
+	synctest.Test(t, func(t *testing.T) {
+		hooks := &r8e.Hooks{}
+
+		result, err := r8e.DoTimeout[string](
+			context.Background(),
+			500*time.Millisecond,
+			func(_ context.Context) (string, error) {
+				time.Sleep(10 * time.Millisecond)
+
+				return "slow-ok", nil
+			},
+			hooks,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "slow-ok", result)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +310,8 @@ func TestDoTimeoutSlowButWithinDeadline(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoTimeoutOnTimeoutHookNotFiredOnParentCancel(t *testing.T) {
+	t.Parallel()
+
 	var hookCalled atomic.Bool
 	hooks := &r8e.Hooks{
 		OnTimeout: func() {
@@ -338,11 +331,7 @@ func TestDoTimeoutOnTimeoutHookNotFiredOnParentCancel(t *testing.T) {
 		hooks,
 	)
 
-	if hookCalled.Load() {
-		t.Fatal(
-			"OnTimeout hook should not fire when parent context is cancelled",
-		)
-	}
+	require.False(t, hookCalled.Load())
 }
 
 // ---------------------------------------------------------------------------
