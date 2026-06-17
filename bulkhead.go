@@ -8,24 +8,31 @@ import "sync/atomic"
 // resource exhaustion; lock-free via atomic CAS for slot acquisition.
 type Bulkhead struct {
 	hooks         *Hooks
-	maxConcurrent int64
+	maxConcurrent atomic.Int64
 	current       atomic.Int64
 }
 
 // NewBulkhead creates a bulkhead that allows at most maxConcurrent simultaneous
 // calls.
 func NewBulkhead(maxConcurrent int, hooks *Hooks) *Bulkhead {
-	return &Bulkhead{
-		maxConcurrent: int64(maxConcurrent),
-		hooks:         hooks,
-	}
+	b := &Bulkhead{hooks: hooks}
+	b.maxConcurrent.Store(int64(maxConcurrent))
+
+	return b
+}
+
+// Reconfigure changes the maximum number of concurrent slots at runtime.
+// In-flight calls are unaffected; the new limit applies to subsequent
+// [Bulkhead.Acquire] calls.
+func (b *Bulkhead) Reconfigure(maxConcurrent int) {
+	b.maxConcurrent.Store(int64(maxConcurrent))
 }
 
 // Acquire attempts to acquire a slot. Returns ErrBulkheadFull if at capacity.
 func (b *Bulkhead) Acquire() error {
 	for {
 		cur := b.current.Load()
-		if cur >= b.maxConcurrent {
+		if cur >= b.maxConcurrent.Load() {
 			b.hooks.emitBulkheadFull()
 			return ErrBulkheadFull
 		}
@@ -56,7 +63,7 @@ func (b *Bulkhead) Release() {
 
 // Full returns true if all slots are in use.
 func (b *Bulkhead) Full() bool {
-	return b.current.Load() >= b.maxConcurrent
+	return b.current.Load() >= b.maxConcurrent.Load()
 }
 
 // InUse returns the number of slots currently held.
@@ -66,5 +73,5 @@ func (b *Bulkhead) InUse() int64 {
 
 // Cap returns the configured maximum number of concurrent slots.
 func (b *Bulkhead) Cap() int64 {
-	return b.maxConcurrent
+	return b.maxConcurrent.Load()
 }

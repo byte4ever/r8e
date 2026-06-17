@@ -83,80 +83,23 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	if pc.CircuitBreaker != nil {
-		var cbOpts []CircuitBreakerOption
-
-		if pc.CircuitBreaker.FailureThreshold != nil {
-			cbOpts = append(
-				cbOpts,
-				FailureThreshold(
-					*pc.CircuitBreaker.FailureThreshold,
-				),
-			)
-		}
-
-		if pc.CircuitBreaker.RecoveryTimeout != nil {
-			recoveryDur, err := time.ParseDuration(
-				*pc.CircuitBreaker.RecoveryTimeout,
-			)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"circuit_breaker.recovery_timeout: %w",
-					err,
-				)
-			}
-
-			cbOpts = append(
-				cbOpts,
-				RecoveryTimeout(recoveryDur),
-			)
-		}
-
-		if pc.CircuitBreaker.HalfOpenMaxAttempts != nil {
-			cbOpts = append(
-				cbOpts,
-				HalfOpenMaxAttempts(
-					*pc.CircuitBreaker.HalfOpenMaxAttempts,
-				),
-			)
+		cbOpts, err := cbOptionsFromConfig(pc.CircuitBreaker)
+		if err != nil {
+			return nil, err
 		}
 
 		opts = append(opts, WithCircuitBreaker(cbOpts...))
 	}
 
 	if pc.Retry != nil {
-		strategy, err := parseBackoffStrategy(
-			pc.Retry.Backoff,
-			pc.Retry.BaseDelay,
-		)
+		runtime, err := retryRuntimeFromConfig(pc.Retry)
 		if err != nil {
-			return nil, fmt.Errorf("retry: %w", err)
-		}
-
-		var retryOpts []RetryOption
-
-		if pc.Retry.MaxDelay != nil {
-			maxDel, maxDelErr := time.ParseDuration(
-				*pc.Retry.MaxDelay,
-			)
-			if maxDelErr != nil {
-				return nil, fmt.Errorf(
-					"retry.max_delay: %w",
-					maxDelErr,
-				)
-			}
-
-			retryOpts = append(retryOpts, MaxDelay(maxDel))
-		}
-
-		// MaxAttempts defaults to 0 if not set.
-		maxAttempts := 0
-		if pc.Retry.MaxAttempts != nil {
-			maxAttempts = *pc.Retry.MaxAttempts
+			return nil, err
 		}
 
 		opts = append(
 			opts,
-			WithRetry(maxAttempts, strategy, retryOpts...),
+			WithRetry(runtime.maxAttempts, runtime.strategy, runtime.opts...),
 		)
 	}
 
@@ -178,6 +121,62 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	return opts, nil
+}
+
+// cbOptionsFromConfig converts a [CircuitBreakerConfig] into circuit-breaker
+// options. Shared by [BuildOptions] and [Policy.Reconfigure].
+func cbOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, error) {
+	var opts []CircuitBreakerOption
+
+	if cfg.FailureThreshold != nil {
+		opts = append(opts, FailureThreshold(*cfg.FailureThreshold))
+	}
+
+	if cfg.RecoveryTimeout != nil {
+		recovery, err := time.ParseDuration(*cfg.RecoveryTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("circuit_breaker.recovery_timeout: %w", err)
+		}
+
+		opts = append(opts, RecoveryTimeout(recovery))
+	}
+
+	if cfg.HalfOpenMaxAttempts != nil {
+		opts = append(opts, HalfOpenMaxAttempts(*cfg.HalfOpenMaxAttempts))
+	}
+
+	return opts, nil
+}
+
+// retryRuntimeFromConfig converts a [RetryConfig] into the runtime retry
+// configuration. Shared by [BuildOptions] and [Policy.Reconfigure].
+func retryRuntimeFromConfig(cfg *RetryConfig) (*retryRuntime, error) {
+	strategy, err := parseBackoffStrategy(cfg.Backoff, cfg.BaseDelay)
+	if err != nil {
+		return nil, fmt.Errorf("retry: %w", err)
+	}
+
+	var opts []RetryOption
+
+	if cfg.MaxDelay != nil {
+		maxDelay, parseErr := time.ParseDuration(*cfg.MaxDelay)
+		if parseErr != nil {
+			return nil, fmt.Errorf("retry.max_delay: %w", parseErr)
+		}
+
+		opts = append(opts, MaxDelay(maxDelay))
+	}
+
+	maxAttempts := 0
+	if cfg.MaxAttempts != nil {
+		maxAttempts = *cfg.MaxAttempts
+	}
+
+	return &retryRuntime{
+		strategy:    strategy,
+		opts:        opts,
+		maxAttempts: maxAttempts,
+	}, nil
 }
 
 // parseBackoffStrategy maps a backoff name + base delay to a

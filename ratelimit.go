@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -25,8 +26,8 @@ type (
 	RateLimiter struct {
 		clock    Clock
 		hooks    *Hooks
-		rate     float64
-		capacity int64
+		rate     atomic.Uint64 // math.Float64bits of tokens-per-second
+		capacity atomic.Int64
 		tokens   atomic.Int64
 		lastNano atomic.Int64
 		cfg      rateLimitConfig
@@ -60,18 +61,40 @@ func NewRateLimiter(
 	capacity := int64(rate * float64(fixedPointScale))
 
 	rl := &RateLimiter{
-		rate:     rate,
-		capacity: capacity,
-		clock:    clock,
-		hooks:    hooks,
-		cfg:      cfg,
+		clock: clock,
+		hooks: hooks,
+		cfg:   cfg,
 	}
 
+	rl.rate.Store(math.Float64bits(rate))
+	rl.capacity.Store(capacity)
 	// Start with a full bucket.
 	rl.tokens.Store(capacity)
 	rl.lastNano.Store(clock.Now().UnixNano())
 
 	return rl
+}
+
+// Reconfigure changes the token-refill rate (tokens per second) at runtime.
+// The bucket capacity is recomputed and the current token count is clamped to
+// the new capacity. Safe for concurrent use with Allow.
+func (rl *RateLimiter) Reconfigure(rate float64) {
+	newCapacity := int64(rate * float64(fixedPointScale))
+
+	rl.rate.Store(math.Float64bits(rate))
+	rl.capacity.Store(newCapacity)
+
+	// Clamp the current tokens down to the new capacity.
+	for {
+		current := rl.tokens.Load()
+		if current <= newCapacity {
+			return
+		}
+
+		if rl.tokens.CompareAndSwap(current, newCapacity) {
+			return
+		}
+	}
 }
 
 // refill adds tokens based on elapsed time since the last refill. It uses a
@@ -98,19 +121,22 @@ func (rl *RateLimiter) refill() {
 		// elapsedNano * rate gives tokens in nanosecond-scaled units, which is
 		// already in our fixed-point representation (since scale = 1e9 =
 		// nanos/sec).
-		addTokens := int64(float64(elapsedNano) * rl.rate)
+		rate := math.Float64frombits(rl.rate.Load())
+		addTokens := int64(float64(elapsedNano) * rate)
 
 		if addTokens <= 0 {
 			return
 		}
+
+		capacity := rl.capacity.Load()
 
 		// Add tokens atomically, capping at capacity.
 		for {
 			oldTokens := rl.tokens.Load()
 
 			newTokens := oldTokens + addTokens
-			if newTokens > rl.capacity {
-				newTokens = rl.capacity
+			if newTokens > capacity {
+				newTokens = capacity
 			}
 
 			if rl.tokens.CompareAndSwap(oldTokens, newTokens) {
