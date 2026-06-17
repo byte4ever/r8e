@@ -69,7 +69,7 @@ func NewClient(
 	name string,
 	hc *http.Client,
 	cl Classifier,
-	opts ...any,
+	opts ...r8e.Option,
 ) *Client {
 	return &Client{
 		hc: hc,

@@ -1,16 +1,19 @@
-package r8e
+// Package r8ehttp provides the HTTP edge adapters for the r8e resilience
+// library, keeping net/http out of the core policy package.
+package r8ehttp
 
 import (
+	"encoding/json"
 	"net/http"
 
-	json "github.com/goccy/go-json"
+	"github.com/byte4ever/r8e"
 )
 
 // ReadinessHandler returns an [http.Handler] that reports the readiness of
 // all policies registered with reg. It responds with 200 OK when all critical
 // policies are healthy, and 503 Service Unavailable otherwise. The response
-// body is always a JSON-encoded [ReadinessStatus].
-func ReadinessHandler(reg *Registry) http.Handler {
+// body is always a JSON-encoded [r8e.ReadinessStatus].
+func ReadinessHandler(reg *r8e.Registry) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		status := reg.CheckReadiness()
 

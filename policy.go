@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -13,19 +14,17 @@ import (
 // breaker, rate limiter, bulkhead, hedge, fallback) behind a
 // single [Do] method. Use [NewPolicy] with functional options to configure it.
 //
-// Pattern: Functional Options — configures Policy[T] via composable option
-// functions; generic options use any to work around Go's generic type
-// constraint on function signatures.
+// Pattern: Functional Options — configures Policy[T] via composable [Option]
+// values. Every With* constructor returns an Option, so passing a non-option
+// to [NewPolicy] is a compile error and a misconfigured policy cannot be built
+// silently.
 type Policy[T any] struct {
-	hooks          Hooks
-	clock          Clock
 	chain          Middleware[T]
 	circuitBreaker *CircuitBreaker
 	rateLimiter    *RateLimiter
 	bulkhead       *Bulkhead
 	registry       *Registry
 	name           string
-	entries        []PatternEntry[T]
 	deps           []HealthReporter
 }
 
@@ -42,31 +41,40 @@ func (p *Policy[T]) Do(
 	wrapped := p.chain(fn)
 
 	//nolint:wrapcheck // middleware chain error returned as-is
-	return wrapped(
-		ctx,
-	)
+	return wrapped(ctx)
 }
 
 // ---------------------------------------------------------------------------
-// Non-generic option descriptors — stored as any, interpreted by NewPolicy[T]
+// Option — the typed configuration carrier
 // ---------------------------------------------------------------------------.
 
-//nolint:decorder // separate type block for internal descriptors; Policy[T]
-// must remain distinct.
+//nolint:decorder // descriptor types grouped here, separate from Policy[T]
 type (
-	// policyOptionFunc is a non-generic option that modifies policySetup.
-	policyOptionFunc func(*policySetup)
+	// Option configures a [Policy] during [NewPolicy]. Construct options with
+	// the With* functions and [DependsOn]; the interface is closed to the
+	// package so the set of valid options is fixed and type-checked.
+	Option interface {
+		apply(*policySetup)
+	}
 
-	// policySetup holds non-generic configuration collected during NewPolicy.
+	// optionFunc adapts a plain function to the Option interface.
+	optionFunc func(*policySetup)
+
+	// policySetup holds the configuration collected from all options before
+	// the typed middleware chain is built in NewPolicy.
 	policySetup struct {
 		clock    Clock
 		hooks    Hooks
 		registry *Registry
-	}
 
-	// timeoutDesc holds deferred timeout configuration.
-	timeoutDesc struct {
-		d time.Duration
+		timeout        *time.Duration
+		retry          *retryDesc
+		circuitBreaker *circuitBreakerDesc
+		rateLimit      *rateLimitDesc
+		bulkhead       *int
+		hedge          *time.Duration
+		fallback       *fallbackDesc
+		deps           []HealthReporter
 	}
 
 	// retryDesc holds deferred retry configuration.
@@ -87,57 +95,52 @@ type (
 		rate float64
 	}
 
-	// bulkheadDesc holds deferred bulkhead configuration.
-	bulkheadDesc struct {
-		maxConcurrent int
-	}
-
-	// hedgeDesc holds deferred hedge configuration.
-	hedgeDesc struct {
-		delay time.Duration
-	}
-
-	// fallbackDesc holds a type-erased static fallback value.
+	// fallbackDesc holds a type-erased fallback. Exactly one of value/fn is
+	// set; NewPolicy[T] asserts it back to T and panics on a mismatch, since a
+	// fallback typed for a different T than the policy is a programmer error.
 	fallbackDesc struct {
-		val any
-	}
-
-	// fallbackFuncDesc holds a type-erased fallback function.
-	fallbackFuncDesc struct {
-		fn any // func(error) (T, error) stored as any
+		value  any // WithFallback: holds T
+		fn     any // WithFallbackFunc: holds func(error) (T, error)
+		isFunc bool
 	}
 )
 
+func (f optionFunc) apply(s *policySetup) { f(s) }
+
 // ---------------------------------------------------------------------------
-// With* functions — all return any
+// With* functions — all return Option
 // ---------------------------------------------------------------------------.
 
 // WithClock sets the clock used by all resilience patterns within this policy.
-func WithClock(c Clock) any {
-	return policyOptionFunc(func(s *policySetup) {
+func WithClock(c Clock) Option {
+	return optionFunc(func(s *policySetup) {
 		s.clock = c
 	})
 }
 
 // WithHooks sets the lifecycle hooks for all resilience patterns within this
-// policy.
-func WithHooks(h *Hooks) any {
-	return policyOptionFunc(func(s *policySetup) {
-		s.hooks = *h
+// policy. A nil argument is ignored, leaving the default (no-op) hooks.
+func WithHooks(h *Hooks) Option {
+	return optionFunc(func(s *policySetup) {
+		if h != nil {
+			s.hooks = *h
+		}
 	})
 }
 
 // WithRegistry sets an explicit registry for the policy to register with.
 // If not provided, named policies auto-register with DefaultRegistry.
-func WithRegistry(reg *Registry) any {
-	return policyOptionFunc(func(s *policySetup) {
+func WithRegistry(reg *Registry) Option {
+	return optionFunc(func(s *policySetup) {
 		s.registry = reg
 	})
 }
 
 // WithTimeout adds a timeout that cancels slow calls after d.
-func WithTimeout(d time.Duration) any {
-	return timeoutDesc{d: d}
+func WithTimeout(d time.Duration) Option {
+	return optionFunc(func(s *policySetup) {
+		s.timeout = &d
+	})
 }
 
 // WithRetry adds retry logic with the given maximum attempts, backoff strategy,
@@ -146,84 +149,89 @@ func WithRetry(
 	maxAttempts int,
 	strategy BackoffStrategy,
 	opts ...RetryOption,
-) any {
-	return retryDesc{maxAttempts: maxAttempts, strategy: strategy, opts: opts}
+) Option {
+	return optionFunc(func(s *policySetup) {
+		s.retry = &retryDesc{
+			maxAttempts: maxAttempts,
+			strategy:    strategy,
+			opts:        opts,
+		}
+	})
 }
 
 // WithCircuitBreaker adds a circuit breaker that fast-fails when the downstream
 // is unhealthy.
-func WithCircuitBreaker(opts ...CircuitBreakerOption) any {
-	return circuitBreakerDesc{opts: opts}
+func WithCircuitBreaker(opts ...CircuitBreakerOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.circuitBreaker = &circuitBreakerDesc{opts: opts}
+	})
 }
 
 // WithRateLimit adds a token-bucket rate limiter that allows rate tokens per
 // second.
-func WithRateLimit(rate float64, opts ...RateLimitOption) any {
-	return rateLimitDesc{rate: rate, opts: opts}
+func WithRateLimit(rate float64, opts ...RateLimitOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.rateLimit = &rateLimitDesc{rate: rate, opts: opts}
+	})
 }
 
 // WithBulkhead adds a concurrency limiter that rejects calls when all slots are
 // in use.
-func WithBulkhead(maxConcurrent int) any {
-	return bulkheadDesc{maxConcurrent: maxConcurrent}
+func WithBulkhead(maxConcurrent int) Option {
+	return optionFunc(func(s *policySetup) {
+		s.bulkhead = &maxConcurrent
+	})
 }
 
 // WithHedge adds a hedged request that fires a second concurrent call after
 // delay.
-func WithHedge(delay time.Duration) any {
-	return hedgeDesc{delay: delay}
+func WithHedge(delay time.Duration) Option {
+	return optionFunc(func(s *policySetup) {
+		s.hedge = &delay
+	})
 }
 
 // WithFallback adds a static fallback value returned when the call fails.
-// The value must match the Policy's type parameter T.
-func WithFallback[T any](val T) any {
-	return fallbackDesc{val: val}
+// The value's type must match the Policy's type parameter T; a mismatch panics
+// in [NewPolicy].
+func WithFallback[T any](val T) Option {
+	return optionFunc(func(s *policySetup) {
+		s.fallback = &fallbackDesc{value: val}
+	})
 }
 
 // WithFallbackFunc adds a fallback function called with the error when the call
 // fails. The function signature must be func(error) (T, error) matching the
-// Policy's type parameter.
-func WithFallbackFunc[T any](fn func(error) (T, error)) any {
-	return fallbackFuncDesc{fn: fn}
-}
-
-// dependsOnDesc holds health reporters that this policy depends on.
-//
-//nolint:decorder // separated for readability near DependsOn function
-type dependsOnDesc struct {
-	reporters []HealthReporter
+// Policy's type parameter; a mismatch panics in [NewPolicy].
+func WithFallbackFunc[T any](fn func(error) (T, error)) Option {
+	return optionFunc(func(s *policySetup) {
+		s.fallback = &fallbackDesc{fn: fn, isFunc: true}
+	})
 }
 
 // DependsOn declares hierarchical health dependencies. If any dependency
 // reports CriticalityCritical and is unhealthy, this policy's health
 // status will be degraded.
-func DependsOn(reporters ...HealthReporter) any {
-	return dependsOnDesc{reporters: reporters}
+func DependsOn(reporters ...HealthReporter) Option {
+	return optionFunc(func(s *policySetup) {
+		s.deps = append(s.deps, reporters...)
+	})
 }
 
 // ---------------------------------------------------------------------------
 // NewPolicy[T] — construct and wire up the policy
 // ---------------------------------------------------------------------------.
 
-// NewPolicy creates a new [Policy] with the given name and options.
-// Options are processed in two phases: first, non-generic options (clock,
-// hooks)
-// are collected; then, pattern descriptors build their middleware using the
-// resolved clock and hooks. Patterns are auto-sorted by priority via
-// [SortPatterns] before chaining.
-//
-//nolint:maintidx // large switch is inherent to the option-descriptor pattern
-func NewPolicy[T any](name string, opts ...any) *Policy[T] {
+// NewPolicy creates a new [Policy] with the given name and options. Each
+// configured pattern contributes a middleware; patterns are auto-sorted by
+// priority via [SortPatterns] before chaining. A named policy auto-registers
+// with its registry (or [DefaultRegistry] if none is given).
+func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	var setup policySetup
-
-	// Phase 1: Collect non-generic options to resolve clock and hooks first.
 	for _, opt := range opts {
-		if pof, ok := opt.(policyOptionFunc); ok {
-			pof(&setup)
-		}
+		opt.apply(&setup)
 	}
 
-	// Default clock.
 	if setup.clock == nil {
 		setup.clock = RealClock{}
 	}
@@ -231,185 +239,46 @@ func NewPolicy[T any](name string, opts ...any) *Policy[T] {
 	hooks := setup.hooks
 	clock := setup.clock
 
-	// Phase 2: Build middleware entries from pattern descriptors.
 	var (
 		entries        []PatternEntry[T]
 		circuitBreaker *CircuitBreaker
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
-		deps           []HealthReporter
 	)
 
-	for _, opt := range opts {
-		switch desc := opt.(type) {
-		case policyOptionFunc:
-			// Already processed in phase 1.
-
-		case timeoutDesc:
-			duration := desc.d
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityTimeout,
-				Name:     "timeout",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						return DoTimeout[T](ctx, duration, next, &hooks)
-					}
-				},
-			})
-
-		case retryDesc:
-			maxAttempts := desc.maxAttempts
-			strategy := desc.strategy
-			retryOpts := desc.opts
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityRetry,
-				Name:     "retry",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						return DoRetry[T](ctx, next, RetryParams{
-							MaxAttempts: maxAttempts,
-							Strategy:    strategy,
-							Hooks:       &hooks,
-							Clock:       clock,
-							Opts:        retryOpts,
-						})
-					}
-				},
-			})
-
-		case circuitBreakerDesc:
-			circuitBreaker = NewCircuitBreaker(clock, &hooks, desc.opts...)
-			cbRef := circuitBreaker
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityCircuitBreaker,
-				Name:     "circuit_breaker",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						if err := cbRef.Allow(); err != nil {
-							var zero T
-
-							return zero, err //nolint:wrapcheck // circuit breaker error returned as-is
-						}
-
-						val, err := next(ctx)
-						if err != nil {
-							cbRef.RecordFailure()
-						} else {
-							cbRef.RecordSuccess()
-						}
-
-						return val, err //nolint:wrapcheck // caller's error returned as-is
-					}
-				},
-			})
-
-		case rateLimitDesc:
-			rateLimiter = NewRateLimiter(desc.rate, clock, &hooks, desc.opts...)
-			rlRef := rateLimiter
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityRateLimiter,
-				Name:     "rate_limiter",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						if err := rlRef.Allow(ctx); err != nil {
-							var zero T
-
-							return zero, err //nolint:wrapcheck // rate limiter error returned as-is
-						}
-
-						return next(ctx)
-					}
-				},
-			})
-
-		case bulkheadDesc:
-			bulkhead = NewBulkhead(desc.maxConcurrent, &hooks)
-			bhRef := bulkhead
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityBulkhead,
-				Name:     "bulkhead",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						if err := bhRef.Acquire(); err != nil {
-							var zero T
-
-							return zero, err //nolint:wrapcheck // bulkhead error returned as-is
-						}
-
-						defer bhRef.Release()
-
-						return next(ctx)
-					}
-				},
-			})
-
-		case hedgeDesc:
-			hedgeParams := HedgeParams{
-				Delay: desc.delay,
-				Hooks: &hooks,
-				Clock: clock,
-			}
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityHedge,
-				Name:     "hedge",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						return DoHedge[T](ctx, next, hedgeParams)
-					}
-				},
-			})
-
-		case fallbackDesc:
-			val, ok := desc.val.(T)
-			if !ok {
-				continue
-			}
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityFallback,
-				Name:     "fallback",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						return DoFallback[T](ctx, next, val, &hooks)
-					}
-				},
-			})
-
-		case fallbackFuncDesc:
-			fn, ok := desc.fn.(func(error) (T, error))
-			if !ok {
-				continue
-			}
-
-			entries = append(entries, PatternEntry[T]{
-				Priority: priorityFallback,
-				Name:     "fallback_func",
-				MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-					return func(ctx context.Context) (T, error) {
-						return DoFallbackFunc[T](ctx, next, fn, &hooks)
-					}
-				},
-			})
-
-		case dependsOnDesc:
-			deps = append(deps, desc.reporters...)
-
-		default:
-			// Unknown option type — silently ignored.
-		}
+	if setup.timeout != nil {
+		entries = append(entries, newTimeoutEntry[T](*setup.timeout, &hooks))
 	}
 
-	// Sort by priority and chain.
-	sorted := SortPatterns[T](entries)
-	chain := Chain[T](sorted...)
+	if setup.retry != nil {
+		entries = append(entries, newRetryEntry[T](*setup.retry, &hooks, clock))
+	}
 
-	// Auto-register if policy has a name.
+	if setup.circuitBreaker != nil {
+		circuitBreaker = NewCircuitBreaker(clock, &hooks, setup.circuitBreaker.opts...)
+		entries = append(entries, newCircuitBreakerEntry[T](circuitBreaker))
+	}
+
+	if setup.rateLimit != nil {
+		rateLimiter = NewRateLimiter(setup.rateLimit.rate, clock, &hooks, setup.rateLimit.opts...)
+		entries = append(entries, newRateLimiterEntry[T](rateLimiter))
+	}
+
+	if setup.bulkhead != nil {
+		bulkhead = NewBulkhead(*setup.bulkhead, &hooks)
+		entries = append(entries, newBulkheadEntry[T](bulkhead))
+	}
+
+	if setup.hedge != nil {
+		entries = append(entries, newHedgeEntry[T](*setup.hedge, &hooks, clock))
+	}
+
+	if setup.fallback != nil {
+		entries = append(entries, newFallbackEntry[T](*setup.fallback, &hooks))
+	}
+
+	chain := Chain[T](SortPatterns[T](entries)...)
+
 	var reg *Registry
 	if name != "" {
 		reg = setup.registry
@@ -420,20 +289,178 @@ func NewPolicy[T any](name string, opts ...any) *Policy[T] {
 
 	policy := &Policy[T]{
 		name:           name,
-		hooks:          hooks,
-		clock:          clock,
 		chain:          chain,
-		entries:        entries,
 		circuitBreaker: circuitBreaker,
 		rateLimiter:    rateLimiter,
 		bulkhead:       bulkhead,
-		deps:           deps,
+		deps:           setup.deps,
 		registry:       reg,
 	}
 
-	if reg != nil && name != "" {
+	if reg != nil {
 		reg.Register(policy)
 	}
 
 	return policy
+}
+
+// ---------------------------------------------------------------------------
+// Per-pattern middleware entry builders
+// ---------------------------------------------------------------------------.
+
+func newTimeoutEntry[T any](d time.Duration, hooks *Hooks) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityTimeout,
+		Name:     "timeout",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				return DoTimeout[T](ctx, d, next, hooks)
+			}
+		},
+	}
+}
+
+func newRetryEntry[T any](desc retryDesc, hooks *Hooks, clock Clock) PatternEntry[T] {
+	params := RetryParams{
+		MaxAttempts: desc.maxAttempts,
+		Strategy:    desc.strategy,
+		Hooks:       hooks,
+		Clock:       clock,
+		Opts:        desc.opts,
+	}
+
+	return PatternEntry[T]{
+		Priority: priorityRetry,
+		Name:     "retry",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				return DoRetry[T](ctx, next, params)
+			}
+		},
+	}
+}
+
+func newCircuitBreakerEntry[T any](cb *CircuitBreaker) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityCircuitBreaker,
+		Name:     "circuit_breaker",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				if err := cb.Allow(); err != nil {
+					var zero T
+
+					return zero, err //nolint:wrapcheck // circuit breaker error returned as-is
+				}
+
+				val, err := next(ctx)
+				if err != nil {
+					cb.RecordFailure()
+				} else {
+					cb.RecordSuccess()
+				}
+
+				return val, err //nolint:wrapcheck // caller's error returned as-is
+			}
+		},
+	}
+}
+
+func newRateLimiterEntry[T any](rl *RateLimiter) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityRateLimiter,
+		Name:     "rate_limiter",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				if err := rl.Allow(ctx); err != nil {
+					var zero T
+
+					return zero, err //nolint:wrapcheck // rate limiter error returned as-is
+				}
+
+				return next(ctx)
+			}
+		},
+	}
+}
+
+func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityBulkhead,
+		Name:     "bulkhead",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				if err := bh.Acquire(); err != nil {
+					var zero T
+
+					return zero, err //nolint:wrapcheck // bulkhead error returned as-is
+				}
+
+				defer bh.Release()
+
+				return next(ctx)
+			}
+		},
+	}
+}
+
+func newHedgeEntry[T any](delay time.Duration, hooks *Hooks, clock Clock) PatternEntry[T] {
+	params := HedgeParams{
+		Delay: delay,
+		Hooks: hooks,
+		Clock: clock,
+	}
+
+	return PatternEntry[T]{
+		Priority: priorityHedge,
+		Name:     "hedge",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				return DoHedge[T](ctx, next, params)
+			}
+		},
+	}
+}
+
+func newFallbackEntry[T any](desc fallbackDesc, hooks *Hooks) PatternEntry[T] {
+	if desc.isFunc {
+		fn, ok := desc.fn.(func(error) (T, error))
+		if !ok {
+			var zero T
+
+			panic(fmt.Sprintf(
+				"r8e: WithFallbackFunc has type %T, which does not match policy result type %T",
+				desc.fn, zero,
+			))
+		}
+
+		return PatternEntry[T]{
+			Priority: priorityFallback,
+			Name:     "fallback_func",
+			MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+				return func(ctx context.Context) (T, error) {
+					return DoFallbackFunc[T](ctx, next, fn, hooks)
+				}
+			},
+		}
+	}
+
+	val, ok := desc.value.(T)
+	if !ok {
+		var zero T
+
+		panic(fmt.Sprintf(
+			"r8e: WithFallback value has type %T, which does not match policy result type %T",
+			desc.value, zero,
+		))
+	}
+
+	return PatternEntry[T]{
+		Priority: priorityFallback,
+		Name:     "fallback",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				return DoFallback[T](ctx, next, val, hooks)
+			}
+		},
+	}
 }

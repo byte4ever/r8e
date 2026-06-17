@@ -120,18 +120,6 @@ func TestPresetWithOverride(t *testing.T) {
 	if result != "overridden" {
 		t.Fatalf("Do() = %q, want %q", result, "overridden")
 	}
-
-	// Verify the policy has patterns from both preset and override.
-	// StandardHTTPClient has 3 options (timeout, retry, circuit breaker).
-	// We added timeout + clock = 2 more. Clock is a policyOptionFunc, not a
-	// pattern. So we should have 4 pattern entries: timeout (preset) + retry +
-	// circuit breaker + timeout (override).
-	if got := len(p.entries); got != 4 {
-		t.Fatalf(
-			"policy has %d pattern entries, want 4 (3 from preset + 1 override timeout)",
-			got,
-		)
-	}
 }
 
 // ---------------------------------------------------------------------------

@@ -2,18 +2,10 @@ package r8e
 
 import (
 	"fmt"
-	"os"
 	"time"
-
-	json "github.com/goccy/go-json"
 )
 
 type (
-	// configFile is the top-level JSON structure.
-	configFile struct {
-		Policies map[string]PolicyConfig `json:"policies"`
-	}
-
 	// PolicyConfig holds the decoded configuration for a single
 	// resilience policy. Export it to embed in your own app config
 	// structs for JSON or YAML unmarshaling, then call [BuildOptions]
@@ -74,48 +66,12 @@ type (
 	}
 )
 
-// LoadConfig reads a JSON configuration file and stores the policy
-// configurations in a [Registry]. Actual [Policy] instances are not created
-// until [GetPolicy] is called, allowing the caller to provide type
-// parameters and additional code-level options.
-//
-// Duration values (timeout, recovery_timeout, base_delay, max_delay,
-// hedge) are parsed using [time.ParseDuration].
-//
-// Supported backoff strategies: "constant", "exponential", "linear",
-// "exponential_jitter".
-func LoadConfig(path string) (*Registry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("r8e: read config: %w", err)
-	}
-
-	var cfg configFile
-	if err = json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("r8e: parse config: %w", err)
-	}
-
-	// Validate all policies eagerly so errors surface at load time.
-	for name, pc := range cfg.Policies {
-		if _, buildErr := BuildOptions(&pc); buildErr != nil {
-			return nil, fmt.Errorf("r8e: policy %q: %w", name, buildErr)
-		}
-	}
-
-	reg := NewRegistry()
-	reg.mu.Lock()
-	reg.configs = cfg.Policies
-	reg.mu.Unlock()
-
-	return reg, nil
-}
-
 // BuildOptions converts a [PolicyConfig] into a slice of functional
 // option values suitable for [NewPolicy]. Use this when you embed
 // [PolicyConfig] in your own config struct and want to build a
 // policy without going through [LoadConfig].
-func BuildOptions(pc *PolicyConfig) ([]any, error) {
-	var opts []any
+func BuildOptions(pc *PolicyConfig) ([]Option, error) {
+	var opts []Option
 
 	if pc.Timeout != nil {
 		d, err := time.ParseDuration(*pc.Timeout)
@@ -228,6 +184,10 @@ func BuildOptions(pc *PolicyConfig) ([]any, error) {
 // BackoffStrategy. Both fields are required pointers; nil values
 // produce an error.
 //
+// Pattern: Factory — selects and constructs the concrete BackoffStrategy
+// implementation from a configuration name, hiding the concrete type behind
+// the BackoffStrategy interface.
+//
 //nolint:ireturn // returns interface by design for strategy pattern
 func parseBackoffStrategy(
 	name, baseDelayStr *string,
@@ -267,33 +227,3 @@ func parseBackoffStrategy(
 	}
 }
 
-// GetPolicy retrieves a named policy configuration from a config-loaded
-// [Registry] and returns a typed [Policy] ready for use with [Policy.Do].
-// If the name is not found in the stored configs, a bare policy is created
-// with only the provided opts.
-//
-// Additional options can be provided to augment or override the
-// config-loaded settings (e.g., adding hooks, a custom clock, or fallbacks).
-// User-provided options are applied after config options, so they take
-// precedence.
-func GetPolicy[T any](reg *Registry, name string, opts ...any) *Policy[T] {
-	reg.mu.Lock()
-	pc, ok := reg.configs[name]
-	reg.mu.Unlock()
-
-	var allOpts []any
-
-	allOpts = append(allOpts, WithRegistry(reg))
-
-	if ok {
-		configOpts, err := BuildOptions(&pc)
-		if err == nil {
-			allOpts = append(allOpts, configOpts...)
-		}
-	}
-
-	// User opts come last so they can override config values.
-	allOpts = append(allOpts, opts...)
-
-	return NewPolicy[T](name, allOpts...)
-}

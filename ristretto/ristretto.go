@@ -18,6 +18,9 @@ type (
 	}
 
 	// adapter wraps a ristretto.Cache to implement r8e.Cache.
+	//
+	// Pattern: Adapter — exposes a third-party ristretto.Cache through the
+	// r8e.Cache port the resilience layer consumes.
 	adapter[K Key, V any] struct {
 		cache *ristretto.Cache[K, V]
 	}

@@ -64,15 +64,23 @@ func (t *policyTimer) Stop() bool               { t.stopped = true; return true 
 func (t *policyTimer) Reset(time.Duration) bool { return false }
 
 // ---------------------------------------------------------------------------
-// TestNewPolicyDefaultClock — NewPolicy with no options uses RealClock
+// TestNewPolicyDefaultClock — NewPolicy with no clock builds and runs with the
+// default (real) clock. Fake-clock injection is verified behaviourally in
+// timeout_test.go.
 // ---------------------------------------------------------------------------
 
 func TestNewPolicyDefaultClock(t *testing.T) {
-	p := NewPolicy[string]("test")
+	p := NewPolicy[string]("test", WithTimeout(time.Second))
 
-	// The clock should be a RealClock by default.
-	if _, ok := p.clock.(RealClock); !ok {
-		t.Fatalf("default clock = %T, want RealClock", p.clock)
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) { return "ok", nil },
+	)
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	if result != "ok" {
+		t.Fatalf("Do() = %q, want %q", result, "ok")
 	}
 }
 
@@ -476,10 +484,20 @@ func TestPolicyWithClock(t *testing.T) {
 
 	p := NewPolicy[string]("clock-test",
 		WithClock(clk),
+		WithTimeout(time.Second),
 	)
 
-	if p.clock != clk {
-		t.Fatalf("clock = %T, want *policyClock", p.clock)
+	// The injected clock must be used by the patterns; a fast call completes.
+	// Fake-clock-driven timeout firing is covered in timeout_test.go.
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) { return "ok", nil },
+	)
+	if err != nil {
+		t.Fatalf("Do() error = %v, want nil", err)
+	}
+	if result != "ok" {
+		t.Fatalf("Do() = %q, want %q", result, "ok")
 	}
 }
 

@@ -3,15 +3,10 @@ package r8e
 import (
 	"context"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	json "github.com/goccy/go-json"
 )
 
 // ---------------------------------------------------------------------------
@@ -86,77 +81,6 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestIntegrationConfigWithCodeOverrides — LoadConfig + GetPolicy + hooks
-// ---------------------------------------------------------------------------
-
-func TestIntegrationConfigWithCodeOverrides(t *testing.T) {
-	clk := newPolicyClock()
-
-	// Load the existing testdata/valid.json config.
-	reg, err := LoadConfig("testdata/valid.json")
-	if err != nil {
-		t.Fatalf("LoadConfig() error = %v", err)
-	}
-
-	// Create a child policy to use as a dependency.
-	childReg := NewRegistry()
-	child := NewPolicy[int]("child-service",
-		WithClock(clk),
-		WithRegistry(childReg),
-		WithCircuitBreaker(FailureThreshold(2), RecoveryTimeout(time.Hour)),
-	)
-
-	var hookCalled atomic.Bool
-	hooks := Hooks{
-		OnRetry: func(_ int, _ error) { hookCalled.Store(true) },
-	}
-
-	// GetPolicy from config, adding code-level overrides: clock, hooks,
-	// dependency.
-	p := GetPolicy[string](reg, "notification-api",
-		WithClock(clk),
-		WithHooks(&hooks),
-		DependsOn(child),
-	)
-
-	// The policy should work with both config-derived and code-level options.
-	attempt := 0
-	result, err := p.Do(
-		context.Background(),
-		func(_ context.Context) (string, error) {
-			attempt++
-			if attempt < 2 {
-				return "", errors.New("transient")
-			}
-			return "config-override-success", nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "config-override-success" {
-		t.Fatalf("Do() = %q, want %q", result, "config-override-success")
-	}
-	if !hookCalled.Load() {
-		t.Fatal("OnRetry hook should have been called from code override")
-	}
-
-	// Verify DependsOn is wired — health status should list the child
-	// dependency.
-	status := p.HealthStatus()
-	if len(status.Dependencies) == 0 {
-		t.Fatal("expected at least one dependency in health status")
-	}
-	if status.Dependencies[0].Name != "child-service" {
-		t.Fatalf(
-			"dependency name = %q, want %q",
-			status.Dependencies[0].Name,
-			"child-service",
-		)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // TestIntegrationPresetPolicy — Use preset + override
 // ---------------------------------------------------------------------------
 
@@ -188,17 +112,6 @@ func TestIntegrationPresetPolicy(t *testing.T) {
 	}
 	if result != "from-preset" {
 		t.Fatalf("Do() = %q, want %q", result, "from-preset")
-	}
-
-	// Verify the preset included expected patterns.
-	patternNames := make(map[string]bool)
-	for _, e := range p.entries {
-		patternNames[e.Name] = true
-	}
-	for _, expected := range []string{"timeout", "retry", "circuit_breaker", "fallback"} {
-		if !patternNames[expected] {
-			t.Errorf("missing preset pattern %q", expected)
-		}
 	}
 
 	// Verify the fallback override works: fail enough to exhaust retries +
@@ -536,105 +449,3 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// TestIntegrationReadinessHTTPEndpoint — Full HTTP endpoint test
-// ---------------------------------------------------------------------------
-
-func TestIntegrationReadinessHTTPEndpoint(t *testing.T) {
-	clk := newPolicyClock()
-	reg := NewRegistry()
-
-	// Create two policies in the same registry.
-	healthy := NewPolicy[string]("healthy-service",
-		WithClock(clk),
-		WithRegistry(reg),
-		WithCircuitBreaker(FailureThreshold(5), RecoveryTimeout(time.Hour)),
-	)
-	unhealthy := NewPolicy[string]("unhealthy-service",
-		WithClock(clk),
-		WithRegistry(reg),
-		WithCircuitBreaker(FailureThreshold(2), RecoveryTimeout(time.Hour)),
-	)
-
-	// Step 1: All healthy — verify 200 response.
-	handler := ReadinessHandler(reg)
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("GET error = %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	var readiness ReadinessStatus
-	if err := json.Unmarshal(body, &readiness); err != nil {
-		t.Fatalf("JSON unmarshal error = %v", err)
-	}
-	if !readiness.Ready {
-		t.Fatal("readiness should be true when all policies are healthy")
-	}
-	if len(readiness.Policies) != 2 {
-		t.Fatalf("expected 2 policies, got %d", len(readiness.Policies))
-	}
-
-	// Step 2: Drive the unhealthy service's circuit breaker to open.
-	for range 2 {
-		_, _ = unhealthy.Do(
-			context.Background(),
-			func(_ context.Context) (string, error) {
-				return "", errors.New("failure")
-			},
-		)
-	}
-
-	// Keep the healthy service healthy by making a successful call.
-	_, _ = healthy.Do(
-		context.Background(),
-		func(_ context.Context) (string, error) {
-			return "ok", nil
-		},
-	)
-
-	// Step 3: Hit the endpoint again — should return 503.
-	resp2, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("GET error = %v", err)
-	}
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf(
-			"status = %d, want %d",
-			resp2.StatusCode,
-			http.StatusServiceUnavailable,
-		)
-	}
-
-	body2, _ := io.ReadAll(resp2.Body)
-	var readiness2 ReadinessStatus
-	if err := json.Unmarshal(body2, &readiness2); err != nil {
-		t.Fatalf("JSON unmarshal error = %v", err)
-	}
-	if readiness2.Ready {
-		t.Fatal("readiness should be false when a circuit is open")
-	}
-
-	// Verify the JSON body contains the unhealthy policy.
-	var foundUnhealthy bool
-	for _, ps := range readiness2.Policies {
-		if ps.Name == "unhealthy-service" && !ps.Healthy {
-			foundUnhealthy = true
-		}
-	}
-	if !foundUnhealthy {
-		t.Fatal(
-			"expected unhealthy-service to appear as unhealthy in JSON body",
-		)
-	}
-}

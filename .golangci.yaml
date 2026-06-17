@@ -401,6 +401,9 @@ linters:
         - empty
         - stdlib
         - (or|er)$
+        # Functional-options constructors legitimately return the package's
+        # Option interface.
+        - Option$
 
     lll:
       line-length: 120

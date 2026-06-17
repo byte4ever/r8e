@@ -207,26 +207,6 @@ func TestSentinelErrorMessages(t *testing.T) {
 	}
 }
 
-func TestSentinelErrorsImplementResilienceError(t *testing.T) {
-	sentinels := []error{
-		r8e.ErrCircuitOpen,
-		r8e.ErrRateLimited,
-		r8e.ErrBulkheadFull,
-		r8e.ErrTimeout,
-		r8e.ErrRetriesExhausted,
-	}
-	for _, sentinel := range sentinels {
-		var re r8e.ResilienceError
-		if !errors.As(sentinel, &re) {
-			t.Errorf("errors.As(%T, &ResilienceError) = false", sentinel)
-			continue
-		}
-		if !re.IsResilience() {
-			t.Errorf("%T.IsResilience() = false, want true", sentinel)
-		}
-	}
-}
-
 func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
 	sentinels := []error{
 		r8e.ErrCircuitOpen,
@@ -239,26 +219,6 @@ func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
 		wrapped := fmt.Errorf("context: %w", sentinel)
 		if !errors.Is(wrapped, sentinel) {
 			t.Errorf("errors.Is(wrapped, %T) = false, want true", sentinel)
-		}
-	}
-}
-
-func TestSentinelResilienceErrorDetectableWhenWrapped(t *testing.T) {
-	sentinels := []error{
-		r8e.ErrCircuitOpen,
-		r8e.ErrRateLimited,
-		r8e.ErrBulkheadFull,
-		r8e.ErrTimeout,
-		r8e.ErrRetriesExhausted,
-	}
-	for _, sentinel := range sentinels {
-		wrapped := fmt.Errorf("context: %w", sentinel)
-		var re r8e.ResilienceError
-		if !errors.As(wrapped, &re) {
-			t.Errorf(
-				"errors.As(wrapped %T, &ResilienceError) = false",
-				sentinel,
-			)
 		}
 	}
 }

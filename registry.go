@@ -23,7 +23,6 @@ type (
 	// explicit registries can be created for testing or multi-tenant scenarios.
 	Registry struct {
 		reporters atomic.Pointer[[]HealthReporter]
-		configs   map[string]PolicyConfig
 		mu        sync.Mutex
 	}
 )

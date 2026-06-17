@@ -13,7 +13,7 @@ import "context"
 func Do[T any](
 	ctx context.Context,
 	fn func(context.Context) (T, error),
-	opts ...any,
+	opts ...Option,
 ) (T, error) {
 	p := NewPolicy[T]("", opts...)
 
