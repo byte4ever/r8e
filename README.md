@@ -4,7 +4,7 @@
 
 **Stop writing retry loops. Start shipping resilient services.**
 
-r8e — short for r(esilienc)e, just like k8s stands for k(ubernete)s — gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, and fallback — all composable into a single policy with one line of code. A standalone keyed stale cache with pluggable cache backends complements the policy chain. Zero dependencies. Lock-free internals. 100% test coverage.
+r8e — short for r(esilienc)e, just like k8s stands for k(ubernete)s — gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, and fallback — all composable into a single policy with one line of code. A standalone keyed stale cache with pluggable cache backends complements the policy chain. Zero-dependency core. 100% test coverage.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/byte4ever/r8e.svg)](https://pkg.go.dev/github.com/byte4ever/r8e)
 [![Go Report Card](https://goreportcard.com/badge/github.com/byte4ever/r8e)](https://goreportcard.com/report/github.com/byte4ever/r8e)
@@ -29,12 +29,12 @@ go get github.com/byte4ever/r8e
 ## Why r8e?
 
 - **One policy, all patterns** — compose any combination; r8e handles the ordering
-- **Production-grade** — lock-free atomics, zero allocations on the hot path, 100% test coverage
-- **Kubernetes-native** — built-in health reporting with hierarchical dependencies and a `/readyz` handler
+- **Production-grade** — lock-free rate limiter and bulkhead, a linearizable circuit breaker, 100% test coverage
+- **Kubernetes-native** — built-in health reporting with hierarchical dependencies and a `/readyz` handler (`r8ehttp`)
 - **Observable** — 12 lifecycle hooks on Policy, plus per-StaleCache hooks
 - **Testable** — `Clock` interface lets you control time in tests, no `time.Sleep` flakiness
-- **Configurable** — define policies in code, JSON, or use ready-made presets
-- **Zero dependencies** — only the Go standard library
+- **Configurable** — define policies in code, JSON (`r8econf`), or use ready-made presets
+- **Zero-dependency core** — the `r8e` package uses only the Go standard library
 
 ## Features
 
@@ -354,8 +354,8 @@ dbPolicy := r8e.NewPolicy[string]("database",
     r8e.DependsOn(apiPolicy), // hierarchical dependency
 )
 
-// Expose readiness endpoint
-http.Handle("/readyz", r8e.ReadinessHandler(r8e.DefaultRegistry()))
+// Expose readiness endpoint (HTTP lives in the r8ehttp edge package)
+http.Handle("/readyz", r8ehttp.ReadinessHandler(r8e.DefaultRegistry()))
 ```
 
 Check health programmatically:
@@ -393,21 +393,27 @@ Load policies from a JSON file:
 }
 ```
 
+File-based configuration lives in the `r8econf` edge package, so the core
+package stays dependency-free:
+
 ```go
-reg, err := r8e.LoadConfig("config.json")
+store, err := r8econf.Load("config.json")
 if err != nil {
     log.Fatal(err)
 }
 
 // Get a typed policy — config options are merged with code-level options
-policy := r8e.GetPolicy[string](reg, "payment-api",
+policy, err := r8econf.GetPolicy[string](store, "payment-api",
     r8e.WithFallback("service unavailable"),
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 Supported backoff strategies in config: `"constant"`, `"exponential"`, `"linear"`, `"exponential_jitter"`.
 
-Cache backends can be configured separately via `LoadCacheConfig`:
+Cache backends can be configured separately via `r8econf.LoadCacheConfig`:
 
 ```json
 {
@@ -421,7 +427,7 @@ Cache backends can be configured separately via `LoadCacheConfig`:
 ```
 
 ```go
-cfg, err := r8e.LoadCacheConfig("caches.json", "pricing")
+cfg, err := r8econf.LoadCacheConfig("caches.json", "pricing")
 if err != nil {
     log.Fatal(err)
 }
@@ -431,7 +437,7 @@ sc := r8e.NewStaleCache(cache, cfg.TTL)
 
 ## Custom Configuration
 
-The exported `PolicyConfig`, `CircuitBreakerConfig`, and `RetryConfig` structs carry both `json` and `yaml` tags, so you can embed them in your own application config and unmarshal from any format. Call `BuildOptions` to convert a `PolicyConfig` into functional options without going through `LoadConfig`.
+The exported `PolicyConfig`, `CircuitBreakerConfig`, and `RetryConfig` structs carry both `json` and `yaml` tags, so you can embed them in your own application config and unmarshal from any format. Call `r8e.BuildOptions` to convert a `PolicyConfig` into functional options without going through `r8econf.Load`.
 
 ```go
 package main

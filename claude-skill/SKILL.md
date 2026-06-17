@@ -14,7 +14,7 @@ One generic `Policy[T]` type, one `Do()` method, seven composable patterns, auto
 
 ```go
 // Create a named policy (auto-registers with DefaultRegistry for health reporting)
-policy := r8e.NewPolicy[T](name string, opts ...any) *Policy[T]
+policy := r8e.NewPolicy[T](name string, opts ...r8e.Option) *Policy[T]
 
 // Execute through the middleware chain
 result, err := policy.Do(ctx, func(ctx context.Context) (T, error) { ... })
@@ -60,7 +60,8 @@ r8e.WithCircuitBreaker(opts ...CircuitBreakerOption)
 **Options**: `r8e.FailureThreshold(n)` (default 5), `r8e.RecoveryTimeout(d)` (default 30s), `r8e.HalfOpenMaxAttempts(n)` (default 1).
 
 States: closed -> open (fast-fail `r8e.ErrCircuitOpen`) -> half-open -> closed.
-Lock-free via `sync/atomic`.
+State transitions are mutex-guarded (linearizable); half-open admits at most
+`HalfOpenMaxAttempts` concurrent probes.
 
 ### Rate Limiter
 
@@ -145,13 +146,13 @@ dbPolicy := r8e.NewPolicy[*Result]("database",
     r8e.DependsOn(apiPolicy),
 )
 
-// Kubernetes /readyz endpoint
-http.Handle("/readyz", r8e.ReadinessHandler(r8e.DefaultRegistry()))
+// Kubernetes /readyz endpoint (HTTP handler lives in the r8ehttp edge package)
+http.Handle("/readyz", r8ehttp.ReadinessHandler(r8e.DefaultRegistry()))
 
 // Custom registry
 reg := r8e.NewRegistry()
 policy := r8e.NewPolicy[string]("svc", r8e.WithRegistry(reg), ...)
-http.Handle("/readyz", r8e.ReadinessHandler(reg))
+http.Handle("/readyz", r8ehttp.ReadinessHandler(reg))
 ```
 
 ## StaleCache (Standalone, Not Part of Policy)
@@ -250,9 +251,9 @@ policy := r8e.NewPolicy[T]("api",
 ```
 
 ```go
-reg, err := r8e.LoadConfig("config.json")
-policy := r8e.GetPolicy[string](reg, "payment-api",
-    r8e.WithFallback[string]("unavailable"),  // code opts override config
+store, err := r8econf.Load("config.json")
+policy, err := r8econf.GetPolicy[string](store, "payment-api",
+    r8e.WithFallback("unavailable"),  // code opts override config
     r8e.WithHooks(&r8e.Hooks{...}),
 )
 ```
