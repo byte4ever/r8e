@@ -22,7 +22,7 @@ Trois scenarios :
    valeur de fallback est retournee.
 
 3. **Sans options (pass-through)** — Appeler `Do` sans options cree une
-   policy nue qui transmet simplement l'appel a la fonction. Cela equivaut
+   policy nue qui transmet l'appel a la fonction. Cela equivaut
    a appeler la fonction directement.
 
 ## Quand l'utiliser

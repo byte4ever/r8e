@@ -81,6 +81,23 @@ func (r *Registry) CheckReadiness() ReadinessStatus {
 	return status
 }
 
+// Snapshot returns a [PolicyMetrics] for every registered policy that exposes
+// metrics. It is safe for concurrent use and takes no locks on the read path
+// (the reporter list is read via an atomic snapshot).
+func (r *Registry) Snapshot() []PolicyMetrics {
+	reporters := *r.reporters.Load()
+
+	out := make([]PolicyMetrics, 0, len(reporters))
+
+	for _, hr := range reporters {
+		if mr, ok := hr.(MetricsReporter); ok {
+			out = append(out, mr.Metrics())
+		}
+	}
+
+	return out
+}
+
 // DefaultRegistry returns the package-level global registry, creating it
 // on first call.
 //

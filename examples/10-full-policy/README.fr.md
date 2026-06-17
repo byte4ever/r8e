@@ -3,8 +3,8 @@
 # Exemple 10 — Politique complete
 
 Illustre la composition de tous les patrons de resilience en une seule
-politique. r8e trie automatiquement les patrons dans le bon ordre d'execution,
-quel que soit l'ordre dans lequel les options sont specifiees.
+politique. r8e trie automatiquement les patrons dans un ordre d'execution
+raisonnable, quel que soit l'ordre dans lequel les options sont specifiees.
 
 ## Ce que cet exemple illustre
 

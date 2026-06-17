@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,8 +26,22 @@ type (
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
 		registry       *Registry
-		name           string
-		deps           []HealthReporter
+		metrics        *policyMetrics
+		// Reloadable cells for the stateless patterns; nil when the pattern is
+		// absent. The middleware reads them per call so Reconfigure takes
+		// effect without rebuilding the chain.
+		timeout *atomic.Int64                 // timeout in nanoseconds
+		hedge   *atomic.Int64                 // hedge delay in nanoseconds
+		retry   *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
+		name    string
+		deps    []HealthReporter
+	}
+
+	// retryRuntime is the hot-swappable retry configuration read per call.
+	retryRuntime struct {
+		strategy    BackoffStrategy
+		opts        []RetryOption
+		maxAttempts int
 	}
 
 	// Option configures a [Policy] during [NewPolicy]. Construct options with
@@ -236,7 +251,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		setup.clock = RealClock{}
 	}
 
-	hooks := setup.hooks
+	// Wrap the caller's hooks so every lifecycle event also increments a
+	// metrics counter (see policyMetrics.instrument).
+	metrics := &policyMetrics{}
+	hooks := metrics.instrument(&setup.hooks)
 	clock := setup.clock
 
 	var (
@@ -244,14 +262,25 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker *CircuitBreaker
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
+		timeoutCell    *atomic.Int64
+		hedgeCell      *atomic.Int64
+		retryCell      *atomic.Pointer[retryRuntime]
 	)
 
 	if setup.timeout != nil {
-		entries = append(entries, newTimeoutEntry[T](*setup.timeout, &hooks))
+		timeoutCell = new(atomic.Int64)
+		timeoutCell.Store(int64(*setup.timeout))
+		entries = append(entries, newTimeoutEntry[T](timeoutCell, &hooks))
 	}
 
 	if setup.retry != nil {
-		entries = append(entries, newRetryEntry[T](*setup.retry, &hooks, clock))
+		retryCell = new(atomic.Pointer[retryRuntime])
+		retryCell.Store(&retryRuntime{
+			strategy:    setup.retry.strategy,
+			opts:        setup.retry.opts,
+			maxAttempts: setup.retry.maxAttempts,
+		})
+		entries = append(entries, newRetryEntry[T](retryCell, &hooks, clock))
 	}
 
 	if setup.circuitBreaker != nil {
@@ -270,7 +299,9 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	}
 
 	if setup.hedge != nil {
-		entries = append(entries, newHedgeEntry[T](*setup.hedge, &hooks, clock))
+		hedgeCell = new(atomic.Int64)
+		hedgeCell.Store(int64(*setup.hedge))
+		entries = append(entries, newHedgeEntry[T](hedgeCell, &hooks, clock))
 	}
 
 	if setup.fallbackValue != nil {
@@ -297,6 +328,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker: circuitBreaker,
 		rateLimiter:    rateLimiter,
 		bulkhead:       bulkhead,
+		metrics:        metrics,
+		timeout:        timeoutCell,
+		hedge:          hedgeCell,
+		retry:          retryCell,
 		deps:           setup.deps,
 		registry:       reg,
 	}
@@ -312,33 +347,37 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 // Per-pattern middleware entry builders
 // ---------------------------------------------------------------------------.
 
-func newTimeoutEntry[T any](d time.Duration, hooks *Hooks) PatternEntry[T] {
+func newTimeoutEntry[T any](cell *atomic.Int64, hooks *Hooks) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityTimeout,
 		Name:     "timeout",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				return DoTimeout[T](ctx, d, next, hooks)
+				return DoTimeout[T](ctx, time.Duration(cell.Load()), next, hooks)
 			}
 		},
 	}
 }
 
-func newRetryEntry[T any](desc retryDesc, hooks *Hooks, clock Clock) PatternEntry[T] {
-	params := RetryParams{
-		MaxAttempts: desc.maxAttempts,
-		Strategy:    desc.strategy,
-		Hooks:       hooks,
-		Clock:       clock,
-		Opts:        desc.opts,
-	}
-
+func newRetryEntry[T any](
+	cell *atomic.Pointer[retryRuntime],
+	hooks *Hooks,
+	clock Clock,
+) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityRetry,
 		Name:     "retry",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				return DoRetry[T](ctx, next, params)
+				rt := cell.Load()
+
+				return DoRetry[T](ctx, next, RetryParams{
+					MaxAttempts: rt.maxAttempts,
+					Strategy:    rt.strategy,
+					Hooks:       hooks,
+					Clock:       clock,
+					Opts:        rt.opts,
+				})
 			}
 		},
 	}
@@ -407,19 +446,17 @@ func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
 	}
 }
 
-func newHedgeEntry[T any](delay time.Duration, hooks *Hooks, clock Clock) PatternEntry[T] {
-	params := HedgeParams{
-		Delay: delay,
-		Hooks: hooks,
-		Clock: clock,
-	}
-
+func newHedgeEntry[T any](cell *atomic.Int64, hooks *Hooks, clock Clock) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityHedge,
 		Name:     "hedge",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				return DoHedge[T](ctx, next, params)
+				return DoHedge[T](ctx, next, HedgeParams{
+					Delay: time.Duration(cell.Load()),
+					Hooks: hooks,
+					Clock: clock,
+				})
 			}
 		},
 	}

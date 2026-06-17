@@ -97,6 +97,18 @@ func NewCircuitBreaker(
 	}
 }
 
+// Reconfigure updates the breaker's thresholds at runtime using the same
+// options as [NewCircuitBreaker]. The current state and counters are
+// preserved; the new thresholds apply to subsequent decisions.
+func (cb *CircuitBreaker) Reconfigure(opts ...CircuitBreakerOption) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	for _, opt := range opts {
+		opt(&cb.cfg)
+	}
+}
+
 // Allow checks if a call should be allowed. Returns nil if the breaker is
 // closed, or half-open with a probe slot available. Returns ErrCircuitOpen if
 // the breaker is open and the recovery timeout hasn't elapsed, or if half-open

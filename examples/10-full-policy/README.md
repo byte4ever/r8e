@@ -3,7 +3,7 @@
 # Example 10 — Full Policy
 
 Demonstrates composing all resilience patterns into a single policy. r8e
-automatically sorts patterns into the correct execution order regardless of
+automatically sorts patterns into a sensible execution order regardless of
 the order options are specified.
 
 ## What it demonstrates

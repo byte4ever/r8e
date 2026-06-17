@@ -130,6 +130,40 @@ r8e.WithHooks(&r8e.Hooks{
 ```
 
 Synchronous, set once at construction. All fields optional (nil-safe).
+`WithHooks(nil)` is ignored (no panic).
+
+## Metrics
+
+Every policy keeps counters + live gauges automatically (no hooks needed):
+
+```go
+m := policy.Metrics()              // r8e.PolicyMetrics for one policy
+all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
+```
+
+`PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
+`CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
+`HedgesTriggered`, `HedgesWon`, `FallbacksUsed`) and gauges (`CircuitState`,
+`BulkheadInUse`, `BulkheadCap`, `Saturated`, `Healthy`, `Criticality`).
+
+Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
+`r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate
+module — keeps core dependency-free).
+
+## Hot reload
+
+Retune the parameters of patterns a policy ALREADY has, at runtime, without
+rebuilding:
+
+```go
+err := policy.Reconfigure(r8e.PolicyConfig{RateLimit: ptr(50.0)})  // nil fields unchanged
+err := reg.Reconfigure("payment-api", cfg)                          // by name
+err := store.Reload("config.json")                                  // re-read file + retune live policies
+```
+
+Cannot add/remove patterns (chain is fixed) → configuring an absent pattern
+returns `r8e.ErrPatternAbsent`; rebuild via GetPolicy/NewPolicy for structural
+changes. CircuitBreaker/RateLimiter/Bulkhead also expose direct `Reconfigure`.
 
 ## Health and Readiness
 
@@ -260,7 +294,7 @@ policy, err := r8econf.GetPolicy[string](store, "payment-api",
 
 Backoff strategies: `"constant"`, `"exponential"`, `"linear"`, `"exponential_jitter"`.
 
-You can embed `r8e.PolicyConfig` in your own config struct and call `r8e.BuildOptions(&pc)` directly.
+You can embed `r8e.PolicyConfig` in your own config struct and call `r8e.BuildOptions(&pc)` directly. `store.Reload(path)` re-reads the file and hot-reloads already-built policies (see Hot reload).
 
 ## Testing
 
@@ -277,7 +311,10 @@ policy := r8e.NewPolicy[string]("test",
 
 ```
 github.com/byte4ever/r8e            # core (zero external deps)
-github.com/byte4ever/r8e/httpx      # HTTP adapter
+github.com/byte4ever/r8e/r8ehttp    # net/http edge: ReadinessHandler, MetricsHandler
+github.com/byte4ever/r8e/r8econf    # os+JSON edge: Load, GetPolicy, LoadCacheConfig, Store.Reload
+github.com/byte4ever/r8e/httpx      # HTTP client adapter
+github.com/byte4ever/r8e/r8eotel    # OpenTelemetry metrics bridge (separate module)
 github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
