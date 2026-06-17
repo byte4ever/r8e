@@ -29,7 +29,8 @@ go get github.com/byte4ever/r8e
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e gère l'ordonnancement
 - **Production-grade** — rate limiter et bulkhead lock-free, circuit breaker linéarisable, 100% de couverture de tests
 - **Kubernetes-native** — reporting de santé intégré avec dépendances hiérarchiques et handler `/readyz` (`r8ehttp`)
-- **Observable** — 12 hooks de cycle de vie sur Policy, plus des hooks par StaleCache
+- **Observable** — 12 hooks de cycle de vie, métriques par policy intégrées (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Réglable à chaud** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — l'interface `Clock` permet de contrôler le temps dans les tests, fini les `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou utilisez des presets prêts à l'emploi
 - **Cœur sans dépendance** — le package `r8e` n'utilise que la bibliothèque standard Go
@@ -335,6 +336,48 @@ policy := r8e.NewPolicy[string]("observed",
 Hooks disponibles sur `Hooks` (12) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
+
+### Métriques
+
+Au-delà des callbacks, chaque policy tient des compteurs cumulés et des gauges live — pas besoin de câbler des hooks à la main. `Policy.Metrics()` renvoie un instantané, et `Registry.Snapshot()` un par policy enregistrée :
+
+```go
+m := policy.Metrics()
+fmt.Println(m.Retries, m.CircuitOpens, m.FallbacksUsed) // compteurs
+fmt.Println(m.CircuitState, m.BulkheadInUse, m.Saturated) // gauges live
+```
+
+Deux ponts sans configuration les exposent :
+
+```go
+// Endpoint JSON de debug (stdlib uniquement).
+http.Handle("/metrics", r8ehttp.MetricsHandler(r8e.DefaultRegistry()))
+
+// OpenTelemetry — compteurs + gauges observables par policy, étiquetés par nom.
+// Dans le module séparé r8eotel pour garder le cœur sans dépendance.
+_, err := r8eotel.Register(meter, r8e.DefaultRegistry())
+```
+
+## Hot reload
+
+Réglez les paramètres des patterns qu'une policy possède déjà — à l'exécution, sans redéploiement. `Policy.Reconfigure` applique chaque champ non-nil d'un `PolicyConfig` au pattern live ; les champs nil sont laissés inchangés :
+
+```go
+err := policy.Reconfigure(r8e.PolicyConfig{
+    CircuitBreaker: &r8e.CircuitBreakerConfig{FailureThreshold: ptr(3)},
+    RateLimit:      ptr(50.0),
+})
+```
+
+Pilotez-le depuis un fichier via `r8econf`, qui relit, revalide et reconfigure chaque policy déjà construite :
+
+```go
+store, _ := r8econf.Load("config.json")
+// ... GetPolicy(...) construit des policies qui s'auto-enregistrent ...
+err := store.Reload("config.json") // ex. sur SIGHUP ou changement de ConfigMap
+```
+
+Le hot-reload **règle** les patterns existants ; il ne peut **ni ajouter ni retirer** un pattern (la chaîne de middlewares est figée). Configurer un pattern absent renvoie `ErrPatternAbsent` — reconstruisez via `GetPolicy`/`NewPolicy` pour un changement structurel. `Registry.Reconfigure(name, cfg)` cible une seule policy enregistrée.
 
 ## Santé et readiness
 
