@@ -1,12 +1,13 @@
 # r8e
 
-**Arrêtez d'écrire des boucles de retry. Livrez des services résilients.**
-
-r8e (_resilience_) vous offre timeout, retry, circuit breaker, rate limiter, bulkhead, requêtes spéculatives et fallback — le tout composable en une seule policy avec une ligne de code. Un cache périmé autonome avec des backends de cache interchangeables complète la chaîne. Cœur sans dépendance. 100% de couverture de tests.
+Une petite bibliothèque Go pour composer des patterns de résilience — timeout,
+retry, circuit breaker, rate limiter, bulkhead, requêtes spéculatives et
+fallback — en une seule policy. (Le nom abrège r(esilienc)e, dans l'esprit de
+k8s.) Un cache périmé autonome avec des backends interchangeables complète la
+chaîne. Le package principal n'a aucune dépendance externe.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/byte4ever/r8e.svg)](https://pkg.go.dev/github.com/byte4ever/r8e)
 [![Go Report Card](https://goreportcard.com/badge/github.com/byte4ever/r8e)](https://goreportcard.com/report/github.com/byte4ever/r8e)
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 
 ```go
 policy := r8e.NewPolicy[string]("payments",
@@ -18,21 +19,33 @@ policy := r8e.NewPolicy[string]("payments",
 result, err := policy.Do(ctx, callPaymentGateway)
 ```
 
-C'est tout. Les patterns sont automatiquement triés dans le bon ordre d'exécution. Le circuit breaker remonte l'état de santé vers votre endpoint Kubernetes `/readyz`. Les hooks alimentent votre pipeline de métriques. Et quand votre alerte sonne à 3h du matin, `r8e.ErrCircuitOpen` vous dit exactement ce qui s'est passé.
+Les patterns sont automatiquement triés dans un ordre d'exécution raisonnable.
+Un circuit breaker peut remonter l'état de santé vers un endpoint Kubernetes
+`/readyz`, les hooks et les métriques alimentent un pipeline d'observabilité, et
+des erreurs sentinelles comme `r8e.ErrCircuitOpen` rendent le mode de défaillance
+explicite.
 
 ```bash
 go get github.com/byte4ever/r8e
 ```
 
-## Pourquoi r8e ?
+## État du projet
 
-- **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e gère l'ordonnancement
-- **Production-grade** — rate limiter et bulkhead lock-free, circuit breaker linéarisable, 100% de couverture de tests
-- **Kubernetes-native** — reporting de santé intégré avec dépendances hiérarchiques et handler `/readyz` (`r8ehttp`)
-- **Observable** — 12 hooks de cycle de vie, métriques par policy intégrées (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
-- **Réglable à chaud** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
-- **Testable** — l'interface `Clock` permet de contrôler le temps dans les tests, fini les `time.Sleep` instables
-- **Configurable** — définissez les policies en code, JSON (`r8econf`), ou utilisez des presets prêts à l'emploi
+r8e est jeune (pré-1.0) : l'API peut encore changer et l'exposition en
+production est limitée. Si vous avez besoin d'une bibliothèque mature et
+largement adoptée, regardez [failsafe-go](https://github.com/failsafe-go/failsafe-go).
+L'angle de r8e est une approche intégrée et opinionée — des policies nommées avec
+métriques intégrées, reporting de santé optionnel et hot-reload de configuration.
+
+## Points clés
+
+- **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
+- **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
+- **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
+- **Observabilité** — 12 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
+- **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
+- **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
 - **Cœur sans dépendance** — le package `r8e` n'utilise que la bibliothèque standard Go
 
 ## Fonctionnalités
@@ -557,7 +570,7 @@ policy := r8e.NewPolicy[string]("test",
 
 ## Skill Claude Code
 
-r8e inclut un fichier skill [Claude Code](https://docs.anthropic.com/en/docs/claude-code) qui enseigne a l'assistant IA l'API complete de r8e, ses patterns et ses idiomes. Pour l'activer, creez un lien symbolique ou copiez le skill dans le repertoire `.claude/skills/` de votre projet :
+r8e inclut un fichier skill [Claude Code](https://docs.anthropic.com/en/docs/claude-code) documentant l'API de r8e, ses patterns et ses idiomes pour l'assistant. Pour l'activer, creez un lien symbolique ou copiez le skill dans le repertoire `.claude/skills/` de votre projet :
 
 ```bash
 mkdir -p .claude/skills

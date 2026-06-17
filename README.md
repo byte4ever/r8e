@@ -2,13 +2,14 @@
 
 # r8e
 
-**Stop writing retry loops. Start shipping resilient services.**
-
-r8e — short for r(esilienc)e, just like k8s stands for k(ubernete)s — gives you timeout, retry, circuit breaker, rate limiter, bulkhead, hedged requests, and fallback — all composable into a single policy with one line of code. A standalone keyed stale cache with pluggable cache backends complements the policy chain. Zero-dependency core. 100% test coverage.
+A small Go library for composing resilience patterns — timeout, retry, circuit
+breaker, rate limiter, bulkhead, hedged requests, and fallback — into a single
+policy. (The name is short for r(esilienc)e, in the spirit of k8s.) A standalone
+keyed stale cache with pluggable backends complements the policy chain. The core
+package has no external dependencies.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/byte4ever/r8e.svg)](https://pkg.go.dev/github.com/byte4ever/r8e)
 [![Go Report Card](https://goreportcard.com/badge/github.com/byte4ever/r8e)](https://goreportcard.com/report/github.com/byte4ever/r8e)
-![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 
 ```go
 policy := r8e.NewPolicy[string]("payments",
@@ -20,21 +21,32 @@ policy := r8e.NewPolicy[string]("payments",
 result, err := policy.Do(ctx, callPaymentGateway)
 ```
 
-That's it. Patterns are auto-sorted into the correct execution order. The circuit breaker reports health to your Kubernetes `/readyz` endpoint. Hooks feed your metrics pipeline. And when your 3 AM page fires, `r8e.ErrCircuitOpen` tells you exactly what happened.
+Patterns are auto-sorted into a sensible execution order. A circuit breaker can
+report health to a Kubernetes `/readyz` endpoint, hooks and metrics feed an
+observability pipeline, and sentinel errors such as `r8e.ErrCircuitOpen` make
+the failure mode explicit.
 
 ```bash
 go get github.com/byte4ever/r8e
 ```
 
-## Why r8e?
+## Status
 
-- **One policy, all patterns** — compose any combination; r8e handles the ordering
-- **Production-grade** — lock-free rate limiter and bulkhead, a linearizable circuit breaker, 100% test coverage
-- **Kubernetes-native** — built-in health reporting with hierarchical dependencies and a `/readyz` handler (`r8ehttp`)
-- **Observable** — 12 lifecycle hooks, built-in per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
-- **Tunable at runtime** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
-- **Testable** — `Clock` interface lets you control time in tests, no `time.Sleep` flakiness
-- **Configurable** — define policies in code, JSON (`r8econf`), or use ready-made presets
+r8e is young (pre-1.0): the API may still change and it has had limited
+production exposure. If you need a mature, widely-adopted library, take a look
+at [failsafe-go](https://github.com/failsafe-go/failsafe-go). r8e's angle is an
+integrated, opinionated take — named policies with built-in metrics, optional
+health reporting, and configuration hot-reload.
+
+## Highlights
+
+- **One policy, all patterns** — compose any combination; r8e orders them for you
+- **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
+- **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
+- **Observability** — 12 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
+- **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
+- **Configurable** — define policies in code, JSON (`r8econf`), or with presets
 - **Zero-dependency core** — the `r8e` package uses only the Go standard library
 
 ## Features
@@ -559,7 +571,7 @@ policy := r8e.NewPolicy[string]("test",
 
 ## Claude Code Skill
 
-r8e ships with a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill file that teaches the AI assistant the full r8e API, patterns, and idioms. To enable it, symlink or copy the skill into your project's `.claude/skills/` directory:
+r8e includes a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill file documenting the r8e API, patterns, and idioms for the assistant. To enable it, symlink or copy the skill into your project's `.claude/skills/` directory:
 
 ```bash
 mkdir -p .claude/skills
