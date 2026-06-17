@@ -31,7 +31,7 @@ type (
 //
 //nolint:ireturn,varnamelen // generic type params K,V are idiomatic in Go
 func MustNew[K Key, V any](cfg r8e.CacheConfig) r8e.Cache[K, V] {
-	// nolint:mnd // Ristretto recommends 10x max size for num counters and 64
+	//nolint:mnd // Ristretto recommends 10x max size for num counters and 64
 	// buffer items.
 	cache, err := ristretto.NewCache(&ristretto.Config[K, V]{
 		NumCounters: int64(cfg.MaxSize) * 10,

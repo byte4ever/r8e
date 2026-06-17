@@ -10,6 +10,7 @@ require (
 require (
 	github.com/dolthub/maphash v0.1.0 // indirect
 	github.com/gammazero/deque v0.2.1 // indirect
+	github.com/goccy/go-json v0.10.5 // indirect
 )
 
 replace github.com/byte4ever/r8e => ../

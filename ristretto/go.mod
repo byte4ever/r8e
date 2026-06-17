@@ -10,6 +10,7 @@ require (
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/sys v0.29.0 // indirect
 )
