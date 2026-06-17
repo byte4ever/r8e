@@ -101,14 +101,25 @@ func NewCircuitBreaker(
 // closed, or half-open with a probe slot available. Returns ErrCircuitOpen if
 // the breaker is open and the recovery timeout hasn't elapsed, or if half-open
 // already has halfOpenMaxAttempts probes in flight.
+// The state-transition methods capture the lifecycle hook to fire in a local
+// and invoke it AFTER releasing cb.mu, so a user-supplied callback can never
+// run inside the critical section (which would deadlock on re-entry or stall
+// every caller behind a slow hook).
+
 func (cb *CircuitBreaker) Allow() error {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
+
+	var (
+		emit func()
+		err  error
+	)
 
 	switch cb.state {
 	case stateOpen:
 		if cb.clock.Since(cb.lastFailure) <= cb.cfg.recoveryTimeout {
-			return ErrCircuitOpen
+			err = ErrCircuitOpen
+
+			break
 		}
 
 		// Recovery timeout elapsed: transition to half-open and admit this
@@ -116,31 +127,37 @@ func (cb *CircuitBreaker) Allow() error {
 		cb.state = stateHalfOpen
 		cb.halfOpenSuccesses = 0
 		cb.halfOpenInFlight = 1
-		cb.hooks.emitCircuitHalfOpen()
-
-		return nil
+		emit = cb.hooks.emitCircuitHalfOpen
 
 	case stateHalfOpen:
 		// Admit at most halfOpenMaxAttempts concurrent probes; reject the rest
 		// so a recovering downstream is not hit by a thundering herd.
 		if cb.halfOpenInFlight >= cb.cfg.halfOpenMaxAttempts {
-			return ErrCircuitOpen
+			err = ErrCircuitOpen
+
+			break
 		}
 
 		cb.halfOpenInFlight++
 
-		return nil
-
 	default:
 		// stateClosed: allow the call.
-		return nil
 	}
+
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
+	}
+
+	return err
 }
 
 // RecordSuccess records a successful call.
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
+
+	var emit func()
 
 	switch cb.state {
 	case stateClosed:
@@ -151,24 +168,31 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 		cb.halfOpenSuccesses++
 		if cb.halfOpenSuccesses < cb.cfg.halfOpenMaxAttempts {
-			return
+			break
 		}
 
 		cb.state = stateClosed
 		cb.failureCount = 0
 		cb.halfOpenSuccesses = 0
 		cb.halfOpenInFlight = 0
-		cb.hooks.emitCircuitClose()
+		emit = cb.hooks.emitCircuitClose
 
 	default:
 		// stateOpen — no action on success.
+	}
+
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
 	}
 }
 
 // RecordFailure records a failed call.
 func (cb *CircuitBreaker) RecordFailure() {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
+
+	var emit func()
 
 	cb.lastFailure = cb.clock.Now()
 
@@ -176,11 +200,11 @@ func (cb *CircuitBreaker) RecordFailure() {
 	case stateClosed:
 		cb.failureCount++
 		if cb.failureCount < cb.cfg.failureThreshold {
-			return
+			break
 		}
 
 		cb.state = stateOpen
-		cb.hooks.emitCircuitOpen()
+		emit = cb.hooks.emitCircuitOpen
 
 	case stateHalfOpen:
 		// Any failure in half-open reopens the breaker.
@@ -188,10 +212,16 @@ func (cb *CircuitBreaker) RecordFailure() {
 		cb.state = stateOpen
 		cb.halfOpenSuccesses = 0
 		cb.halfOpenInFlight = 0
-		cb.hooks.emitCircuitOpen()
+		emit = cb.hooks.emitCircuitOpen
 
 	default:
 		// stateOpen — already open, no state change needed.
+	}
+
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
 	}
 }
 

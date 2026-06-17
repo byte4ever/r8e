@@ -138,6 +138,39 @@ func TestCircuitBreakerHalfOpenBoundsConcurrentProbes(t *testing.T) {
 	require.NoError(t, cb.Allow())
 }
 
+// TestCircuitBreakerHookMayReenter verifies lifecycle hooks fire OUTSIDE the
+// breaker's lock: a hook that re-enters the breaker (here, calls State) must
+// not deadlock. With hooks emitted under cb.mu this would hang.
+func TestCircuitBreakerHookMayReenter(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+
+	var (
+		cb          *CircuitBreaker
+		stateInHook string
+	)
+
+	hooks := &Hooks{
+		OnCircuitOpen: func() { stateInHook = cb.State() },
+	}
+	cb = NewCircuitBreaker(clk, hooks, FailureThreshold(1))
+
+	done := make(chan struct{})
+	go func() {
+		cb.RecordFailure() // opens the breaker, firing OnCircuitOpen
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RecordFailure deadlocked — hook ran while holding cb.mu")
+	}
+
+	require.Equal(t, "open", stateInHook)
+}
+
 func TestCircuitBreakerHalfOpenAdmitsUpToMax(t *testing.T) {
 	t.Parallel()
 

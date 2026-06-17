@@ -11,12 +11,20 @@ import (
 	"github.com/byte4ever/r8e"
 )
 
-// Clock is a controllable [r8e.Clock]. The zero value is not usable; call [New].
-type Clock struct {
-	now    time.Time
-	offset time.Duration
-	mu     sync.Mutex
-}
+type (
+	// Clock is a controllable [r8e.Clock]. The zero value is not usable; call
+	// [New].
+	Clock struct {
+		now    time.Time
+		offset time.Duration
+		mu     sync.Mutex
+	}
+
+	// timer is an already-fired [r8e.Timer].
+	timer struct {
+		ch chan time.Time
+	}
+)
 
 // New returns a Clock anchored at a fixed instant.
 func New() *Clock {
@@ -56,11 +64,6 @@ func (c *Clock) Advance(d time.Duration) {
 	defer c.mu.Unlock()
 
 	c.offset += d
-}
-
-//nolint:decorder // timer is a small helper type kept next to its use
-type timer struct {
-	ch chan time.Time
 }
 
 func (t *timer) C() <-chan time.Time      { return t.ch }

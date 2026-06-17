@@ -20,12 +20,20 @@ type (
 
 	// Store holds policy configurations loaded from a file along with the
 	// [r8e.Registry] that policies built from it register with for readiness
-	// reporting.
+	// reporting. Both fields are unexported so the only way to obtain a usable
+	// Store is [Load]; use [Store.Registry] to reach the registry.
 	Store struct {
 		configs  map[string]r8e.PolicyConfig
-		Registry *r8e.Registry
+		registry *r8e.Registry
 	}
 )
+
+// Registry returns the [r8e.Registry] that policies built from this store
+// register with. Pass it to the readiness handler, e.g.
+// r8ehttp.ReadinessHandler(store.Registry()).
+func (s *Store) Registry() *r8e.Registry {
+	return s.registry
+}
 
 // Load reads a JSON configuration file and returns a [Store] of policy
 // configurations. Actual [r8e.Policy] instances are not created until
@@ -55,7 +63,7 @@ func Load(path string) (*Store, error) {
 		}
 	}
 
-	return &Store{configs: cfg.Policies, Registry: r8e.NewRegistry()}, nil
+	return &Store{configs: cfg.Policies, registry: r8e.NewRegistry()}, nil
 }
 
 // GetPolicy retrieves a named policy configuration from a [Store] and returns a
@@ -72,7 +80,7 @@ func GetPolicy[T any](
 	name string,
 	opts ...r8e.Option,
 ) (*r8e.Policy[T], error) {
-	allOpts := []r8e.Option{r8e.WithRegistry(store.Registry)}
+	allOpts := []r8e.Option{r8e.WithRegistry(store.registry)}
 
 	if pc, ok := store.configs[name]; ok {
 		configOpts, err := r8e.BuildOptions(&pc)

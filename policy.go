@@ -10,46 +10,25 @@ import (
 // Policy[T] — the central integration type
 // ---------------------------------------------------------------------------.
 
-// Policy composes multiple resilience patterns (timeout, retry, circuit
-// breaker, rate limiter, bulkhead, hedge, fallback) behind a
-// single [Do] method. Use [NewPolicy] with functional options to configure it.
-//
-// Pattern: Functional Options — configures Policy[T] via composable [Option]
-// values. Every With* constructor returns an Option, so passing a non-option
-// to [NewPolicy] is a compile error and a misconfigured policy cannot be built
-// silently.
-type Policy[T any] struct {
-	chain          Middleware[T]
-	circuitBreaker *CircuitBreaker
-	rateLimiter    *RateLimiter
-	bulkhead       *Bulkhead
-	registry       *Registry
-	name           string
-	deps           []HealthReporter
-}
-
-// Name returns the policy's name.
-func (p *Policy[T]) Name() string { return p.name }
-
-// Do executes fn through the composed middleware chain.
-//
-//nolint:ireturn // generic type parameter T, not an interface
-func (p *Policy[T]) Do(
-	ctx context.Context,
-	fn func(context.Context) (T, error),
-) (T, error) {
-	wrapped := p.chain(fn)
-
-	//nolint:wrapcheck // middleware chain error returned as-is
-	return wrapped(ctx)
-}
-
-// ---------------------------------------------------------------------------
-// Option — the typed configuration carrier
-// ---------------------------------------------------------------------------.
-
-//nolint:decorder // descriptor types grouped here, separate from Policy[T]
 type (
+	// Policy composes multiple resilience patterns (timeout, retry, circuit
+	// breaker, rate limiter, bulkhead, hedge, fallback) behind a single [Do]
+	// method. Use [NewPolicy] with functional options to configure it.
+	//
+	// Pattern: Functional Options — configures Policy[T] via composable
+	// [Option] values. Every With* constructor returns an Option, so passing a
+	// non-option to [NewPolicy] is a compile error and a misconfigured policy
+	// cannot be built silently.
+	Policy[T any] struct {
+		chain          Middleware[T]
+		circuitBreaker *CircuitBreaker
+		rateLimiter    *RateLimiter
+		bulkhead       *Bulkhead
+		registry       *Registry
+		name           string
+		deps           []HealthReporter
+	}
+
 	// Option configures a [Policy] during [NewPolicy]. Construct options with
 	// the With* functions and [DependsOn]; the interface is closed to the
 	// package so the set of valid options is fixed and type-checked.
@@ -73,7 +52,8 @@ type (
 		rateLimit      *rateLimitDesc
 		bulkhead       *int
 		hedge          *time.Duration
-		fallback       *fallbackDesc
+		fallbackValue  *staticFallback
+		fallbackFunc   *funcFallback
 		deps           []HealthReporter
 	}
 
@@ -95,17 +75,37 @@ type (
 		rate float64
 	}
 
-	// fallbackDesc holds a type-erased fallback. Exactly one of value/fn is
-	// set; NewPolicy[T] asserts it back to T and panics on a mismatch, since a
+	// staticFallback carries a WithFallback value (typed T, erased to any).
+	// NewPolicy[T] asserts it back to T and panics on a mismatch, since a
 	// fallback typed for a different T than the policy is a programmer error.
-	fallbackDesc struct {
-		value  any // WithFallback: holds T
-		fn     any // WithFallbackFunc: holds func(error) (T, error)
-		isFunc bool
+	staticFallback struct {
+		value any
+	}
+
+	// funcFallback carries a WithFallbackFunc value (func(error) (T, error),
+	// erased to any), asserted back to T in NewPolicy[T].
+	funcFallback struct {
+		fn any
 	}
 )
 
 func (f optionFunc) apply(s *policySetup) { f(s) }
+
+// Name returns the policy's name.
+func (p *Policy[T]) Name() string { return p.name }
+
+// Do executes fn through the composed middleware chain.
+//
+//nolint:ireturn // generic type parameter T, not an interface
+func (p *Policy[T]) Do(
+	ctx context.Context,
+	fn func(context.Context) (T, error),
+) (T, error) {
+	wrapped := p.chain(fn)
+
+	//nolint:wrapcheck // middleware chain error returned as-is
+	return wrapped(ctx)
+}
 
 // ---------------------------------------------------------------------------
 // With* functions — all return Option
@@ -196,7 +196,7 @@ func WithHedge(delay time.Duration) Option {
 // in [NewPolicy].
 func WithFallback[T any](val T) Option {
 	return optionFunc(func(s *policySetup) {
-		s.fallback = &fallbackDesc{value: val}
+		s.fallbackValue = &staticFallback{value: val}
 	})
 }
 
@@ -205,7 +205,7 @@ func WithFallback[T any](val T) Option {
 // Policy's type parameter; a mismatch panics in [NewPolicy].
 func WithFallbackFunc[T any](fn func(error) (T, error)) Option {
 	return optionFunc(func(s *policySetup) {
-		s.fallback = &fallbackDesc{fn: fn, isFunc: true}
+		s.fallbackFunc = &funcFallback{fn: fn}
 	})
 }
 
@@ -273,8 +273,12 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		entries = append(entries, newHedgeEntry[T](*setup.hedge, &hooks, clock))
 	}
 
-	if setup.fallback != nil {
-		entries = append(entries, newFallbackEntry[T](*setup.fallback, &hooks))
+	if setup.fallbackValue != nil {
+		entries = append(entries, newStaticFallbackEntry[T](*setup.fallbackValue, &hooks))
+	}
+
+	if setup.fallbackFunc != nil {
+		entries = append(entries, newFuncFallbackEntry[T](*setup.fallbackFunc, &hooks))
 	}
 
 	chain := Chain[T](SortPatterns[T](entries)...)
@@ -421,29 +425,7 @@ func newHedgeEntry[T any](delay time.Duration, hooks *Hooks, clock Clock) Patter
 	}
 }
 
-func newFallbackEntry[T any](desc fallbackDesc, hooks *Hooks) PatternEntry[T] {
-	if desc.isFunc {
-		fn, ok := desc.fn.(func(error) (T, error))
-		if !ok {
-			var zero T
-
-			panic(fmt.Sprintf(
-				"r8e: WithFallbackFunc has type %T, which does not match policy result type %T",
-				desc.fn, zero,
-			))
-		}
-
-		return PatternEntry[T]{
-			Priority: priorityFallback,
-			Name:     "fallback_func",
-			MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-				return func(ctx context.Context) (T, error) {
-					return DoFallbackFunc[T](ctx, next, fn, hooks)
-				}
-			},
-		}
-	}
-
+func newStaticFallbackEntry[T any](desc staticFallback, hooks *Hooks) PatternEntry[T] {
 	val, ok := desc.value.(T)
 	if !ok {
 		var zero T
@@ -460,6 +442,28 @@ func newFallbackEntry[T any](desc fallbackDesc, hooks *Hooks) PatternEntry[T] {
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
 				return DoFallback[T](ctx, next, val, hooks)
+			}
+		},
+	}
+}
+
+func newFuncFallbackEntry[T any](desc funcFallback, hooks *Hooks) PatternEntry[T] {
+	fn, ok := desc.fn.(func(error) (T, error))
+	if !ok {
+		var zero T
+
+		panic(fmt.Sprintf(
+			"r8e: WithFallbackFunc has type %T, which does not match policy result type %T",
+			desc.fn, zero,
+		))
+	}
+
+	return PatternEntry[T]{
+		Priority: priorityFallback,
+		Name:     "fallback_func",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				return DoFallbackFunc[T](ctx, next, fn, hooks)
 			}
 		},
 	}

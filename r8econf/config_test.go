@@ -157,7 +157,7 @@ func TestGetPolicyRegistersInRegistry(t *testing.T) {
 	_, err = GetPolicy[string](store, "payment-api")
 	require.NoError(t, err)
 
-	status := store.Registry.CheckReadiness()
+	status := store.Registry().CheckReadiness()
 
 	var found bool
 	for _, ps := range status.Policies {
@@ -210,7 +210,7 @@ func TestGetPolicyInvalidStoredConfig(t *testing.T) {
 				Retry: &r8e.RetryConfig{Backoff: &badBackoff},
 			},
 		},
-		Registry: r8e.NewRegistry(),
+		registry: r8e.NewRegistry(),
 	}
 
 	_, err := GetPolicy[string](store, "broken")
