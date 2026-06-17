@@ -4,137 +4,121 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
-// Patterns in random order get sorted correctly
+// SortPatterns produces the correct execution order
 // ---------------------------------------------------------------------------
 
-func TestSortPatternsRandomOrderSortsCorrectly(t *testing.T) {
-	var trace []string
+func TestSortPatternsExecutionOrder(t *testing.T) {
+	t.Parallel()
 
-	makeMW := func(name string) Middleware[string] {
+	makeMW := func(trace *[]string, name string) Middleware[string] {
 		return func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
 			return func(ctx context.Context) (string, error) {
-				trace = append(trace, name)
+				*trace = append(*trace, name)
 				return next(ctx)
 			}
 		}
 	}
 
-	// Deliberately out of order: retry, fallback, timeout, circuit_breaker
-	entries := []PatternEntry[string]{
-		{Priority: priorityRetry, Name: "retry", MW: makeMW("retry")},
-		{Priority: priorityFallback, Name: "fallback", MW: makeMW("fallback")},
-		{Priority: priorityTimeout, Name: "timeout", MW: makeMW("timeout")},
+	tests := []struct {
+		name    string
+		entries func(mk func(*[]string, string) Middleware[string], trace *[]string) []PatternEntry[string]
+		want    []string
+	}{
 		{
-			Priority: priorityCircuitBreaker,
-			Name:     "circuit_breaker",
-			MW:       makeMW("circuit_breaker"),
+			name: "random order sorts correctly",
+			entries: func(mk func(*[]string, string) Middleware[string], trace *[]string) []PatternEntry[string] {
+				return []PatternEntry[string]{
+					{Priority: priorityRetry, Name: "retry", MW: mk(trace, "retry")},
+					{Priority: priorityFallback, Name: "fallback", MW: mk(trace, "fallback")},
+					{Priority: priorityTimeout, Name: "timeout", MW: mk(trace, "timeout")},
+					{Priority: priorityCircuitBreaker, Name: "circuit_breaker", MW: mk(trace, "circuit_breaker")},
+				}
+			},
+			want: []string{
+				"fallback",
+				"timeout",
+				"circuit_breaker",
+				"retry",
+				"handler",
+			},
+		},
+		{
+			name: "already sorted stays in order",
+			entries: func(mk func(*[]string, string) Middleware[string], trace *[]string) []PatternEntry[string] {
+				return []PatternEntry[string]{
+					{Priority: priorityFallback, Name: "fallback", MW: mk(trace, "fallback")},
+					{Priority: priorityTimeout, Name: "timeout", MW: mk(trace, "timeout")},
+					{Priority: priorityCircuitBreaker, Name: "circuit_breaker", MW: mk(trace, "circuit_breaker")},
+					{Priority: priorityRetry, Name: "retry", MW: mk(trace, "retry")},
+				}
+			},
+			want: []string{
+				"fallback",
+				"timeout",
+				"circuit_breaker",
+				"retry",
+				"handler",
+			},
+		},
+		{
+			name: "stable sort preserves insertion order",
+			entries: func(mk func(*[]string, string) Middleware[string], trace *[]string) []PatternEntry[string] {
+				return []PatternEntry[string]{
+					{Priority: priorityRetry, Name: "retry-A", MW: mk(trace, "retry-A")},
+					{Priority: priorityFallback, Name: "fallback", MW: mk(trace, "fallback")},
+					{Priority: priorityRetry, Name: "retry-B", MW: mk(trace, "retry-B")},
+				}
+			},
+			want: []string{"fallback", "retry-A", "retry-B", "handler"},
+		},
+		{
+			name: "all seven from reverse order",
+			entries: func(mk func(*[]string, string) Middleware[string], trace *[]string) []PatternEntry[string] {
+				return []PatternEntry[string]{
+					{Priority: priorityHedge, Name: "hedge", MW: mk(trace, "hedge")},
+					{Priority: priorityRetry, Name: "retry", MW: mk(trace, "retry")},
+					{Priority: priorityBulkhead, Name: "bulkhead", MW: mk(trace, "bulkhead")},
+					{Priority: priorityRateLimiter, Name: "rate_limiter", MW: mk(trace, "rate_limiter")},
+					{Priority: priorityCircuitBreaker, Name: "circuit_breaker", MW: mk(trace, "circuit_breaker")},
+					{Priority: priorityTimeout, Name: "timeout", MW: mk(trace, "timeout")},
+					{Priority: priorityFallback, Name: "fallback", MW: mk(trace, "fallback")},
+				}
+			},
+			want: []string{
+				"fallback", "timeout", "circuit_breaker",
+				"rate_limiter", "bulkhead", "retry", "hedge", "handler",
+			},
 		},
 	}
 
-	sorted := SortPatterns(entries)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if len(sorted) != 4 {
-		t.Fatalf("SortPatterns() returned %d middlewares, want 4", len(sorted))
-	}
+			var trace []string
 
-	// Execute the chain to verify ordering
-	chained := Chain(sorted...)
-	fn := chained(func(_ context.Context) (string, error) {
-		trace = append(trace, "handler")
-		return "ok", nil
-	})
+			entries := tt.entries(makeMW, &trace)
 
-	_, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			sorted := SortPatterns(entries)
+			require.Len(t, sorted, len(entries))
 
-	// Expect outermost (lowest priority) first
-	want := []string{
-		"fallback",
-		"timeout",
-		"circuit_breaker",
-		"retry",
-		"handler",
-	}
-	if len(trace) != len(want) {
-		t.Fatalf("trace = %v, want %v", trace, want)
-	}
-	for i := range want {
-		if trace[i] != want[i] {
-			t.Fatalf(
-				"trace[%d] = %q, want %q; full trace = %v",
-				i,
-				trace[i],
-				want[i],
-				trace,
-			)
-		}
-	}
-}
+			chained := Chain(sorted...)
+			fn := chained(func(_ context.Context) (string, error) {
+				trace = append(trace, "handler")
+				return "ok", nil
+			})
 
-// ---------------------------------------------------------------------------
-// Patterns already in correct order stay that way
-// ---------------------------------------------------------------------------
+			_, err := fn(context.Background())
+			require.NoError(t, err)
 
-func TestSortPatternsAlreadySortedStaysInOrder(t *testing.T) {
-	var trace []string
-
-	makeMW := func(name string) Middleware[string] {
-		return func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
-			return func(ctx context.Context) (string, error) {
-				trace = append(trace, name)
-				return next(ctx)
-			}
-		}
-	}
-
-	entries := []PatternEntry[string]{
-		{Priority: priorityFallback, Name: "fallback", MW: makeMW("fallback")},
-		{Priority: priorityTimeout, Name: "timeout", MW: makeMW("timeout")},
-		{
-			Priority: priorityCircuitBreaker,
-			Name:     "circuit_breaker",
-			MW:       makeMW("circuit_breaker"),
-		},
-		{Priority: priorityRetry, Name: "retry", MW: makeMW("retry")},
-	}
-
-	sorted := SortPatterns(entries)
-	chained := Chain(sorted...)
-	fn := chained(func(_ context.Context) (string, error) {
-		trace = append(trace, "handler")
-		return "ok", nil
-	})
-
-	_, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{
-		"fallback",
-		"timeout",
-		"circuit_breaker",
-		"retry",
-		"handler",
-	}
-	if len(trace) != len(want) {
-		t.Fatalf("trace = %v, want %v", trace, want)
-	}
-	for i := range want {
-		if trace[i] != want[i] {
-			t.Fatalf(
-				"trace[%d] = %q, want %q; full trace = %v",
-				i,
-				trace[i],
-				want[i],
-				trace,
-			)
-		}
+			require.Equal(t, tt.want, trace)
+		})
 	}
 }
 
@@ -143,6 +127,8 @@ func TestSortPatternsAlreadySortedStaysInOrder(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSortPatternsSinglePatternReturnsSelf(t *testing.T) {
+	t.Parallel()
+
 	var called bool
 
 	mw := Middleware[int](
@@ -159,24 +145,16 @@ func TestSortPatternsSinglePatternReturnsSelf(t *testing.T) {
 	}
 
 	sorted := SortPatterns(entries)
-	if len(sorted) != 1 {
-		t.Fatalf("SortPatterns() returned %d middlewares, want 1", len(sorted))
-	}
+	require.Len(t, sorted, 1)
 
 	fn := sorted[0](func(_ context.Context) (int, error) {
 		return 42, nil
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != 42 {
-		t.Fatalf("result = %d, want 42", result)
-	}
-	if !called {
-		t.Fatal("middleware was not called")
-	}
+	require.NoError(t, err)
+	require.Equal(t, 42, result)
+	require.True(t, called, "middleware was not called")
 }
 
 // ---------------------------------------------------------------------------
@@ -184,75 +162,13 @@ func TestSortPatternsSinglePatternReturnsSelf(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSortPatternsEmptySliceReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
 	sorted := SortPatterns[string](nil)
-	if len(sorted) != 0 {
-		t.Fatalf(
-			"SortPatterns(nil) returned %d middlewares, want 0",
-			len(sorted),
-		)
-	}
+	require.Empty(t, sorted)
 
 	sorted = SortPatterns([]PatternEntry[string]{})
-	if len(sorted) != 0 {
-		t.Fatalf(
-			"SortPatterns([]) returned %d middlewares, want 0",
-			len(sorted),
-		)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Same priority preserves insertion order (stable sort)
-// ---------------------------------------------------------------------------
-
-func TestSortPatternsStableSortPreservesInsertionOrder(t *testing.T) {
-	var trace []string
-
-	makeMW := func(name string) Middleware[string] {
-		return func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
-			return func(ctx context.Context) (string, error) {
-				trace = append(trace, name)
-				return next(ctx)
-			}
-		}
-	}
-
-	// Two entries at the same priority — insertion order must be preserved
-	entries := []PatternEntry[string]{
-		{Priority: priorityRetry, Name: "retry-A", MW: makeMW("retry-A")},
-		{Priority: priorityFallback, Name: "fallback", MW: makeMW("fallback")},
-		{Priority: priorityRetry, Name: "retry-B", MW: makeMW("retry-B")},
-	}
-
-	sorted := SortPatterns(entries)
-	chained := Chain(sorted...)
-	fn := chained(func(_ context.Context) (string, error) {
-		trace = append(trace, "handler")
-		return "ok", nil
-	})
-
-	_, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// fallback (0) first, then retry-A (6), then retry-B (6) — stable order
-	// preserved
-	want := []string{"fallback", "retry-A", "retry-B", "handler"}
-	if len(trace) != len(want) {
-		t.Fatalf("trace = %v, want %v", trace, want)
-	}
-	for i := range want {
-		if trace[i] != want[i] {
-			t.Fatalf(
-				"trace[%d] = %q, want %q; full trace = %v",
-				i,
-				trace[i],
-				want[i],
-				trace,
-			)
-		}
-	}
+	require.Empty(t, sorted)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +176,8 @@ func TestSortPatternsStableSortPreservesInsertionOrder(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPriorityConstantsAreDistinct(t *testing.T) {
+	t.Parallel()
+
 	priorities := map[string]int{
 		"fallback":        priorityFallback,
 		"timeout":         priorityTimeout,
@@ -272,9 +190,8 @@ func TestPriorityConstantsAreDistinct(t *testing.T) {
 
 	seen := make(map[int]string)
 	for name, p := range priorities {
-		if other, ok := seen[p]; ok {
-			t.Fatalf("priority %d shared by %q and %q", p, other, name)
-		}
+		other, ok := seen[p]
+		require.Falsef(t, ok, "priority %d shared by %q and %q", p, other, name)
 		seen[p] = name
 	}
 }
@@ -284,6 +201,8 @@ func TestPriorityConstantsAreDistinct(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPriorityConstantsOrdering(t *testing.T) {
+	t.Parallel()
+
 	ordered := []struct {
 		name     string
 		priority int
@@ -298,78 +217,10 @@ func TestPriorityConstantsOrdering(t *testing.T) {
 	}
 
 	for i := 1; i < len(ordered); i++ {
-		if ordered[i].priority <= ordered[i-1].priority {
-			t.Fatalf("%s (priority %d) should be > %s (priority %d)",
-				ordered[i].name, ordered[i].priority,
-				ordered[i-1].name, ordered[i-1].priority)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// All eight patterns sorted from reverse order
-// ---------------------------------------------------------------------------
-
-func TestSortPatternsAllSevenFromReverseOrder(t *testing.T) {
-	var trace []string
-
-	makeMW := func(name string) Middleware[string] {
-		return func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
-			return func(ctx context.Context) (string, error) {
-				trace = append(trace, name)
-				return next(ctx)
-			}
-		}
-	}
-
-	// Reverse order (innermost to outermost)
-	entries := []PatternEntry[string]{
-		{Priority: priorityHedge, Name: "hedge", MW: makeMW("hedge")},
-		{Priority: priorityRetry, Name: "retry", MW: makeMW("retry")},
-		{Priority: priorityBulkhead, Name: "bulkhead", MW: makeMW("bulkhead")},
-		{
-			Priority: priorityRateLimiter,
-			Name:     "rate_limiter",
-			MW:       makeMW("rate_limiter"),
-		},
-		{
-			Priority: priorityCircuitBreaker,
-			Name:     "circuit_breaker",
-			MW:       makeMW("circuit_breaker"),
-		},
-		{Priority: priorityTimeout, Name: "timeout", MW: makeMW("timeout")},
-		{Priority: priorityFallback, Name: "fallback", MW: makeMW("fallback")},
-	}
-
-	sorted := SortPatterns(entries)
-	chained := Chain(sorted...)
-	fn := chained(func(_ context.Context) (string, error) {
-		trace = append(trace, "handler")
-		return "ok", nil
-	})
-
-	_, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	want := []string{
-		"fallback", "timeout", "circuit_breaker",
-		"rate_limiter", "bulkhead", "retry", "hedge", "handler",
-	}
-	if len(trace) != len(want) {
-		t.Fatalf("trace = %v, want %v", trace, want)
-	}
-	for i := range want {
-		if trace[i] != want[i] {
-			t.Fatalf(
-				"trace[%d] = %q, want %q; full trace = %v",
-				i,
-				trace[i],
-				want[i],
-				trace,
-			)
-		}
+		assert.Greaterf(t, ordered[i].priority, ordered[i-1].priority,
+			"%s (priority %d) should be > %s (priority %d)",
+			ordered[i].name, ordered[i].priority,
+			ordered[i-1].name, ordered[i-1].priority)
 	}
 }
 
@@ -378,6 +229,8 @@ func TestSortPatternsAllSevenFromReverseOrder(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSortPatternsDoesNotModifyOriginal(t *testing.T) {
+	t.Parallel()
+
 	makeMW := func(_ string) Middleware[string] {
 		return func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
 			return next
@@ -395,15 +248,8 @@ func TestSortPatternsDoesNotModifyOriginal(t *testing.T) {
 
 	_ = SortPatterns(entries)
 
-	if entries[0].Name != origFirst || entries[1].Name != origSecond {
-		t.Fatalf(
-			"SortPatterns modified original slice: got [%s, %s], want [%s, %s]",
-			entries[0].Name,
-			entries[1].Name,
-			origFirst,
-			origSecond,
-		)
-	}
+	require.Equal(t, origFirst, entries[0].Name)
+	require.Equal(t, origSecond, entries[1].Name)
 }
 
 // ---------------------------------------------------------------------------

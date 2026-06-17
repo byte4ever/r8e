@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -14,6 +17,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestIntegrationFullChainSuccess(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
@@ -51,33 +56,19 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 			return "success", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "success" {
-		t.Fatalf("Do() = %q, want %q", result, "success")
-	}
-	if attempt != 2 {
-		t.Fatalf("expected 2 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "success", result)
+	require.Equal(t, 2, attempt)
 	// Retry hook should have fired once (before the 2nd attempt).
-	if rc := retryCount.Load(); rc != 1 {
-		t.Fatalf("OnRetry called %d times, want 1", rc)
-	}
+	require.Equal(t, int32(1), retryCount.Load())
 	// Bulkhead should have been acquired and released.
-	if bh := bhAcquired.Load(); bh < 1 {
-		t.Fatalf("OnBulkheadAcquired called %d times, want >= 1", bh)
-	}
-	if bh := bhReleased.Load(); bh < 1 {
-		t.Fatalf("OnBulkheadReleased called %d times, want >= 1", bh)
-	}
+	require.GreaterOrEqual(t, bhAcquired.Load(), int32(1))
+	require.GreaterOrEqual(t, bhReleased.Load(), int32(1))
 
 	// Circuit breaker should still be closed (only 1 failure out of threshold
 	// 10).
 	status := p.HealthStatus()
-	if !status.Healthy {
-		t.Fatalf("policy should be healthy, got state=%q", status.State)
-	}
+	require.True(t, status.Healthy)
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +76,8 @@ func TestIntegrationFullChainSuccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationPresetPolicy(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
@@ -107,12 +100,8 @@ func TestIntegrationPresetPolicy(t *testing.T) {
 			return "from-preset", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "from-preset" {
-		t.Fatalf("Do() = %q, want %q", result, "from-preset")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "from-preset", result)
 
 	// Verify the fallback override works: fail enough to exhaust retries +
 	// trigger circuit breaker, then fallback catches.
@@ -131,12 +120,8 @@ func TestIntegrationPresetPolicy(t *testing.T) {
 			return "", errors.New("still failing")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() with fallback error = %v, want nil", err)
-	}
-	if result != "preset-fallback" {
-		t.Fatalf("Do() = %q, want %q (fallback)", result, "preset-fallback")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "preset-fallback", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -159,15 +144,9 @@ func TestIntegrationDoConvenience(t *testing.T) {
 		WithRetry(5, ConstantBackoff(10*time.Millisecond)),
 		WithTimeout(10*time.Second),
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "convenience-ok" {
-		t.Fatalf("Do() = %q, want %q", result, "convenience-ok")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "convenience-ok", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +154,8 @@ func TestIntegrationDoConvenience(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationConcurrentPolicy(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
@@ -221,14 +202,10 @@ func TestIntegrationConcurrentPolicy(t *testing.T) {
 	wg.Wait()
 
 	total := successes.Load() + failures.Load()
-	if total != numGoroutines {
-		t.Fatalf("total outcomes = %d, want %d", total, numGoroutines)
-	}
+	require.Equal(t, int64(numGoroutines), total)
 
 	// Some should have succeeded (2/3 of inputs succeed on first try).
-	if successes.Load() == 0 {
-		t.Fatal("expected at least some successes")
-	}
+	require.NotZero(t, successes.Load())
 
 	t.Logf(
 		"concurrent results: %d successes, %d failures",
@@ -242,6 +219,8 @@ func TestIntegrationConcurrentPolicy(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationHierarchicalHealth(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
@@ -261,14 +240,10 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 
 	// Initially both should be healthy.
 	readiness := reg.CheckReadiness()
-	if !readiness.Ready {
-		t.Fatal("registry should initially report ready")
-	}
+	require.True(t, readiness.Ready)
 
 	parentHealth := parent.HealthStatus()
-	if !parentHealth.Healthy {
-		t.Fatal("parent should initially be healthy")
-	}
+	require.True(t, parentHealth.Healthy)
 
 	// Drive the child's circuit breaker to open.
 	for range 2 {
@@ -282,38 +257,20 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 
 	// Verify child is unhealthy.
 	childHealth := child.HealthStatus()
-	if childHealth.Healthy {
-		t.Fatal("child should be unhealthy (circuit open)")
-	}
-	if childHealth.Criticality != CriticalityCritical {
-		t.Fatalf(
-			"child criticality = %v, want CriticalityCritical",
-			childHealth.Criticality,
-		)
-	}
+	require.False(t, childHealth.Healthy)
+	require.Equal(t, CriticalityCritical, childHealth.Criticality)
 
 	// Verify parent health reports degraded due to dependency.
 	parentHealth = parent.HealthStatus()
-	if parentHealth.Criticality < CriticalityDegraded {
-		t.Fatalf(
-			"parent criticality = %v, want >= CriticalityDegraded",
-			parentHealth.Criticality,
-		)
-	}
-	if len(parentHealth.Dependencies) == 0 {
-		t.Fatal("parent should have dependencies in health status")
-	}
+	require.GreaterOrEqual(t, parentHealth.Criticality, CriticalityDegraded)
+	require.NotEmpty(t, parentHealth.Dependencies)
 	depHealth := parentHealth.Dependencies[0]
-	if depHealth.Healthy {
-		t.Fatal("dependency health should report unhealthy")
-	}
+	require.False(t, depHealth.Healthy)
 
 	// Verify registry-level readiness reports not ready (child is
 	// critical+unhealthy).
 	readiness = reg.CheckReadiness()
-	if readiness.Ready {
-		t.Fatal("registry should report not ready when child circuit is open")
-	}
+	require.False(t, readiness.Ready)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +278,8 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationPermanentErrorStopsRetry(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
@@ -342,20 +301,11 @@ func TestIntegrationPermanentErrorStopsRetry(t *testing.T) {
 	)
 
 	// Should have been called exactly once — permanent stops retry immediately.
-	if attempt != 1 {
-		t.Fatalf(
-			"expected 1 attempt, got %d (permanent should stop retry)",
-			attempt,
-		)
-	}
+	require.Equal(t, 1, attempt)
 
 	// The error should be the permanent-wrapped sentinel.
-	if !IsPermanent(err) {
-		t.Fatalf("error should be permanent, got %v", err)
-	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("error should unwrap to sentinel, got %v", err)
-	}
+	require.True(t, IsPermanent(err))
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +313,8 @@ func TestIntegrationPermanentErrorStopsRetry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
@@ -390,12 +342,8 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 				return "", errors.New("always fail")
 			},
 		)
-		if err != nil {
-			t.Fatalf("Do() error = %v, want nil (fallback should catch)", err)
-		}
-		if result != "fallback-value" {
-			t.Fatalf("Do() = %q, want %q", result, "fallback-value")
-		}
+		require.NoError(t, err)
+		require.Equal(t, "fallback-value", result)
 	}
 
 	// At this point, the circuit breaker should be open (3 failures recorded
@@ -410,25 +358,13 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 			return "unreachable", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf(
-			"Do() error = %v, want nil (fallback should catch circuit open)",
-			err,
-		)
-	}
-	if result != "fallback-value" {
-		t.Fatalf("Do() = %q, want %q", result, "fallback-value")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "fallback-value", result)
 
 	// Verify fallback caught different types of errors.
 	mu.Lock()
 	defer mu.Unlock()
-	if len(fallbackErrors) < 2 {
-		t.Fatalf(
-			"expected at least 2 fallback calls, got %d",
-			len(fallbackErrors),
-		)
-	}
+	require.GreaterOrEqual(t, len(fallbackErrors), 2)
 
 	// At least one should be ErrRetriesExhausted and at least one
 	// ErrCircuitOpen.
@@ -441,11 +377,6 @@ func TestIntegrationFallbackCatchesAllErrors(t *testing.T) {
 			gotCircuit = true
 		}
 	}
-	if !gotRetries {
-		t.Fatal("fallback should have caught ErrRetriesExhausted")
-	}
-	if !gotCircuit {
-		t.Fatal("fallback should have caught ErrCircuitOpen")
-	}
+	assert.True(t, gotRetries, "fallback should have caught ErrRetriesExhausted")
+	assert.True(t, gotCircuit, "fallback should have caught ErrCircuitOpen")
 }
-

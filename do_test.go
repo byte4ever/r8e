@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -18,12 +20,8 @@ func TestDoBasic(t *testing.T) {
 			return "hello", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "hello" {
-		t.Fatalf("Do() = %q, want %q", result, "hello")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "hello", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -46,15 +44,9 @@ func TestDoWithRetry(t *testing.T) {
 		WithClock(clk),
 		WithRetry(3, ConstantBackoff(10*time.Millisecond)),
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "recovered" {
-		t.Fatalf("Do() = %q, want %q", result, "recovered")
-	}
-	if attempt != 3 {
-		t.Fatalf("expected 3 attempts, got %d", attempt)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "recovered", result)
+	require.Equal(t, 3, attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,9 +63,7 @@ func TestDoWithTimeout(t *testing.T) {
 		WithTimeout(50*time.Millisecond),
 	)
 
-	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("Do() error = %v, want ErrTimeout", err)
-	}
+	require.ErrorIs(t, err, ErrTimeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -88,12 +78,8 @@ func TestDoWithFallback(t *testing.T) {
 		},
 		WithFallback("default-value"),
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (fallback served)", err)
-	}
-	if result != "default-value" {
-		t.Fatalf("Do() = %q, want %q", result, "default-value")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "default-value", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -110,9 +96,7 @@ func TestDoErrorPropagation(t *testing.T) {
 		},
 	)
 
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------

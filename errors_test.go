@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,48 +15,46 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestTransientWrapsError(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("connection reset")
 	err := r8e.Transient(cause)
 
-	if err == nil {
-		t.Fatal("Transient(non-nil) returned nil")
-	}
-	if got := err.Error(); got != "transient: connection reset" {
-		t.Fatalf("Error() = %q, want %q", got, "transient: connection reset")
-	}
+	require.Error(t, err)
+	require.Equal(t, "transient: connection reset", err.Error())
 }
 
 func TestTransientNilReturnsNil(t *testing.T) {
-	if err := r8e.Transient(nil); err != nil {
-		t.Fatalf("Transient(nil) = %v, want nil", err)
-	}
+	t.Parallel()
+
+	require.NoError(t, r8e.Transient(nil))
 }
 
 func TestIsTransientDetectsTransient(t *testing.T) {
+	t.Parallel()
+
 	err := r8e.Transient(errors.New("oops"))
-	if !r8e.IsTransient(err) {
-		t.Fatal("IsTransient(Transient(err)) = false, want true")
-	}
+	require.True(t, r8e.IsTransient(err))
 }
 
 func TestIsTransientUnclassifiedTreatedAsTransient(t *testing.T) {
+	t.Parallel()
+
 	err := errors.New("some random error")
-	if !r8e.IsTransient(err) {
-		t.Fatal("IsTransient(unclassified) = false, want true")
-	}
+	require.True(t, r8e.IsTransient(err))
 }
 
 func TestIsTransientNilReturnsFalse(t *testing.T) {
-	if r8e.IsTransient(nil) {
-		t.Fatal("IsTransient(nil) = true, want false")
-	}
+	t.Parallel()
+
+	require.False(t, r8e.IsTransient(nil))
 }
 
 func TestIsTransientPermanentReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	err := r8e.Permanent(errors.New("bad request"))
-	if r8e.IsTransient(err) {
-		t.Fatal("IsTransient(Permanent(err)) = true, want false")
-	}
+	require.False(t, r8e.IsTransient(err))
 }
 
 // ---------------------------------------------------------------------------
@@ -62,48 +62,46 @@ func TestIsTransientPermanentReturnsFalse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPermanentWrapsError(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("invalid argument")
 	err := r8e.Permanent(cause)
 
-	if err == nil {
-		t.Fatal("Permanent(non-nil) returned nil")
-	}
-	if got := err.Error(); got != "permanent: invalid argument" {
-		t.Fatalf("Error() = %q, want %q", got, "permanent: invalid argument")
-	}
+	require.Error(t, err)
+	require.Equal(t, "permanent: invalid argument", err.Error())
 }
 
 func TestPermanentNilReturnsNil(t *testing.T) {
-	if err := r8e.Permanent(nil); err != nil {
-		t.Fatalf("Permanent(nil) = %v, want nil", err)
-	}
+	t.Parallel()
+
+	require.NoError(t, r8e.Permanent(nil))
 }
 
 func TestIsPermanentDetectsPermanent(t *testing.T) {
+	t.Parallel()
+
 	err := r8e.Permanent(errors.New("oops"))
-	if !r8e.IsPermanent(err) {
-		t.Fatal("IsPermanent(Permanent(err)) = false, want true")
-	}
+	require.True(t, r8e.IsPermanent(err))
 }
 
 func TestIsPermanentUnclassifiedReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	err := errors.New("some random error")
-	if r8e.IsPermanent(err) {
-		t.Fatal("IsPermanent(unclassified) = true, want false")
-	}
+	require.False(t, r8e.IsPermanent(err))
 }
 
 func TestIsPermanentNilReturnsFalse(t *testing.T) {
-	if r8e.IsPermanent(nil) {
-		t.Fatal("IsPermanent(nil) = true, want false")
-	}
+	t.Parallel()
+
+	require.False(t, r8e.IsPermanent(nil))
 }
 
 func TestIsPermanentTransientReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	err := r8e.Transient(errors.New("timeout"))
-	if r8e.IsPermanent(err) {
-		t.Fatal("IsPermanent(Transient(err)) = true, want false")
-	}
+	require.False(t, r8e.IsPermanent(err))
 }
 
 // ---------------------------------------------------------------------------
@@ -111,21 +109,21 @@ func TestIsPermanentTransientReturnsFalse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTransientUnwrap(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("root cause")
 	err := r8e.Transient(cause)
 
-	if !errors.Is(err, cause) {
-		t.Fatal("errors.Is(Transient(cause), cause) = false, want true")
-	}
+	require.ErrorIs(t, err, cause)
 }
 
 func TestPermanentUnwrap(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("root cause")
 	err := r8e.Permanent(cause)
 
-	if !errors.Is(err, cause) {
-		t.Fatal("errors.Is(Permanent(cause), cause) = false, want true")
-	}
+	require.ErrorIs(t, err, cause)
 }
 
 // Use a proper custom error for errors.As testing.
@@ -137,29 +135,25 @@ type codedError struct {
 func (e *codedError) Error() string { return e.msg }
 
 func TestTransientErrorsAsCustomType(t *testing.T) {
+	t.Parallel()
+
 	cause := &codedError{code: 42, msg: "bad thing"}
 	err := r8e.Transient(cause)
 
 	var target *codedError
-	if !errors.As(err, &target) {
-		t.Fatal("errors.As(Transient(cause), &codedError) = false, want true")
-	}
-	if target.code != 42 {
-		t.Fatalf("target.code = %d, want 42", target.code)
-	}
+	require.ErrorAs(t, err, &target)
+	require.Equal(t, 42, target.code)
 }
 
 func TestPermanentErrorsAsCustomType(t *testing.T) {
+	t.Parallel()
+
 	cause := &codedError{code: 99, msg: "really bad"}
 	err := r8e.Permanent(cause)
 
 	var target *codedError
-	if !errors.As(err, &target) {
-		t.Fatal("errors.As(Permanent(cause), &codedError) = false, want true")
-	}
-	if target.code != 99 {
-		t.Fatalf("target.code = %d, want 99", target.code)
-	}
+	require.ErrorAs(t, err, &target)
+	require.Equal(t, 99, target.code)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,21 +162,21 @@ func TestPermanentErrorsAsCustomType(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsTransientDetectsWrappedTransient(t *testing.T) {
+	t.Parallel()
+
 	inner := r8e.Transient(errors.New("timeout"))
 	wrapped := fmt.Errorf("layer: %w", inner)
 
-	if !r8e.IsTransient(wrapped) {
-		t.Fatal("IsTransient on wrapped transient = false, want true")
-	}
+	require.True(t, r8e.IsTransient(wrapped))
 }
 
 func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
+	t.Parallel()
+
 	inner := r8e.Permanent(errors.New("bad input"))
 	wrapped := fmt.Errorf("layer: %w", inner)
 
-	if !r8e.IsPermanent(wrapped) {
-		t.Fatal("IsPermanent on wrapped permanent = false, want true")
-	}
+	require.True(t, r8e.IsPermanent(wrapped))
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +184,8 @@ func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSentinelErrorMessages(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		err  error
 		want string
@@ -201,13 +197,17 @@ func TestSentinelErrorMessages(t *testing.T) {
 		{r8e.ErrRetriesExhausted, "retries exhausted"},
 	}
 	for _, tt := range tests {
-		if got := tt.err.Error(); got != tt.want {
-			t.Errorf("%T.Error() = %q, want %q", tt.err, got, tt.want)
-		}
+		t.Run(tt.want, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, tt.err.Error())
+		})
 	}
 }
 
 func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
+	t.Parallel()
+
 	sentinels := []error{
 		r8e.ErrCircuitOpen,
 		r8e.ErrRateLimited,
@@ -216,9 +216,11 @@ func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
 		r8e.ErrRetriesExhausted,
 	}
 	for _, sentinel := range sentinels {
-		wrapped := fmt.Errorf("context: %w", sentinel)
-		if !errors.Is(wrapped, sentinel) {
-			t.Errorf("errors.Is(wrapped, %T) = false, want true", sentinel)
-		}
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("context: %w", sentinel)
+			assert.ErrorIs(t, wrapped, sentinel)
+		})
 	}
 }

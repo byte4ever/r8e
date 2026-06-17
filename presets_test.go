@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,15 +15,11 @@ import (
 func TestStandardHTTPClient(t *testing.T) {
 	opts := StandardHTTPClient()
 
-	if got := len(opts); got != 3 {
-		t.Fatalf("StandardHTTPClient() returned %d options, want 3", got)
-	}
+	require.Len(t, opts, 3)
 
 	// Verify a policy can be created from the preset (no panic).
 	p := NewPolicy[string]("std-http-test", opts...)
-	if p == nil {
-		t.Fatal("NewPolicy returned nil")
-	}
+	require.NotNil(t, p)
 }
 
 // ---------------------------------------------------------------------------
@@ -31,15 +29,11 @@ func TestStandardHTTPClient(t *testing.T) {
 func TestAggressiveHTTPClient(t *testing.T) {
 	opts := AggressiveHTTPClient()
 
-	if got := len(opts); got != 4 {
-		t.Fatalf("AggressiveHTTPClient() returned %d options, want 4", got)
-	}
+	require.Len(t, opts, 4)
 
 	// Verify a policy can be created from the preset (no panic).
 	p := NewPolicy[string]("aggressive-http-test", opts...)
-	if p == nil {
-		t.Fatal("NewPolicy returned nil")
-	}
+	require.NotNil(t, p)
 }
 
 // ---------------------------------------------------------------------------
@@ -58,12 +52,8 @@ func TestStandardHTTPClientPolicy(t *testing.T) {
 			return "user-data", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "user-data" {
-		t.Fatalf("Do() = %q, want %q", result, "user-data")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "user-data", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -82,12 +72,8 @@ func TestAggressiveHTTPClientPolicy(t *testing.T) {
 			return "fast-data", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "fast-data" {
-		t.Fatalf("Do() = %q, want %q", result, "fast-data")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "fast-data", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -114,12 +100,8 @@ func TestPresetWithOverride(t *testing.T) {
 			return "overridden", nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-	if result != "overridden" {
-		t.Fatalf("Do() = %q, want %q", result, "overridden")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "overridden", result)
 }
 
 // ---------------------------------------------------------------------------

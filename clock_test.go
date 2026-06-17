@@ -5,20 +5,24 @@ import (
 	"time"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRealClockNow(t *testing.T) {
+	t.Parallel()
+
 	c := r8e.RealClock{}
 	before := time.Now()
 	got := c.Now()
 	after := time.Now()
 
-	if got.Before(before) || got.After(after) {
-		t.Fatalf("Now() = %v, want between %v and %v", got, before, after)
-	}
+	require.False(t, got.Before(before) || got.After(after),
+		"Now() = %v, want between %v and %v", got, before, after)
 }
 
 func TestRealClockSince(t *testing.T) {
+	t.Parallel()
+
 	c := r8e.RealClock{}
 	start := c.Now()
 
@@ -26,35 +30,35 @@ func TestRealClockSince(t *testing.T) {
 	time.Sleep(1 * time.Millisecond)
 
 	elapsed := c.Since(start)
-	if elapsed <= 0 {
-		t.Fatalf("Since() = %v, want > 0", elapsed)
-	}
+	require.Positive(t, elapsed, "Since() = %v, want > 0", elapsed)
 }
 
 func TestRealClockNewTimerFires(t *testing.T) {
+	t.Parallel()
+
 	c := r8e.RealClock{}
 	tmr := c.NewTimer(10 * time.Millisecond)
 
 	select {
 	case ts := <-tmr.C():
-		if ts.IsZero() {
-			t.Fatal("timer fired with zero time")
-		}
+		require.False(t, ts.IsZero(), "timer fired with zero time")
 	case <-time.After(1 * time.Second):
 		t.Fatal("timer did not fire within 1s")
 	}
 }
 
 func TestRealClockNewTimerStop(t *testing.T) {
+	t.Parallel()
+
 	c := r8e.RealClock{}
 	tmr := c.NewTimer(1 * time.Hour) // very long; will not fire
 
-	if !tmr.Stop() {
-		t.Fatal("Stop() = false, want true for unfired timer")
-	}
+	require.True(t, tmr.Stop(), "Stop() = false, want true for unfired timer")
 }
 
 func TestRealClockNewTimerReset(t *testing.T) {
+	t.Parallel()
+
 	c := r8e.RealClock{}
 	tmr := c.NewTimer(1 * time.Hour) // very long; will not fire
 
@@ -65,9 +69,7 @@ func TestRealClockNewTimerReset(t *testing.T) {
 
 	select {
 	case ts := <-tmr.C():
-		if ts.IsZero() {
-			t.Fatal("timer fired with zero time after Reset")
-		}
+		require.False(t, ts.IsZero(), "timer fired with zero time after Reset")
 	case <-time.After(1 * time.Second):
 		t.Fatal("timer did not fire after Reset within 1s")
 	}
@@ -77,6 +79,8 @@ func TestRealClockNewTimerReset(t *testing.T) {
 // fakeClock can satisfy the Clock interface. This proves the interface is
 // implementable outside of the real implementation.
 func TestFakeClockSatisfiesInterface(t *testing.T) {
+	t.Parallel()
+
 	var _ r8e.Clock = (*fakeClock)(nil)
 	var _ r8e.Timer = (*fakeTimer)(nil)
 }
@@ -98,6 +102,8 @@ func (f *fakeTimer) Reset(time.Duration) bool { return false }
 // RealClock is stateless (zero-value struct), so concurrent use is inherently
 // safe; this test confirms it under the race detector.
 func TestRealClockConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	c := r8e.RealClock{}
 	done := make(chan struct{})
 

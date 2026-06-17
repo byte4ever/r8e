@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -15,6 +16,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestChainSingleMiddlewareWrapsCorrectly(t *testing.T) {
+	t.Parallel()
+
 	mw := r8e.Middleware[string](
 		func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
 			return func(ctx context.Context) (string, error) {
@@ -30,12 +33,8 @@ func TestChainSingleMiddlewareWrapsCorrectly(t *testing.T) {
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != "wrapped(hello)" {
-		t.Fatalf("Chain() = %q, want %q", result, "wrapped(hello)")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "wrapped(hello)", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -43,6 +42,8 @@ func TestChainSingleMiddlewareWrapsCorrectly(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainMultipleMiddlewaresExecuteInCorrectOrder(t *testing.T) {
+	t.Parallel()
+
 	var trace []string
 
 	makeMW := func(name string) r8e.Middleware[string] {
@@ -67,12 +68,8 @@ func TestChainMultipleMiddlewaresExecuteInCorrectOrder(t *testing.T) {
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != "done" {
-		t.Fatalf("Chain() = %q, want %q", result, "done")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "done", result)
 
 	// Chain(mw1, mw2, mw3) produces mw1(mw2(mw3(next)))
 	// So execution order is: mw1-before, mw2-before, mw3-before, handler,
@@ -83,25 +80,7 @@ func TestChainMultipleMiddlewaresExecuteInCorrectOrder(t *testing.T) {
 		"mw3-after", "mw2-after", "mw1-after",
 	}
 
-	if len(trace) != len(want) {
-		t.Fatalf(
-			"trace length = %d, want %d; trace = %v",
-			len(trace),
-			len(want),
-			trace,
-		)
-	}
-	for i := range want {
-		if trace[i] != want[i] {
-			t.Fatalf(
-				"trace[%d] = %q, want %q; full trace = %v",
-				i,
-				trace[i],
-				want[i],
-				trace,
-			)
-		}
-	}
+	require.Equal(t, want, trace)
 }
 
 // ---------------------------------------------------------------------------
@@ -109,18 +88,16 @@ func TestChainMultipleMiddlewaresExecuteInCorrectOrder(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainEmptyPassesThrough(t *testing.T) {
+	t.Parallel()
+
 	chained := r8e.Chain[string]()
 	fn := chained(func(_ context.Context) (string, error) {
 		return "passthrough", nil
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != "passthrough" {
-		t.Fatalf("Chain() = %q, want %q", result, "passthrough")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "passthrough", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +105,8 @@ func TestChainEmptyPassesThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainPreservesErrorPropagation(t *testing.T) {
+	t.Parallel()
+
 	sentinel := errors.New("sentinel error")
 
 	mw := r8e.Middleware[int](
@@ -144,9 +123,7 @@ func TestChainPreservesErrorPropagation(t *testing.T) {
 	})
 
 	_, err := fn(context.Background())
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Chain() error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +131,8 @@ func TestChainPreservesErrorPropagation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainPreservesMiddlewareError(t *testing.T) {
+	t.Parallel()
+
 	mwErr := errors.New("middleware error")
 
 	mw := r8e.Middleware[string](
@@ -170,9 +149,7 @@ func TestChainPreservesMiddlewareError(t *testing.T) {
 	})
 
 	_, err := fn(context.Background())
-	if !errors.Is(err, mwErr) {
-		t.Fatalf("Chain() error = %v, want %v", err, mwErr)
-	}
+	require.ErrorIs(t, err, mwErr)
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +157,8 @@ func TestChainPreservesMiddlewareError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainPreservesResultValues(t *testing.T) {
+	t.Parallel()
+
 	mw := r8e.Middleware[int](
 		func(next func(context.Context) (int, error)) func(context.Context) (int, error) {
 			return func(ctx context.Context) (int, error) {
@@ -195,12 +174,8 @@ func TestChainPreservesResultValues(t *testing.T) {
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != 42 {
-		t.Fatalf("Chain() = %d, want %d", result, 42)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 42, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +183,8 @@ func TestChainPreservesResultValues(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainMultipleMiddlewaresTransformResult(t *testing.T) {
+	t.Parallel()
+
 	prefix := func(p string) r8e.Middleware[string] {
 		return func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
 			return func(ctx context.Context) (string, error) {
@@ -230,12 +207,8 @@ func TestChainMultipleMiddlewaresTransformResult(t *testing.T) {
 	// Then b-: "b-c-end"
 	// Then a-: "a-b-c-end"
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != "a-b-c-end" {
-		t.Fatalf("Chain() = %q, want %q", result, "a-b-c-end")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "a-b-c-end", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +216,8 @@ func TestChainMultipleMiddlewaresTransformResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainEmptyPreservesError(t *testing.T) {
+	t.Parallel()
+
 	sentinel := errors.New("pass-through error")
 	chained := r8e.Chain[string]()
 	fn := chained(func(_ context.Context) (string, error) {
@@ -250,9 +225,7 @@ func TestChainEmptyPreservesError(t *testing.T) {
 	})
 
 	_, err := fn(context.Background())
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Chain() error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +233,8 @@ func TestChainEmptyPreservesError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainContextPropagates(t *testing.T) {
+	t.Parallel()
+
 	type ctxKey string
 	key := ctxKey("test-key")
 
@@ -278,12 +253,8 @@ func TestChainContextPropagates(t *testing.T) {
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != "injected" {
-		t.Fatalf("Chain() = %q, want %q", result, "injected")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "injected", result)
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +262,8 @@ func TestChainContextPropagates(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainMiddlewareCanShortCircuit(t *testing.T) {
+	t.Parallel()
+
 	handlerCalled := false
 
 	mw := r8e.Middleware[string](
@@ -308,17 +281,10 @@ func TestChainMiddlewareCanShortCircuit(t *testing.T) {
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf("Chain() error = %v, want nil", err)
-	}
-	if result != "short-circuited" {
-		t.Fatalf("Chain() = %q, want %q", result, "short-circuited")
-	}
-	if handlerCalled {
-		t.Fatal(
-			"handler should not have been called when middleware short-circuits",
-		)
-	}
+	require.NoError(t, err)
+	require.Equal(t, "short-circuited", result)
+	require.False(t, handlerCalled,
+		"handler should not have been called when middleware short-circuits")
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +292,8 @@ func TestChainMiddlewareCanShortCircuit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainReusableWithDifferentFunctions(t *testing.T) {
+	t.Parallel()
+
 	var trace []string
 
 	mw := r8e.Middleware[string](
@@ -349,15 +317,9 @@ func TestChainReusableWithDifferentFunctions(t *testing.T) {
 	r1, _ := fn1(context.Background())
 	r2, _ := fn2(context.Background())
 
-	if r1 != "fn1" {
-		t.Fatalf("fn1 result = %q, want %q", r1, "fn1")
-	}
-	if r2 != "fn2" {
-		t.Fatalf("fn2 result = %q, want %q", r2, "fn2")
-	}
-	if len(trace) != 2 {
-		t.Fatalf("trace length = %d, want 2; trace = %v", len(trace), trace)
-	}
+	require.Equal(t, "fn1", r1)
+	require.Equal(t, "fn2", r2)
+	require.Len(t, trace, 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +327,8 @@ func TestChainReusableWithDifferentFunctions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChainErrorInterceptedByMiddleware(t *testing.T) {
+	t.Parallel()
+
 	mw := r8e.Middleware[string](
 		func(next func(context.Context) (string, error)) func(context.Context) (string, error) {
 			return func(ctx context.Context) (string, error) {
@@ -383,15 +347,8 @@ func TestChainErrorInterceptedByMiddleware(t *testing.T) {
 	})
 
 	result, err := fn(context.Background())
-	if err != nil {
-		t.Fatalf(
-			"Chain() error = %v, want nil (error should be intercepted)",
-			err,
-		)
-	}
-	if result != "recovered" {
-		t.Fatalf("Chain() = %q, want %q", result, "recovered")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "recovered", result)
 }
 
 // ---------------------------------------------------------------------------

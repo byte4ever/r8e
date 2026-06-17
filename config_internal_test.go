@@ -1,8 +1,9 @@
 package r8e
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func strPtr(s string) *string { return &s }
@@ -11,6 +12,8 @@ func strPtr(s string) *string { return &s }
 // parseBackoffStrategy, including the two nil-pointer guards that were
 // previously untested.
 func TestParseBackoffStrategyGuards(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		backoff   *string
@@ -25,27 +28,25 @@ func TestParseBackoffStrategyGuards(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			_, err := parseBackoffStrategy(tt.backoff, tt.baseDelay)
-			if err == nil {
-				t.Fatalf("parseBackoffStrategy() error = nil, want %q", tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErr)
-			}
+			require.Error(t, err)
+			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
 }
 
 func TestParseBackoffStrategyValid(t *testing.T) {
+	t.Parallel()
+
 	for _, name := range []string{"constant", "exponential", "linear", "exponential_jitter"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			strategy, err := parseBackoffStrategy(strPtr(name), strPtr("100ms"))
-			if err != nil {
-				t.Fatalf("parseBackoffStrategy(%q) error = %v", name, err)
-			}
-			if strategy == nil {
-				t.Fatalf("parseBackoffStrategy(%q) returned nil strategy", name)
-			}
+			require.NoError(t, err)
+			require.NotNil(t, strategy)
 		})
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/byte4ever/r8e"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,17 +14,13 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestBulkheadAcquireUnderLimit(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(3, &r8e.Hooks{})
 
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil (1st slot)", err)
-	}
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil (2nd slot)", err)
-	}
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil (3rd slot)", err)
-	}
+	require.NoError(t, bh.Acquire())
+	require.NoError(t, bh.Acquire())
+	require.NoError(t, bh.Acquire())
 }
 
 // ---------------------------------------------------------------------------
@@ -31,20 +28,16 @@ func TestBulkheadAcquireUnderLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadAcquireAtLimitReturnsErrBulkheadFull(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(2, &r8e.Hooks{})
 
 	// Fill up both slots.
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil", err)
-	}
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil", err)
-	}
+	require.NoError(t, bh.Acquire())
+	require.NoError(t, bh.Acquire())
 
 	// Third acquire should fail.
-	if err := bh.Acquire(); err != r8e.ErrBulkheadFull {
-		t.Fatalf("Acquire() = %v, want ErrBulkheadFull", err)
-	}
+	require.ErrorIs(t, bh.Acquire(), r8e.ErrBulkheadFull)
 }
 
 // ---------------------------------------------------------------------------
@@ -52,23 +45,19 @@ func TestBulkheadAcquireAtLimitReturnsErrBulkheadFull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadReleaseFreesSlot(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil", err)
-	}
+	require.NoError(t, bh.Acquire())
 
 	// At capacity — should fail.
-	if err := bh.Acquire(); err != r8e.ErrBulkheadFull {
-		t.Fatalf("Acquire() at capacity = %v, want ErrBulkheadFull", err)
-	}
+	require.ErrorIs(t, bh.Acquire(), r8e.ErrBulkheadFull)
 
 	// Release and try again.
 	bh.Release()
 
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() after Release() = %v, want nil", err)
-	}
+	require.NoError(t, bh.Acquire())
 }
 
 // ---------------------------------------------------------------------------
@@ -76,26 +65,20 @@ func TestBulkheadReleaseFreesSlot(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadFullReturnsCorrectState(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(2, &r8e.Hooks{})
 
-	if bh.Full() {
-		t.Fatal("Full() = true on fresh bulkhead, want false")
-	}
+	require.False(t, bh.Full())
 
 	bh.Acquire()
-	if bh.Full() {
-		t.Fatal("Full() = true after 1 acquire (max 2), want false")
-	}
+	require.False(t, bh.Full())
 
 	bh.Acquire()
-	if !bh.Full() {
-		t.Fatal("Full() = false at capacity, want true")
-	}
+	require.True(t, bh.Full())
 
 	bh.Release()
-	if bh.Full() {
-		t.Fatal("Full() = true after release, want false")
-	}
+	require.False(t, bh.Full())
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +86,8 @@ func TestBulkheadFullReturnsCorrectState(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	const maxConcurrent = 10
 	const goroutines = 100
 
@@ -130,9 +115,7 @@ func TestBulkheadConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	// After all goroutines finish, bulkhead should be empty.
-	if bh.Full() {
-		t.Fatal("Full() = true after all goroutines completed, want false")
-	}
+	require.False(t, bh.Full())
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +123,8 @@ func TestBulkheadConcurrentAccess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadHookEmissions(t *testing.T) {
+	t.Parallel()
+
 	var acquiredCount, fullCount, releasedCount atomic.Int64
 	hooks := &r8e.Hooks{
 		OnBulkheadAcquired: func() { acquiredCount.Add(1) },
@@ -151,21 +136,15 @@ func TestBulkheadHookEmissions(t *testing.T) {
 
 	// Acquire — should fire Acquired hook.
 	bh.Acquire()
-	if got := acquiredCount.Load(); got != 1 {
-		t.Fatalf("OnBulkheadAcquired called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), acquiredCount.Load())
 
 	// Acquire at capacity — should fire Full hook.
 	bh.Acquire()
-	if got := fullCount.Load(); got != 1 {
-		t.Fatalf("OnBulkheadFull called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), fullCount.Load())
 
 	// Release — should fire Released hook.
 	bh.Release()
-	if got := releasedCount.Load(); got != 1 {
-		t.Fatalf("OnBulkheadReleased called %d times, want 1", got)
-	}
+	require.Equal(t, int64(1), releasedCount.Load())
 }
 
 // ---------------------------------------------------------------------------
@@ -173,26 +152,16 @@ func TestBulkheadHookEmissions(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadMultipleSequentialCycles(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
 	for i := range 10 {
-		if err := bh.Acquire(); err != nil {
-			t.Fatalf("cycle %d: Acquire() = %v, want nil", i, err)
-		}
-		if !bh.Full() {
-			t.Fatalf("cycle %d: Full() = false at capacity, want true", i)
-		}
-		if err := bh.Acquire(); err != r8e.ErrBulkheadFull {
-			t.Fatalf(
-				"cycle %d: Acquire() at capacity = %v, want ErrBulkheadFull",
-				i,
-				err,
-			)
-		}
+		require.NoErrorf(t, bh.Acquire(), "cycle %d", i)
+		require.Truef(t, bh.Full(), "cycle %d", i)
+		require.ErrorIsf(t, bh.Acquire(), r8e.ErrBulkheadFull, "cycle %d", i)
 		bh.Release()
-		if bh.Full() {
-			t.Fatalf("cycle %d: Full() = true after release, want false", i)
-		}
+		require.Falsef(t, bh.Full(), "cycle %d", i)
 	}
 }
 
@@ -201,6 +170,8 @@ func TestBulkheadMultipleSequentialCycles(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadNilHooksDoNotPanic(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
 	bh.Acquire()
@@ -213,24 +184,17 @@ func TestBulkheadNilHooksDoNotPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadSingleSlot(t *testing.T) {
+	t.Parallel()
+
 	bh := r8e.NewBulkhead(1, &r8e.Hooks{})
 
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil", err)
-	}
-	if !bh.Full() {
-		t.Fatal("Full() = false, want true")
-	}
+	require.NoError(t, bh.Acquire())
+	require.True(t, bh.Full())
 
-	err := bh.Acquire()
-	if err != r8e.ErrBulkheadFull {
-		t.Fatalf("Acquire() = %v, want ErrBulkheadFull", err)
-	}
+	require.ErrorIs(t, bh.Acquire(), r8e.ErrBulkheadFull)
 
 	bh.Release()
-	if bh.Full() {
-		t.Fatal("Full() = true after release, want false")
-	}
+	require.False(t, bh.Full())
 }
 
 // ---------------------------------------------------------------------------

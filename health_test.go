@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,24 +16,20 @@ import (
 
 func TestCriticalityString(t *testing.T) {
 	tests := []struct {
+		name string
 		c    Criticality
 		want string
 	}{
-		{CriticalityNone, "none"},
-		{CriticalityDegraded, "degraded"},
-		{CriticalityCritical, "critical"},
-		{Criticality(99), "none"}, // unknown falls through to default
+		{"none", CriticalityNone, "none"},
+		{"degraded", CriticalityDegraded, "degraded"},
+		{"critical", CriticalityCritical, "critical"},
+		{"unknown", Criticality(99), "none"}, // unknown falls through to default
 	}
 
 	for _, tt := range tests {
-		if got := tt.c.String(); got != tt.want {
-			t.Errorf(
-				"Criticality(%d).String() = %q, want %q",
-				tt.c,
-				got,
-				tt.want,
-			)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.c.String())
+		})
 	}
 }
 
@@ -43,21 +42,11 @@ func TestHealthyPolicyNoPatterns(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if status.Name != "empty" {
-		t.Fatalf("Name = %q, want %q", status.Name, "empty")
-	}
-	if !status.Healthy {
-		t.Fatal("Healthy = false, want true")
-	}
-	if status.Criticality != CriticalityNone {
-		t.Fatalf("Criticality = %v, want CriticalityNone", status.Criticality)
-	}
-	if status.State != "healthy" {
-		t.Fatalf("State = %q, want %q", status.State, "healthy")
-	}
-	if len(status.Dependencies) != 0 {
-		t.Fatalf("Dependencies = %v, want empty", status.Dependencies)
-	}
+	require.Equal(t, "empty", status.Name)
+	require.True(t, status.Healthy)
+	require.Equal(t, CriticalityNone, status.Criticality)
+	require.Equal(t, "healthy", status.State)
+	require.Empty(t, status.Dependencies)
 }
 
 // ---------------------------------------------------------------------------
@@ -74,15 +63,9 @@ func TestHealthyPolicyCircuitBreakerClosed(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if !status.Healthy {
-		t.Fatal("Healthy = false, want true")
-	}
-	if status.Criticality != CriticalityNone {
-		t.Fatalf("Criticality = %v, want CriticalityNone", status.Criticality)
-	}
-	if status.State != "healthy" {
-		t.Fatalf("State = %q, want %q", status.State, "healthy")
-	}
+	require.True(t, status.Healthy)
+	require.Equal(t, CriticalityNone, status.Criticality)
+	require.Equal(t, "healthy", status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -108,18 +91,9 @@ func TestUnhealthyCircuitBreakerOpen(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if status.Healthy {
-		t.Fatal("Healthy = true, want false")
-	}
-	if status.Criticality != CriticalityCritical {
-		t.Fatalf(
-			"Criticality = %v, want CriticalityCritical",
-			status.Criticality,
-		)
-	}
-	if status.State != "circuit_open" {
-		t.Fatalf("State = %q, want %q", status.State, "circuit_open")
-	}
+	require.False(t, status.Healthy)
+	require.Equal(t, CriticalityCritical, status.Criticality)
+	require.Equal(t, "circuit_open", status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,12 +135,8 @@ func TestCircuitBreakerHalfOpen(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if !status.Healthy {
-		t.Fatal("Healthy = false, want true (half_open is recovering)")
-	}
-	if status.State != "circuit_half_open" {
-		t.Fatalf("State = %q, want %q", status.State, "circuit_half_open")
-	}
+	require.True(t, status.Healthy)
+	require.Equal(t, "circuit_half_open", status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,19 +160,10 @@ func TestRateLimiterSaturated(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if status.Criticality != CriticalityDegraded {
-		t.Fatalf(
-			"Criticality = %v, want CriticalityDegraded",
-			status.Criticality,
-		)
-	}
-	if status.State != "rate_limited" {
-		t.Fatalf("State = %q, want %q", status.State, "rate_limited")
-	}
+	require.Equal(t, CriticalityDegraded, status.Criticality)
+	require.Equal(t, "rate_limited", status.State)
 	// Rate limiter saturation alone doesn't make policy unhealthy.
-	if !status.Healthy {
-		t.Fatal("Healthy = false, want true (degraded, not down)")
-	}
+	require.True(t, status.Healthy)
 }
 
 // ---------------------------------------------------------------------------
@@ -235,18 +196,9 @@ func TestBulkheadFull(t *testing.T) {
 
 	close(done) // Release the slot.
 
-	if status.Criticality != CriticalityDegraded {
-		t.Fatalf(
-			"Criticality = %v, want CriticalityDegraded",
-			status.Criticality,
-		)
-	}
-	if status.State != "bulkhead_full" {
-		t.Fatalf("State = %q, want %q", status.State, "bulkhead_full")
-	}
-	if !status.Healthy {
-		t.Fatal("Healthy = false, want true (degraded, not down)")
-	}
+	require.Equal(t, CriticalityDegraded, status.Criticality)
+	require.Equal(t, "bulkhead_full", status.State)
+	require.True(t, status.Healthy)
 }
 
 // ---------------------------------------------------------------------------
@@ -279,18 +231,9 @@ func TestCircuitOpenOverridesRateLimited(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if status.Healthy {
-		t.Fatal("Healthy = true, want false")
-	}
-	if status.Criticality != CriticalityCritical {
-		t.Fatalf(
-			"Criticality = %v, want CriticalityCritical (circuit open overrides rate limited)",
-			status.Criticality,
-		)
-	}
-	if status.State != "circuit_open" {
-		t.Fatalf("State = %q, want %q", status.State, "circuit_open")
-	}
+	require.False(t, status.Healthy)
+	require.Equal(t, CriticalityCritical, status.Criticality)
+	require.Equal(t, "circuit_open", status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,31 +264,15 @@ func TestDependencyPropagation(t *testing.T) {
 
 	status := parent.HealthStatus()
 
-	if len(status.Dependencies) != 1 {
-		t.Fatalf("Dependencies = %d, want 1", len(status.Dependencies))
-	}
+	require.Len(t, status.Dependencies, 1)
 
 	depStatus := status.Dependencies[0]
-	if depStatus.Name != "child" {
-		t.Fatalf("dep.Name = %q, want %q", depStatus.Name, "child")
-	}
-	if depStatus.Healthy {
-		t.Fatal("dep.Healthy = true, want false")
-	}
-	if depStatus.Criticality != CriticalityCritical {
-		t.Fatalf(
-			"dep.Criticality = %v, want CriticalityCritical",
-			depStatus.Criticality,
-		)
-	}
+	require.Equal(t, "child", depStatus.Name)
+	require.False(t, depStatus.Healthy)
+	require.Equal(t, CriticalityCritical, depStatus.Criticality)
 
 	// Parent should be degraded (not critical) due to child's critical status.
-	if status.Criticality < CriticalityDegraded {
-		t.Fatalf(
-			"parent Criticality = %v, want >= CriticalityDegraded",
-			status.Criticality,
-		)
-	}
+	require.GreaterOrEqual(t, status.Criticality, CriticalityDegraded)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,23 +289,9 @@ func TestDependsOnOption(t *testing.T) {
 
 	status := p.HealthStatus()
 
-	if len(status.Dependencies) != 2 {
-		t.Fatalf("Dependencies = %d, want 2", len(status.Dependencies))
-	}
-	if status.Dependencies[0].Name != "dep1" {
-		t.Fatalf(
-			"dep[0].Name = %q, want %q",
-			status.Dependencies[0].Name,
-			"dep1",
-		)
-	}
-	if status.Dependencies[1].Name != "dep2" {
-		t.Fatalf(
-			"dep[1].Name = %q, want %q",
-			status.Dependencies[1].Name,
-			"dep2",
-		)
-	}
+	require.Len(t, status.Dependencies, 2)
+	require.Equal(t, "dep1", status.Dependencies[0].Name)
+	require.Equal(t, "dep2", status.Dependencies[1].Name)
 }
 
 // ---------------------------------------------------------------------------
@@ -393,13 +306,9 @@ func TestHealthReporterInterface(t *testing.T) {
 	// If this compiles, the interface is satisfied.
 	p := NewPolicy[string]("cast")
 	var hr HealthReporter = p
-	if hr.Name() != "cast" {
-		t.Fatalf("Name() via HealthReporter = %q, want %q", hr.Name(), "cast")
-	}
+	require.Equal(t, "cast", hr.Name())
 	status := hr.HealthStatus()
-	if !status.Healthy {
-		t.Fatal("HealthStatus().Healthy = false, want true")
-	}
+	require.True(t, status.Healthy)
 }
 
 // ---------------------------------------------------------------------------

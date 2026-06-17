@@ -2,10 +2,11 @@ package r8e
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,13 +46,9 @@ func TestBuildOptionsAllFields(t *testing.T) {
 	}
 
 	opts, err := BuildOptions(pc)
-	if err != nil {
-		t.Fatalf("BuildOptions() error = %v, want nil", err)
-	}
+	require.NoError(t, err)
 	// timeout, circuit breaker, retry, rate limit, bulkhead, hedge.
-	if len(opts) != 6 {
-		t.Fatalf("len(opts) = %d, want 6", len(opts))
-	}
+	require.Len(t, opts, 6)
 
 	// The options must build a working policy.
 	p := NewPolicy[string]("built", append(opts, WithClock(newPolicyClock()))...)
@@ -59,15 +56,13 @@ func TestBuildOptionsAllFields(t *testing.T) {
 		context.Background(),
 		func(_ context.Context) (string, error) { return "ok", nil },
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v", err)
-	}
-	if result != "ok" {
-		t.Fatalf("Do() = %q, want %q", result, "ok")
-	}
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 func TestBuildOptionsErrorPaths(t *testing.T) {
+	t.Parallel()
+
 	bad := "not-a-duration"
 	good := "100ms"
 	backoff := "constant"
@@ -106,13 +101,11 @@ func TestBuildOptionsErrorPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			_, err := BuildOptions(tt.pc)
-			if err == nil {
-				t.Fatalf("BuildOptions() error = nil, want %q", tt.wantSub)
-			}
-			if !strings.Contains(err.Error(), tt.wantSub) {
-				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantSub)
-			}
+			require.Error(t, err)
+			require.ErrorContains(t, err, tt.wantSub)
 		})
 	}
 }
@@ -122,6 +115,8 @@ func TestBuildOptionsErrorPaths(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerHalfOpenBoundsConcurrentProbes(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(1),
@@ -133,25 +128,19 @@ func TestCircuitBreakerHalfOpenBoundsConcurrentProbes(t *testing.T) {
 	clk.setElapsed(2 * time.Second)
 
 	// First Allow transitions to half-open and takes the only probe slot.
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("first Allow() = %v, want nil", err)
-	}
+	require.NoError(t, cb.Allow())
 	// Second concurrent Allow must be rejected — no probe slot left.
-	if err := cb.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("second Allow() = %v, want ErrCircuitOpen", err)
-	}
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 
 	// After the probe succeeds, the breaker closes and admits calls again.
 	cb.RecordSuccess()
-	if got := cb.State(); got != "closed" {
-		t.Fatalf("State() = %q, want %q", got, "closed")
-	}
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("Allow() after close = %v, want nil", err)
-	}
+	require.Equal(t, "closed", cb.State())
+	require.NoError(t, cb.Allow())
 }
 
 func TestCircuitBreakerHalfOpenAdmitsUpToMax(t *testing.T) {
+	t.Parallel()
+
 	clk := &stubClock{now: time.Now()}
 	cb := NewCircuitBreaker(clk, &Hooks{},
 		FailureThreshold(1),
@@ -163,17 +152,11 @@ func TestCircuitBreakerHalfOpenAdmitsUpToMax(t *testing.T) {
 	clk.setElapsed(2 * time.Second)
 
 	// First Allow transitions to half-open (probe slot 1).
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("first Allow() = %v, want nil", err)
-	}
+	require.NoError(t, cb.Allow())
 	// Second Allow is admitted as probe slot 2 (max is 2).
-	if err := cb.Allow(); err != nil {
-		t.Fatalf("second Allow() = %v, want nil", err)
-	}
+	require.NoError(t, cb.Allow())
 	// Third Allow exceeds the probe budget.
-	if err := cb.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("third Allow() = %v, want ErrCircuitOpen", err)
-	}
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 }
 
 // ---------------------------------------------------------------------------
@@ -182,23 +165,19 @@ func TestCircuitBreakerHalfOpenAdmitsUpToMax(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadReleaseWithoutAcquireIsNoOp(t *testing.T) {
+	t.Parallel()
+
 	bh := NewBulkhead(1, &Hooks{})
 
 	// Unpaired releases must not drive the counter below zero.
 	bh.Release()
 	bh.Release()
 
-	if bh.Full() {
-		t.Fatal("Full() = true after spurious releases, want false")
-	}
+	require.False(t, bh.Full(), "Full() = true after spurious releases, want false")
 
 	// The single slot is still enforced.
-	if err := bh.Acquire(); err != nil {
-		t.Fatalf("Acquire() = %v, want nil", err)
-	}
-	if err := bh.Acquire(); !errors.Is(err, ErrBulkheadFull) {
-		t.Fatalf("second Acquire() = %v, want ErrBulkheadFull", err)
-	}
+	require.NoError(t, bh.Acquire())
+	require.ErrorIs(t, bh.Acquire(), ErrBulkheadFull)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,12 +189,10 @@ func TestBulkheadReleaseWithoutAcquireIsNoOp(t *testing.T) {
 func TestWithFallbackTypeMismatchPanics(t *testing.T) {
 	defer func() {
 		r := recover()
-		if r == nil {
-			t.Fatal("NewPolicy did not panic on fallback type mismatch")
-		}
-		if msg, ok := r.(string); ok &&
-			!strings.Contains(msg, "WithFallback") {
-			t.Fatalf("panic message = %q, want it to mention WithFallback", msg)
+		require.NotNil(t, r, "NewPolicy did not panic on fallback type mismatch")
+		if msg, ok := r.(string); ok {
+			assert.Contains(t, msg, "WithFallback",
+				"panic message = %q, want it to mention WithFallback", msg)
 		}
 	}()
 
@@ -224,15 +201,11 @@ func TestWithFallbackTypeMismatchPanics(t *testing.T) {
 }
 
 func TestWithFallbackFuncTypeMismatchPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("NewPolicy did not panic on fallback func type mismatch")
-		}
-	}()
-
-	// func returning int on a string policy.
-	_ = NewPolicy[string](
-		"mismatch-func",
-		WithFallbackFunc(func(error) (int, error) { return 0, nil }),
-	)
+	require.Panics(t, func() {
+		// func returning int on a string policy.
+		_ = NewPolicy[string](
+			"mismatch-func",
+			WithFallbackFunc(func(error) (int, error) { return 0, nil }),
+		)
+	}, "NewPolicy did not panic on fallback func type mismatch")
 }
