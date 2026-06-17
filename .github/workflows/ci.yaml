@@ -31,3 +31,25 @@ jobs:
         with:
           go-version: "1.25"
       - run: go test -race ./...
+
+  submodules:
+    name: Submodule (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Separate Go modules (own go.mod); the root job's ./... does not
+        # descend into them. httpx, r8ehttp and r8econf live in the root module.
+        module: [otter, ristretto, r8eotel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Test
+        working-directory: ${{ matrix.module }}
+        run: go test -race ./...
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.4.0
+          working-directory: ${{ matrix.module }}
