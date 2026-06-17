@@ -25,6 +25,7 @@ type (
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
 		registry       *Registry
+		metrics        *policyMetrics
 		name           string
 		deps           []HealthReporter
 	}
@@ -236,7 +237,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		setup.clock = RealClock{}
 	}
 
-	hooks := setup.hooks
+	// Wrap the caller's hooks so every lifecycle event also increments a
+	// metrics counter (see policyMetrics.instrument).
+	metrics := &policyMetrics{}
+	hooks := metrics.instrument(&setup.hooks)
 	clock := setup.clock
 
 	var (
@@ -297,6 +301,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker: circuitBreaker,
 		rateLimiter:    rateLimiter,
 		bulkhead:       bulkhead,
+		metrics:        metrics,
 		deps:           setup.deps,
 		registry:       reg,
 	}

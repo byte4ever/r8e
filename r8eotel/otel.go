@@ -1,0 +1,172 @@
+// Package r8eotel bridges r8e policy metrics to OpenTelemetry. It registers
+// observable instruments that report, per registered policy (labelled by the
+// "policy" attribute), the counters and live gauges from r8e.Registry.Snapshot.
+// Keeping the OpenTelemetry dependency in this separate module lets the core
+// r8e package stay dependency-free.
+package r8eotel
+
+import (
+	"context"
+	"fmt"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/byte4ever/r8e"
+)
+
+type (
+	observation struct {
+		inst metric.Int64Observable
+		get  func(*r8e.PolicyMetrics) int64
+	}
+
+	// instrumentBuilder accumulates instruments and the first error
+	// encountered while creating them.
+	instrumentBuilder struct {
+		meter        metric.Meter
+		err          error
+		observations []observation
+		instruments  []metric.Observable
+	}
+)
+
+// Circuit-breaker state encoded as a gauge value.
+const (
+	circuitClosedGauge   int64 = 0
+	circuitHalfOpenGauge int64 = 1
+	circuitOpenGauge     int64 = 2
+)
+
+// Register creates OpenTelemetry observable instruments on meter and a callback
+// that reports metrics for every policy registered with reg, labelled by the
+// "policy" attribute. The returned [metric.Registration] can be used to stop
+// reporting via its Unregister method.
+//
+//nolint:ireturn // returns the OpenTelemetry metric.Registration by design
+func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error) {
+	builder := &instrumentBuilder{meter: meter}
+
+	builder.counter("r8e.policy.retries", "Total retry attempts",
+		func(m *r8e.PolicyMetrics) int64 { return m.Retries })
+	builder.counter("r8e.policy.timeouts", "Total timeouts",
+		func(m *r8e.PolicyMetrics) int64 { return m.Timeouts })
+	builder.counter("r8e.policy.circuit_opens", "Circuit-breaker open transitions",
+		func(m *r8e.PolicyMetrics) int64 { return m.CircuitOpens })
+	builder.counter("r8e.policy.circuit_closes", "Circuit-breaker close transitions",
+		func(m *r8e.PolicyMetrics) int64 { return m.CircuitCloses })
+	builder.counter("r8e.policy.circuit_half_opens", "Circuit-breaker half-open transitions",
+		func(m *r8e.PolicyMetrics) int64 { return m.CircuitHalfOpens })
+	builder.counter("r8e.policy.rate_limited", "Calls rejected by the rate limiter",
+		func(m *r8e.PolicyMetrics) int64 { return m.RateLimited })
+	builder.counter("r8e.policy.bulkhead_rejected", "Calls rejected by the bulkhead",
+		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadRejected })
+	builder.counter("r8e.policy.hedges_triggered", "Hedged requests launched",
+		func(m *r8e.PolicyMetrics) int64 { return m.HedgesTriggered })
+	builder.counter("r8e.policy.hedges_won", "Hedged requests that won",
+		func(m *r8e.PolicyMetrics) int64 { return m.HedgesWon })
+	builder.counter("r8e.policy.fallbacks_used", "Fallbacks invoked",
+		func(m *r8e.PolicyMetrics) int64 { return m.FallbacksUsed })
+
+	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
+		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })
+	builder.gauge("r8e.policy.bulkhead_capacity", "Bulkhead slot capacity",
+		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadCap })
+	builder.gauge("r8e.policy.circuit_state", "Circuit state (0=closed, 1=half-open, 2=open)",
+		circuitStateGauge)
+	builder.gauge("r8e.policy.healthy", "1 if the policy is healthy, else 0",
+		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Healthy }))
+	builder.gauge("r8e.policy.saturated", "1 if the rate limiter has no tokens, else 0",
+		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Saturated }))
+
+	if builder.err != nil {
+		return nil, builder.err
+	}
+
+	registration, err := meter.RegisterCallback(
+		func(_ context.Context, observer metric.Observer) error {
+			snapshot := reg.Snapshot()
+			for i := range snapshot {
+				attrs := metric.WithAttributes(
+					attribute.String("policy", snapshot[i].Name),
+				)
+				for _, obs := range builder.observations {
+					observer.ObserveInt64(obs.inst, obs.get(&snapshot[i]), attrs)
+				}
+			}
+
+			return nil
+		},
+		builder.instruments...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: register otel metrics callback: %w", err)
+	}
+
+	return registration, nil
+}
+
+func (b *instrumentBuilder) counter(
+	name, desc string,
+	get func(*r8e.PolicyMetrics) int64,
+) {
+	if b.err != nil {
+		return
+	}
+
+	inst, err := b.meter.Int64ObservableCounter(name, metric.WithDescription(desc))
+	if err != nil {
+		b.err = err
+
+		return
+	}
+
+	b.add(inst, get)
+}
+
+func (b *instrumentBuilder) gauge(
+	name, desc string,
+	get func(*r8e.PolicyMetrics) int64,
+) {
+	if b.err != nil {
+		return
+	}
+
+	inst, err := b.meter.Int64ObservableGauge(name, metric.WithDescription(desc))
+	if err != nil {
+		b.err = err
+
+		return
+	}
+
+	b.add(inst, get)
+}
+
+func (b *instrumentBuilder) add(
+	inst metric.Int64Observable,
+	get func(*r8e.PolicyMetrics) int64,
+) {
+	b.observations = append(b.observations, observation{inst: inst, get: get})
+	b.instruments = append(b.instruments, inst)
+}
+
+func circuitStateGauge(m *r8e.PolicyMetrics) int64 {
+	switch m.CircuitState {
+	case "open":
+		return circuitOpenGauge
+	case "half_open":
+		return circuitHalfOpenGauge
+	default:
+		return circuitClosedGauge
+	}
+}
+
+func boolGauge(pick func(*r8e.PolicyMetrics) bool) func(*r8e.PolicyMetrics) int64 {
+	return func(m *r8e.PolicyMetrics) int64 {
+		if pick(m) {
+			return 1
+		}
+
+		return 0
+	}
+}

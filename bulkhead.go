@@ -58,3 +58,13 @@ func (b *Bulkhead) Release() {
 func (b *Bulkhead) Full() bool {
 	return b.current.Load() >= b.maxConcurrent
 }
+
+// InUse returns the number of slots currently held.
+func (b *Bulkhead) InUse() int64 {
+	return b.current.Load()
+}
+
+// Cap returns the configured maximum number of concurrent slots.
+func (b *Bulkhead) Cap() int64 {
+	return b.maxConcurrent
+}
