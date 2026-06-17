@@ -12,7 +12,7 @@ function through it.
   breaker**.
 - Calling `policy.Do` to execute a function through the composed middleware
   chain.
-- r8e automatically sorts patterns into the correct execution order regardless
+- r8e automatically sorts patterns into a sensible execution order regardless
   of the order you specify options.
 
 ## Key concepts

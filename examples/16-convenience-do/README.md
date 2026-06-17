@@ -22,7 +22,7 @@ Three scenarios:
    returned.
 
 3. **No options (pass-through)** — Calling `Do` with no options creates a
-   bare policy that simply passes through to the function. This is equivalent
+   bare policy that passes through to the function. This is equivalent
    to calling the function directly.
 
 ## When to use

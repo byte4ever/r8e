@@ -12,8 +12,8 @@ resilience et executer une fonction a travers celle-ci.
   breaker**.
 - Appel de `policy.Do` pour executer une fonction a travers la chaine de
   middlewares composee.
-- r8e trie automatiquement les patrons dans le bon ordre d'execution, quel que
-  soit l'ordre dans lequel vous specifiez les options.
+- r8e trie automatiquement les patrons dans un ordre d'execution raisonnable,
+  quel que soit l'ordre dans lequel vous specifiez les options.
 
 ## Concepts cles
 
