@@ -221,6 +221,11 @@ func (rl *RateLimiter) Allow(ctx context.Context) error {
 }
 
 // Saturated returns true if the bucket is empty (no tokens available).
+//
+// It is not side-effect-free: like Allow it first refills the bucket for
+// elapsed time (an atomic CAS update), so calling it from a health probe
+// advances the limiter's refill clock. This is safe for concurrent use but
+// means HealthStatus is an observer that also nudges refill timing.
 func (rl *RateLimiter) Saturated() bool {
 	rl.refill()
 	return rl.tokens.Load() < fixedPointScale

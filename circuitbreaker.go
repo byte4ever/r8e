@@ -19,6 +19,12 @@ type (
 	// CircuitBreakerOption configures a circuit breaker.
 	CircuitBreakerOption func(*circuitBreakerConfig)
 
+	// CircuitState is the lifecycle state of a [CircuitBreaker], reported by
+	// [CircuitBreaker.State]. Its values are the Circuit* constants; using a
+	// named type lets consumers switch on the constants rather than matching
+	// bare string literals that could silently drift.
+	CircuitState string
+
 	// CircuitBreaker tracks the health of a dependency and fails fast when it's
 	// down.
 	//
@@ -46,6 +52,15 @@ const (
 	stateClosed   uint32 = 0
 	stateOpen     uint32 = 1
 	stateHalfOpen uint32 = 2
+
+	// CircuitClosed is the state in which calls pass through normally.
+	CircuitClosed CircuitState = "closed"
+	// CircuitOpen is the state in which calls fail fast without reaching the
+	// dependency.
+	CircuitOpen CircuitState = "open"
+	// CircuitHalfOpen is the state in which a bounded number of probe calls are
+	// admitted to test whether the dependency has recovered.
+	CircuitHalfOpen CircuitState = "half_open"
 )
 
 func defaultCircuitBreakerConfig() circuitBreakerConfig {
@@ -246,18 +261,23 @@ func (cb *CircuitBreaker) releaseProbe() {
 	}
 }
 
-// State returns the current state as a string: "closed", "open", or
-// "half_open".
-func (cb *CircuitBreaker) State() string {
+// State returns the current state: [CircuitClosed], [CircuitOpen], or
+// [CircuitHalfOpen].
+func (cb *CircuitBreaker) State() CircuitState {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
 	switch cb.state {
+	case stateClosed:
+		return CircuitClosed
 	case stateOpen:
-		return "open"
+		return CircuitOpen
 	case stateHalfOpen:
-		return "half_open"
+		return CircuitHalfOpen
 	default:
-		return "closed"
+		// An unrecognised internal state fails safe to open (not serving),
+		// matching circuitCondition's fail-direction — a future state added
+		// without updating this switch can never be reported as healthy.
+		return CircuitOpen
 	}
 }

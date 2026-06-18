@@ -103,6 +103,7 @@ func TestRegistryOneCritical(t *testing.T) {
 	unhealthy := NewPolicy[string]("unhealthy-svc",
 		WithClock(clk),
 		WithRegistry(reg),
+		WithReadinessImpact(), // gate readiness on this policy
 		WithCircuitBreaker(FailureThreshold(2), RecoveryTimeout(time.Hour)),
 	)
 
@@ -173,24 +174,53 @@ func TestRegistryConcurrentReads(t *testing.T) {
 	reg := NewRegistry()
 	clk := newPolicyClock()
 
-	// Register a few policies.
-	for i := range 5 {
-		names := []string{"svc-a", "svc-b", "svc-c", "svc-d", "svc-e"}
-		_ = NewPolicy[string](names[i],
+	// Each policy carries a rate limiter and bulkhead so HealthStatus actually
+	// reaches Saturated() (which mutates refill state via CAS) and Bulkhead.Full
+	// on the read path — not just the trivially-safe breaker mutex.
+	names := []string{"svc-a", "svc-b", "svc-c", "svc-d", "svc-e"}
+	policies := make([]*Policy[string], len(names))
+
+	for i, name := range names {
+		policies[i] = NewPolicy[string](name,
 			WithClock(clk),
 			WithRegistry(reg),
 			WithCircuitBreaker(FailureThreshold(10)),
+			WithRateLimit(1000),
+			WithBulkhead(8),
 		)
 	}
 
 	var wg sync.WaitGroup
-	for range 50 {
+
+	// Writers drive Allow→refill (a CAS write) concurrently with the readers,
+	// so -race genuinely covers the write-on-read path the health walk reaches.
+	for range 10 {
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
-			status := reg.CheckReadiness()
-			assert.Len(t, status.Policies, 5)
+
+			for _, p := range policies {
+				_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
+					return "ok", nil
+				})
+			}
 		}()
+	}
+
+	// Readers exercise both walks: readiness gating and health aggregation.
+	for i := range 50 {
+		wg.Add(1)
+
+		go func(n int) {
+			defer wg.Done()
+
+			if n%2 == 0 {
+				assert.Len(t, reg.CheckReadiness().Policies, 5)
+			} else {
+				assert.Len(t, reg.Health().Policies, 5)
+			}
+		}(i)
 	}
 
 	wg.Wait()

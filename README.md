@@ -395,22 +395,25 @@ Hot-reload **retunes** existing patterns; it cannot **add or remove** them (the 
 
 ## Health & Readiness
 
-Policies automatically report health status. Wire up a Kubernetes `/readyz` endpoint in a few lines:
+Policies report health status, and the registry can expose it over HTTP.
+
+> **Readiness is opt-in.** By **default**, a policy's health does **not** affect the readiness probe — an open circuit breaker reports as unhealthy but does **not** remove the pod from rotation. This is deliberate: a shared downstream dependency degrading would otherwise trip the breaker on *every* replica at once and make Kubernetes pull the whole fleet, turning a dependency blip into a full outage. Gate readiness only on a dependency the pod genuinely cannot serve without, with `WithReadinessImpact()`. Use the probe's `failureThreshold`/`periodSeconds` for hysteresis.
 
 ```go
 import "net/http"
 
-// Policies auto-register with the default registry
 apiPolicy := r8e.NewPolicy[string]("api-gateway",
     r8e.WithCircuitBreaker(),
 )
 dbPolicy := r8e.NewPolicy[string]("database",
     r8e.WithCircuitBreaker(),
-    r8e.DependsOn(apiPolicy), // hierarchical dependency
+    r8e.WithReadinessImpact(), // this one DOES gate /readyz when its breaker opens
 )
 
-// Expose readiness endpoint (HTTP lives in the r8ehttp edge package)
+// /readyz gates traffic (503 when a readiness-impacting policy is critical).
 http.Handle("/readyz", r8ehttp.ReadinessHandler(r8e.DefaultRegistry()))
+// /healthz is informational — full per-policy health, always 200, never gates.
+http.Handle("/healthz", r8ehttp.HealthHandler(r8e.DefaultRegistry()))
 ```
 
 Check health programmatically:
@@ -418,8 +421,11 @@ Check health programmatically:
 ```go
 status := apiPolicy.HealthStatus()
 fmt.Println(status.Healthy)     // true/false
-fmt.Println(status.State)       // "healthy", "circuit_open", etc.
+fmt.Println(status.Conditions)  // all active conditions, e.g. ["rate_limited","bulkhead_full"]
+fmt.Println(status.State)       // deterministic most-severe summary: "circuit_open", "healthy", …
 fmt.Println(status.Criticality) // CriticalityNone, CriticalityDegraded, CriticalityCritical
+
+report := r8e.DefaultRegistry().Health() // aggregate: "healthy" | "degraded" | "unhealthy"
 ```
 
 ## Configuration

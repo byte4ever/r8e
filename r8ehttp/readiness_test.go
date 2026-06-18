@@ -53,6 +53,7 @@ func TestReadinessHandlerOneCritical(t *testing.T) {
 
 	policy := r8e.NewPolicy[string]("api-down",
 		r8e.WithRegistry(reg),
+		r8e.WithReadinessImpact(),
 		r8e.WithCircuitBreaker(
 			r8e.FailureThreshold(2),
 			r8e.RecoveryTimeout(time.Hour),
@@ -128,7 +129,7 @@ func TestReadinessHandlerJSONStructure(t *testing.T) {
 	var policies []map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(raw["policies"], &policies))
 	require.NotEmpty(t, policies)
-	for _, key := range []string{"name", "healthy", "criticality", "state"} {
+	for _, key := range []string{"name", "healthy", "criticality", "state", "affects_readiness"} {
 		assert.Contains(t, policies[0], key, "missing policy key %q", key)
 	}
 }
@@ -165,6 +166,7 @@ func TestReadinessHandlerServerEndToEnd(t *testing.T) {
 	)
 	unhealthy := r8e.NewPolicy[string]("unhealthy-service",
 		r8e.WithRegistry(reg),
+		r8e.WithReadinessImpact(),
 		r8e.WithCircuitBreaker(
 			r8e.FailureThreshold(2),
 			r8e.RecoveryTimeout(time.Hour),

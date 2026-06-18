@@ -134,7 +134,7 @@ func TestCircuitBreakerHalfOpenBoundsConcurrentProbes(t *testing.T) {
 
 	// After the probe succeeds, the breaker closes and admits calls again.
 	cb.RecordSuccess()
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 	require.NoError(t, cb.Allow())
 }
 
@@ -148,7 +148,7 @@ func TestCircuitBreakerHookMayReenter(t *testing.T) {
 
 	var (
 		cb          *CircuitBreaker
-		stateInHook string
+		stateInHook CircuitState
 	)
 
 	hooks := &Hooks{
@@ -168,7 +168,7 @@ func TestCircuitBreakerHookMayReenter(t *testing.T) {
 		t.Fatal("RecordFailure deadlocked — hook ran while holding cb.mu")
 	}
 
-	require.Equal(t, "open", stateInHook)
+	require.Equal(t, CircuitOpen, stateInHook)
 }
 
 func TestCircuitBreakerHalfOpenAdmitsUpToMax(t *testing.T) {

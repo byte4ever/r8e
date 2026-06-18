@@ -14,6 +14,9 @@ import (
 // stubClock — controllable clock for deterministic circuit breaker tests
 // ---------------------------------------------------------------------------
 
+// stubClock is NOT safe for concurrent use: its fields are read and written
+// without synchronisation. Use it only in single-goroutine tests; for
+// concurrent tests use the mutex-guarded policyClock instead.
 type stubClock struct {
 	now     time.Time
 	elapsed time.Duration // returned by Since, regardless of argument
@@ -81,15 +84,15 @@ func TestCircuitBreakerCustomConfig(t *testing.T) {
 	// Advance past custom recovery timeout (10s).
 	clk.setElapsed(11 * time.Second)
 	require.NoError(t, cb.Allow())
-	require.Equal(t, "half_open", cb.State())
+	require.Equal(t, CircuitHalfOpen, cb.State())
 
 	// Half-open: need 3 successes to close (custom halfOpenMaxAttempts = 3).
 	cb.RecordSuccess()
-	require.Equal(t, "half_open", cb.State())
+	require.Equal(t, CircuitHalfOpen, cb.State())
 	cb.RecordSuccess()
-	require.Equal(t, "half_open", cb.State())
+	require.Equal(t, CircuitHalfOpen, cb.State())
 	cb.RecordSuccess()
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +106,7 @@ func TestClosedStateAllowsCalls(t *testing.T) {
 	cb := NewCircuitBreaker(clk, &Hooks{})
 
 	require.NoError(t, cb.Allow())
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -120,12 +123,12 @@ func TestClosedStateOpensAtThreshold(t *testing.T) {
 	cb.RecordFailure()
 
 	// Still closed after 2 failures (threshold is 3).
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 
 	cb.RecordFailure()
 
 	// Now open.
-	require.Equal(t, "open", cb.State())
+	require.Equal(t, CircuitOpen, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +168,7 @@ func TestOpenToHalfOpenAfterRecoveryTimeout(t *testing.T) {
 	// Past recovery timeout.
 	clk.setElapsed(6 * time.Second)
 	require.NoError(t, cb.Allow())
-	require.Equal(t, "half_open", cb.State())
+	require.Equal(t, CircuitHalfOpen, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +193,7 @@ func TestHalfOpenSuccessClosesCircuit(t *testing.T) {
 
 	cb.RecordSuccess()
 
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +217,7 @@ func TestHalfOpenFailureReopensCircuit(t *testing.T) {
 
 	cb.RecordFailure()
 
-	require.Equal(t, "open", cb.State())
+	require.Equal(t, CircuitOpen, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -235,11 +238,11 @@ func TestSuccessInClosedStateResetsFailureCount(t *testing.T) {
 	// Now record 2 more failures — should NOT open (count was reset).
 	cb.RecordFailure()
 	cb.RecordFailure()
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 
 	// The 3rd failure after reset should open.
 	cb.RecordFailure()
-	require.Equal(t, "open", cb.State())
+	require.Equal(t, CircuitOpen, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -255,14 +258,14 @@ func TestStateReturnsCorrectStrings(t *testing.T) {
 		RecoveryTimeout(1*time.Second),
 	)
 
-	require.Equal(t, "closed", cb.State())
+	require.Equal(t, CircuitClosed, cb.State())
 
 	cb.RecordFailure()
-	require.Equal(t, "open", cb.State())
+	require.Equal(t, CircuitOpen, cb.State())
 
 	clk.setElapsed(2 * time.Second)
 	cb.Allow() // triggers half-open
-	require.Equal(t, "half_open", cb.State())
+	require.Equal(t, CircuitHalfOpen, cb.State())
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +364,39 @@ func TestCircuitBreakerConcurrentAccess(t *testing.T) {
 	// Just verify it didn't panic or race — the race detector will catch
 	// issues.
 	state := cb.State()
-	assert.Contains(t, []string{"closed", "open", "half_open"}, state)
+	assert.Contains(t, []CircuitState{CircuitClosed, CircuitOpen, CircuitHalfOpen}, state)
+}
+
+// TestCircuitBreakerStateFailsSafe forces an unrecognised internal state and
+// asserts State() reports open rather than healthy — so a future state added
+// without updating the State() switch can never look ready.
+func TestCircuitBreakerStateFailsSafe(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker(&stubClock{now: time.Now()}, &Hooks{})
+	cb.state = 99 // not stateClosed/stateOpen/stateHalfOpen
+
+	assert.Equal(t, CircuitOpen, cb.State())
+}
+
+// TestCircuitBreakerRecoveryBoundaryInclusive pins the recovery-window
+// comparison: at exactly RecoveryTimeout the breaker must still reject (the
+// check is `<=`, inclusive). A `<` mutation would admit a probe one tick early.
+func TestCircuitBreakerRecoveryBoundaryInclusive(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(time.Second),
+	)
+
+	cb.RecordFailure() // threshold 1 → open
+	require.Equal(t, CircuitOpen, cb.State())
+
+	clk.setElapsed(time.Second) // exactly at the boundary
+
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 }
 
 // ---------------------------------------------------------------------------
