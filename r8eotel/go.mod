@@ -3,8 +3,9 @@ module github.com/byte4ever/r8e/r8eotel
 go 1.25.5
 
 require (
-	// Needs core API introduced in v0.2.0 (r8e.PolicyMetrics, Registry.Snapshot).
-	github.com/byte4ever/r8e v0.2.0
+	// Needs core API through v0.4.0 (r8e.PolicyMetrics incl. the RetryBudget
+	// metrics, Registry.Snapshot).
+	github.com/byte4ever/r8e v0.4.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
