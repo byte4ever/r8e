@@ -167,7 +167,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	}
 
 	if p.circuitBreaker != nil {
-		metrics.CircuitState = p.circuitBreaker.State()
+		metrics.CircuitState = string(p.circuitBreaker.State())
 	}
 
 	if p.rateLimiter != nil {

@@ -16,6 +16,21 @@ type (
 		Ready    bool           `json:"ready"`
 	}
 
+	// HealthReport is the aggregate health of all registered policies. Unlike
+	// [ReadinessStatus] it never gates traffic — expose it on an informational
+	// endpoint (see r8ehttp.HealthHandler), separate from the readiness probe.
+	HealthReport struct {
+		// Status is the aggregate health across all policies.
+		Status   HealthState    `json:"status"`
+		Policies []PolicyStatus `json:"policies"`
+	}
+
+	// HealthState is the aggregate health level reported by [Registry.Health].
+	// It is derived from the worst per-policy [Criticality] across the registry:
+	// critical → unhealthy, degraded → degraded, otherwise healthy. This rollup
+	// mapping is intentionally separate from the per-condition severity table.
+	HealthState string
+
 	// Registry tracks HealthReporter instances and derives readiness status.
 	//
 	// Pattern: Singleton — DefaultRegistry uses sync.OnceValue for safe lazy
@@ -25,6 +40,15 @@ type (
 		reporters atomic.Pointer[[]HealthReporter]
 		mu        sync.Mutex
 	}
+)
+
+const (
+	// HealthHealthy means every policy is healthy.
+	HealthHealthy HealthState = "healthy"
+	// HealthDegraded means at least one policy is impaired but none is down.
+	HealthDegraded HealthState = "degraded"
+	// HealthUnhealthy means at least one policy is critically unhealthy.
+	HealthUnhealthy HealthState = "unhealthy"
 )
 
 //nolint:gochecknoglobals // singleton via sync.OnceValue
@@ -49,8 +73,10 @@ func (r *Registry) Register(hr HealthReporter) {
 	defer r.mu.Unlock()
 
 	old := *r.reporters.Load()
-	// Create a new slice (copy-on-write) to avoid mutating the slice
-	// that concurrent readers may be iterating.
+	// Copy-on-write. The capacity MUST equal len(old): a concurrent reader holds
+	// the old backing array, so any spare capacity here would let append scribble
+	// into the slot a reader is iterating. cap==len forces a fresh allocation on
+	// every grow, keeping published snapshots immutable. Do not pre-grow.
 	updated := make([]HealthReporter, len(old), len(old)+1)
 	copy(updated, old)
 	updated = append(updated, hr)
@@ -58,8 +84,9 @@ func (r *Registry) Register(hr HealthReporter) {
 }
 
 // CheckReadiness iterates all registered reporters and builds a
-// ReadinessStatus.
-// Ready is false if any policy has CriticalityCritical and is unhealthy.
+// ReadinessStatus. Ready is false only when a policy that opted into readiness
+// impact (WithReadinessImpact) is critically down — a critically unhealthy
+// policy that did not opt in is reported but does not gate traffic.
 func (r *Registry) CheckReadiness() ReadinessStatus {
 	reporters := *r.reporters.Load()
 
@@ -72,13 +99,49 @@ func (r *Registry) CheckReadiness() ReadinessStatus {
 		ps := hr.HealthStatus()
 		status.Policies = append(status.Policies, ps)
 
-		// A critical unhealthy policy makes the service not ready.
-		if ps.Criticality == CriticalityCritical && !ps.Healthy {
+		// Only a policy that opted into readiness impact (WithReadinessImpact)
+		// removes the pod from rotation — a critically unhealthy policy without
+		// it is reported but does not gate traffic.
+		if ps.AffectsReadiness && ps.criticallyDown() {
 			status.Ready = false
 		}
 	}
 
 	return status
+}
+
+// Health returns the aggregate health of all registered policies. It always
+// reports the full picture and never gates traffic; wire it to an
+// informational endpoint, not the Kubernetes readiness probe.
+func (r *Registry) Health() HealthReport {
+	reporters := *r.reporters.Load()
+
+	report := HealthReport{
+		Policies: make([]PolicyStatus, 0, len(reporters)),
+		Status:   HealthHealthy,
+	}
+
+	worst := CriticalityNone
+
+	for _, hr := range reporters {
+		ps := hr.HealthStatus()
+		report.Policies = append(report.Policies, ps)
+
+		if ps.Criticality > worst {
+			worst = ps.Criticality
+		}
+	}
+
+	switch {
+	case worst >= CriticalityCritical:
+		report.Status = HealthUnhealthy
+	case worst >= CriticalityDegraded:
+		report.Status = HealthDegraded
+	default:
+		// Status stays HealthHealthy.
+	}
+
+	return report
 }
 
 // Snapshot returns a [PolicyMetrics] for every registered policy that exposes

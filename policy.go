@@ -35,6 +35,9 @@ type (
 		retry   *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
 		name    string
 		deps    []HealthReporter
+		// affectsReadiness gates Kubernetes readiness when this policy is
+		// critically unhealthy (see WithReadinessImpact). False by default.
+		affectsReadiness bool
 	}
 
 	// retryRuntime is the hot-swappable retry configuration read per call.
@@ -70,6 +73,8 @@ type (
 		fallbackValue  *staticFallback
 		fallbackFunc   *funcFallback
 		deps           []HealthReporter
+
+		affectsReadiness bool
 	}
 
 	// retryDesc holds deferred retry configuration.
@@ -233,6 +238,22 @@ func DependsOn(reporters ...HealthReporter) Option {
 	})
 }
 
+// WithReadinessImpact makes this policy gate Kubernetes readiness: when it is
+// critically unhealthy (e.g. its circuit breaker is open), [Registry.CheckReadiness]
+// reports Ready=false and the readiness handler returns 503.
+//
+// Without this option (the default) a policy's health is reported but never
+// removes the pod from rotation. This avoids correlated, fleet-wide readiness
+// flips when a shared downstream dependency degrades and trips the breaker on
+// every replica at once. Enable it only for a dependency the pod genuinely
+// cannot serve without; rely on the probe's failureThreshold/periodSeconds for
+// hysteresis.
+func WithReadinessImpact() Option {
+	return optionFunc(func(s *policySetup) {
+		s.affectsReadiness = true
+	})
+}
+
 // ---------------------------------------------------------------------------
 // NewPolicy[T] — construct and wire up the policy
 // ---------------------------------------------------------------------------.
@@ -323,17 +344,18 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	}
 
 	policy := &Policy[T]{
-		name:           name,
-		chain:          chain,
-		circuitBreaker: circuitBreaker,
-		rateLimiter:    rateLimiter,
-		bulkhead:       bulkhead,
-		metrics:        metrics,
-		timeout:        timeoutCell,
-		hedge:          hedgeCell,
-		retry:          retryCell,
-		deps:           setup.deps,
-		registry:       reg,
+		name:             name,
+		chain:            chain,
+		circuitBreaker:   circuitBreaker,
+		rateLimiter:      rateLimiter,
+		bulkhead:         bulkhead,
+		metrics:          metrics,
+		timeout:          timeoutCell,
+		hedge:            hedgeCell,
+		retry:            retryCell,
+		deps:             setup.deps,
+		affectsReadiness: setup.affectsReadiness,
+		registry:         reg,
 	}
 
 	if reg != nil {

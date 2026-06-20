@@ -394,22 +394,25 @@ Le hot-reload **règle** les patterns existants ; il ne peut **ni ajouter ni ret
 
 ## Santé et readiness
 
-Les policies remontent automatiquement leur état de santé. Connectez un endpoint Kubernetes `/readyz` en quelques lignes :
+Les policies remontent leur état de santé, et le registre peut l'exposer en HTTP.
+
+> **La readiness est opt-in.** Par **défaut**, la santé d'une policy **n'affecte pas** la sonde de readiness — un circuit breaker ouvert est remonté comme unhealthy mais **ne retire pas** le pod de la rotation. C'est délibéré : sinon, une dépendance partagée qui se dégrade ouvrirait le breaker sur **tous** les réplicas en même temps et ferait retirer toute la flotte par Kubernetes, transformant un hoquet de dépendance en panne totale. Ne gatez la readiness que sur une dépendance sans laquelle le pod ne peut pas servir, avec `WithReadinessImpact()`. Utilisez `failureThreshold`/`periodSeconds` de la sonde pour l'hystérésis.
 
 ```go
 import "net/http"
 
-// Les policies s'enregistrent automatiquement dans le registre par défaut
 apiPolicy := r8e.NewPolicy[string]("api-gateway",
     r8e.WithCircuitBreaker(),
 )
 dbPolicy := r8e.NewPolicy[string]("database",
     r8e.WithCircuitBreaker(),
-    r8e.DependsOn(apiPolicy), // dépendance hiérarchique
+    r8e.WithReadinessImpact(), // celle-ci gate /readyz quand son breaker s'ouvre
 )
 
-// Exposer l'endpoint de readiness (le HTTP vit dans le package edge r8ehttp)
+// /readyz gate le trafic (503 si une policy readiness-impacting est critique).
 http.Handle("/readyz", r8ehttp.ReadinessHandler(r8e.DefaultRegistry()))
+// /healthz est informationnel — santé complète par policy, toujours 200, jamais de gate.
+http.Handle("/healthz", r8ehttp.HealthHandler(r8e.DefaultRegistry()))
 ```
 
 Vérifier la santé par programmation :
@@ -417,8 +420,11 @@ Vérifier la santé par programmation :
 ```go
 status := apiPolicy.HealthStatus()
 fmt.Println(status.Healthy)     // true/false
-fmt.Println(status.State)       // "healthy", "circuit_open", etc.
+fmt.Println(status.Conditions)  // toutes les conditions actives, ex. ["rate_limited","bulkhead_full"]
+fmt.Println(status.State)       // résumé déterministe le plus sévère : "circuit_open", "healthy", …
 fmt.Println(status.Criticality) // CriticalityNone, CriticalityDegraded, CriticalityCritical
+
+report := r8e.DefaultRegistry().Health() // agrégat : "healthy" | "degraded" | "unhealthy"
 ```
 
 ## Configuration

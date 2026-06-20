@@ -224,10 +224,12 @@ func TestIntegrationHierarchicalHealth(t *testing.T) {
 	clk := newPolicyClock()
 	reg := NewRegistry()
 
-	// Create a child policy with a circuit breaker.
+	// Create a child policy with a circuit breaker. It gates readiness so the
+	// registry reports not-ready when the child's breaker opens.
 	child := NewPolicy[string]("child-db",
 		WithClock(clk),
 		WithRegistry(reg),
+		WithReadinessImpact(),
 		WithCircuitBreaker(FailureThreshold(2), RecoveryTimeout(time.Hour)),
 	)
 

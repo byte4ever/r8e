@@ -1,5 +1,6 @@
 // Example 13-health-readiness: Demonstrates HealthReporter, DependsOn,
-// and exposing an HTTP /readyz endpoint.
+// WithReadinessImpact, and exposing /readyz (gates traffic) and /healthz
+// (informational, always 200) endpoints.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -29,6 +30,10 @@ func main() {
 			r8e.FailureThreshold(2),
 			r8e.RecoveryTimeout(30*time.Second),
 		),
+		// The pod cannot serve without the database, so gate readiness on it.
+		// Without WithReadinessImpact a policy's health is reported but never
+		// removes the pod from rotation.
+		r8e.WithReadinessImpact(),
 		r8e.WithRegistry(reg),
 	)
 	apiPolicy := r8e.NewPolicy[string](
@@ -80,6 +85,20 @@ func main() {
 		"  ",
 	)
 	fmt.Printf("  %s\n", pretty)
+
+	// --- HTTP health endpoint (always 200; never gates traffic) ---
+	fmt.Println("\n=== HTTP /healthz Endpoint ===")
+
+	healthRec := httptest.NewRecorder()
+	r8ehttp.HealthHandler(reg).
+		ServeHTTP(healthRec, httptest.NewRequest("GET", "/healthz", http.NoBody))
+	fmt.Printf("  HTTP %d\n", healthRec.Code)
+
+	var health map[string]any
+
+	//nolint:errcheck // example program
+	_ = json.Unmarshal(healthRec.Body.Bytes(), &health)
+	fmt.Printf("  status: %v\n", health["status"])
 
 	_ = apiPolicy // keep compiler happy
 }

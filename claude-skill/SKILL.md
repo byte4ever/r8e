@@ -171,22 +171,25 @@ Named policies auto-register with `DefaultRegistry()`. Health is inferred from p
 - Circuit breaker open -> `CriticalityCritical`, unhealthy
 - Rate limiter saturated / bulkhead full -> `CriticalityDegraded`
 
-```go
-status := policy.HealthStatus() // PolicyStatus
+`PolicyStatus.Conditions []string` lists ALL active conditions (order-independent); `State` is a deterministic most-severe summary derived from them.
 
-// Hierarchical dependencies
+**Readiness is opt-in.** By default a policy's health does NOT gate the readiness probe (an open breaker is reported but does not pull the pod). This avoids fleet-wide readiness flips when a shared dependency trips every replica's breaker at once. Gate only with `WithReadinessImpact()`, and rely on the probe's `failureThreshold` for hysteresis.
+
+```go
+status := policy.HealthStatus() // PolicyStatus{Healthy, State, Conditions, Criticality, AffectsReadiness, ...}
+
 dbPolicy := r8e.NewPolicy[*Result]("database",
     r8e.WithCircuitBreaker(),
+    r8e.WithReadinessImpact(),     // gate /readyz on this policy
     r8e.DependsOn(apiPolicy),
 )
 
-// Kubernetes /readyz endpoint (HTTP handler lives in the r8ehttp edge package)
+// /readyz gates traffic (503 only when a readiness-impacting policy is critical).
 http.Handle("/readyz", r8ehttp.ReadinessHandler(r8e.DefaultRegistry()))
+// /healthz is informational: full report, always 200, never gates.
+http.Handle("/healthz", r8ehttp.HealthHandler(r8e.DefaultRegistry()))
 
-// Custom registry
-reg := r8e.NewRegistry()
-policy := r8e.NewPolicy[string]("svc", r8e.WithRegistry(reg), ...)
-http.Handle("/readyz", r8ehttp.ReadinessHandler(reg))
+report := reg.Health() // r8e.HealthReport{Status: "healthy"|"degraded"|"unhealthy", Policies}
 ```
 
 ## StaleCache (Standalone, Not Part of Policy)

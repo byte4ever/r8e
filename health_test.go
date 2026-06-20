@@ -15,6 +15,8 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestCriticalityString(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		c    Criticality
@@ -28,6 +30,8 @@ func TestCriticalityString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			assert.Equal(t, tt.want, tt.c.String())
 		})
 	}
@@ -38,6 +42,8 @@ func TestCriticalityString(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHealthyPolicyNoPatterns(t *testing.T) {
+	t.Parallel()
+
 	p := NewPolicy[string]("empty")
 
 	status := p.HealthStatus()
@@ -45,7 +51,7 @@ func TestHealthyPolicyNoPatterns(t *testing.T) {
 	require.Equal(t, "empty", status.Name)
 	require.True(t, status.Healthy)
 	require.Equal(t, CriticalityNone, status.Criticality)
-	require.Equal(t, "healthy", status.State)
+	require.Equal(t, ConditionHealthy, status.State)
 	require.Empty(t, status.Dependencies)
 }
 
@@ -54,6 +60,8 @@ func TestHealthyPolicyNoPatterns(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHealthyPolicyCircuitBreakerClosed(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 
 	p := NewPolicy[string]("cb-closed",
@@ -65,7 +73,7 @@ func TestHealthyPolicyCircuitBreakerClosed(t *testing.T) {
 
 	require.True(t, status.Healthy)
 	require.Equal(t, CriticalityNone, status.Criticality)
-	require.Equal(t, "healthy", status.State)
+	require.Equal(t, ConditionHealthy, status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +81,8 @@ func TestHealthyPolicyCircuitBreakerClosed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestUnhealthyCircuitBreakerOpen(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 
 	p := NewPolicy[string]("cb-open",
@@ -93,7 +103,7 @@ func TestUnhealthyCircuitBreakerOpen(t *testing.T) {
 
 	require.False(t, status.Healthy)
 	require.Equal(t, CriticalityCritical, status.Criticality)
-	require.Equal(t, "circuit_open", status.State)
+	require.Equal(t, ConditionCircuitOpen, status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +112,8 @@ func TestUnhealthyCircuitBreakerOpen(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitBreakerHalfOpen(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 
 	// Use HalfOpenMaxAttempts(2) so that one success keeps it in half_open.
@@ -136,7 +148,7 @@ func TestCircuitBreakerHalfOpen(t *testing.T) {
 	status := p.HealthStatus()
 
 	require.True(t, status.Healthy)
-	require.Equal(t, "circuit_half_open", status.State)
+	require.Equal(t, ConditionCircuitHalfOpen, status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +156,8 @@ func TestCircuitBreakerHalfOpen(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimiterSaturated(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 
 	p := NewPolicy[string]("rl-sat",
@@ -161,7 +175,7 @@ func TestRateLimiterSaturated(t *testing.T) {
 	status := p.HealthStatus()
 
 	require.Equal(t, CriticalityDegraded, status.Criticality)
-	require.Equal(t, "rate_limited", status.State)
+	require.Equal(t, ConditionRateLimited, status.State)
 	// Rate limiter saturation alone doesn't make policy unhealthy.
 	require.True(t, status.Healthy)
 }
@@ -171,6 +185,8 @@ func TestRateLimiterSaturated(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBulkheadFull(t *testing.T) {
+	t.Parallel()
+
 	p := NewPolicy[string]("bh-full",
 		WithBulkhead(1),
 	)
@@ -197,7 +213,7 @@ func TestBulkheadFull(t *testing.T) {
 	close(done) // Release the slot.
 
 	require.Equal(t, CriticalityDegraded, status.Criticality)
-	require.Equal(t, "bulkhead_full", status.State)
+	require.Equal(t, ConditionBulkheadFull, status.State)
 	require.True(t, status.Healthy)
 }
 
@@ -207,6 +223,8 @@ func TestBulkheadFull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCircuitOpenOverridesRateLimited(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 
 	p := NewPolicy[string]("cb-rl",
@@ -233,7 +251,7 @@ func TestCircuitOpenOverridesRateLimited(t *testing.T) {
 
 	require.False(t, status.Healthy)
 	require.Equal(t, CriticalityCritical, status.Criticality)
-	require.Equal(t, "circuit_open", status.State)
+	require.Equal(t, ConditionCircuitOpen, status.State)
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +260,8 @@ func TestCircuitOpenOverridesRateLimited(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDependencyPropagation(t *testing.T) {
+	t.Parallel()
+
 	clk := newPolicyClock()
 
 	child := NewPolicy[string]("child",
@@ -280,6 +300,8 @@ func TestDependencyPropagation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDependsOnOption(t *testing.T) {
+	t.Parallel()
+
 	dep1 := NewPolicy[string]("dep1")
 	dep2 := NewPolicy[int]("dep2") // Different type parameter!
 
@@ -292,6 +314,14 @@ func TestDependsOnOption(t *testing.T) {
 	require.Len(t, status.Dependencies, 2)
 	require.Equal(t, "dep1", status.Dependencies[0].Name)
 	require.Equal(t, "dep2", status.Dependencies[1].Name)
+
+	// Both dependencies are healthy, so they must contribute NO condition and
+	// leave the parent healthy. This pins the criticallyDown() guard in
+	// collectConditions: appending ConditionDependencyDegraded unconditionally
+	// would make Conditions non-empty and Criticality degraded here.
+	assert.Empty(t, status.Conditions)
+	assert.Equal(t, CriticalityNone, status.Criticality)
+	assert.True(t, status.Healthy)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +330,8 @@ func TestDependsOnOption(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHealthReporterInterface(t *testing.T) {
+	t.Parallel()
+
 	var _ HealthReporter = NewPolicy[string]("interface-check")
 	var _ HealthReporter = NewPolicy[int]("interface-check-int")
 

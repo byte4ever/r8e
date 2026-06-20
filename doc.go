@@ -4,8 +4,10 @@
 // like retry, circuit breaker, timeout, rate limiting, and more. Policies
 // automatically report health status for Kubernetes readiness probes.
 //
-// This package depends only on the standard library. File-based configuration
-// loading lives in the r8econf subpackage (os + JSON), and the readiness HTTP
-// handler lives in the r8ehttp subpackage (net/http), keeping infrastructure
-// out of the core.
+// This package depends only on the standard library and imports no transport
+// or persistence machinery: file loading lives in the r8econf subpackage and
+// the HTTP probe handlers live in the r8ehttp subpackage (net/http). The core
+// status types do carry json struct tags — JSON is the canonical wire format
+// for the Kubernetes probes this library exists to feed — but the core itself
+// performs no serialization and starts no server.
 package r8e
