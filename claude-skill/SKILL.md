@@ -27,6 +27,7 @@ Options are `any`-typed to support both generic (`WithFallback[T]`) and non-gene
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
 Fallback > Timeout > CircuitBreaker > RateLimiter > Bulkhead > Retry > Hedge.
+The retry budget is not a stage; it gates retries from within Retry.
 
 ## Pattern Options
 
@@ -50,6 +51,28 @@ r8e.WithRetry(maxAttempts int, strategy BackoffStrategy, opts ...RetryOption)
 **Options**: `r8e.MaxDelay(d)`, `r8e.PerAttemptTimeout(d)`, `r8e.RetryIf(func(error) bool)`.
 
 Returns `r8e.ErrRetriesExhausted` wrapping the last error.
+
+### Retry Budget
+
+```go
+r8e.WithRetryBudget(opts ...RetryBudgetOption)          // per-policy
+r8e.WithSharedRetryBudget(*RetryBudget)                 // shared across policies
+r8e.NewRetryBudget(opts ...RetryBudgetOption) *RetryBudget
+```
+
+Adaptive token bucket gating retries (gRPC `retryThrottling` model): every
+success adds `TokenRatio` tokens, every retryable failure removes one; retries
+are suppressed while tokens are at or below half capacity. Lives inside Retry
+(no separate priority) and **requires `WithRetry`** — a budget without retry
+panics in `NewPolicy` (or `BuildOptions` returns `r8e.ErrRetryBudgetWithoutRetry`
+for config-driven construction). A shared budget reports the same tokens/exhausted
+state under each sharing policy's name (aggregate gauge with max/avg, not sum).
+**Options**: `r8e.MaxTokens(n)` (default 10),
+`r8e.TokenRatio(r)` (default 0.1). When exhausted it suppresses the retry and
+returns the **real downstream error** (not a sentinel); first attempts always
+proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,
+`RetryBudgetExceeded`/`RetryBudgetTokens` metrics, `retry_budget_exhausted`
+health condition (degraded).
 
 ### Circuit Breaker
 
@@ -126,6 +149,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnHedgeTriggered:   func() {},
     OnHedgeWon:         func() {},
     OnFallbackUsed:     func(err error) {},
+    OnRetryBudgetExceeded: func() {},  // retry suppressed by the budget
 })
 ```
 
@@ -143,8 +167,9 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
-`HedgesTriggered`, `HedgesWon`, `FallbacksUsed`) and gauges (`CircuitState`,
-`BulkheadInUse`, `BulkheadCap`, `Saturated`, `Healthy`, `Criticality`).
+`HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`) and
+gauges (`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
+`Saturated`, `Healthy`, `Criticality`).
 
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
 `r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate
@@ -163,13 +188,15 @@ err := store.Reload("config.json")                                  // re-read f
 
 Cannot add/remove patterns (chain is fixed) → configuring an absent pattern
 returns `r8e.ErrPatternAbsent`; rebuild via GetPolicy/NewPolicy for structural
-changes. CircuitBreaker/RateLimiter/Bulkhead also expose direct `Reconfigure`.
+changes. CircuitBreaker/RateLimiter/Bulkhead/RetryBudget also expose direct
+`Reconfigure`. The retry budget reconfigures via `PolicyConfig.RetryBudget`
+(`max_tokens`, `token_ratio`).
 
 ## Health and Readiness
 
 Named policies auto-register with `DefaultRegistry()`. Health is inferred from pattern state:
 - Circuit breaker open -> `CriticalityCritical`, unhealthy
-- Rate limiter saturated / bulkhead full -> `CriticalityDegraded`
+- Rate limiter saturated / bulkhead full / retry budget exhausted -> `CriticalityDegraded`
 
 `PolicyStatus.Conditions []string` lists ALL active conditions (order-independent); `State` is a deterministic most-severe summary derived from them.
 
@@ -279,6 +306,7 @@ policy := r8e.NewPolicy[T]("api",
         "base_delay": "100ms",
         "max_delay": "5s"
       },
+      "retry_budget": { "max_tokens": 10, "token_ratio": 0.1 },
       "rate_limit": 100,
       "bulkhead": 10,
       "hedge": "200ms"

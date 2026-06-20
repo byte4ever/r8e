@@ -19,6 +19,11 @@ type Hooks struct {
 	OnHedgeTriggered   func()
 	OnHedgeWon         func()
 	OnFallbackUsed     func(err error)
+
+	// OnRetryBudgetExceeded fires when a retry is suppressed because the retry
+	// budget is exhausted. The underlying downstream error is still returned by
+	// the policy call.
+	OnRetryBudgetExceeded func()
 }
 
 func (h *Hooks) emitRetry(attempt int, err error) {
@@ -90,5 +95,11 @@ func (h *Hooks) emitHedgeWon() {
 func (h *Hooks) emitFallbackUsed(err error) {
 	if h.OnFallbackUsed != nil {
 		h.OnFallbackUsed(err)
+	}
+}
+
+func (h *Hooks) emitRetryBudgetExceeded() {
+	if h.OnRetryBudgetExceeded != nil {
+		h.OnRetryBudgetExceeded()
 	}
 }

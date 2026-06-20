@@ -33,6 +33,13 @@ var (
 	ErrTimeout error = resilienceError("timeout")
 	// ErrRetriesExhausted is returned when all retry attempts have been used.
 	ErrRetriesExhausted error = resilienceError("retries exhausted")
+	// ErrRetryBudgetWithoutRetry indicates a retry budget was configured on a
+	// policy that has no retry pattern; the budget would have nothing to gate.
+	// It is the value [NewPolicy] panics with and the error [BuildOptions]
+	// returns for the same misconfiguration sourced from config.
+	ErrRetryBudgetWithoutRetry error = resilienceError(
+		"retry budget requires a retry pattern",
+	)
 )
 
 func (e *transientError) Error() string { return "transient: " + e.err.Error() }

@@ -24,10 +24,20 @@ type (
 		HedgesTriggered  int64 `json:"hedges_triggered"`
 		HedgesWon        int64 `json:"hedges_won"`
 		FallbacksUsed    int64 `json:"fallbacks_used"`
+		// RetryBudgetExceeded counts retries suppressed by the retry budget.
+		RetryBudgetExceeded int64 `json:"retry_budget_exceeded"`
 
 		// Live gauges at snapshot time.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
 		BulkheadCap   int64 `json:"bulkhead_cap"`    // configured slot capacity
+		// RetryBudgetTokens is the retry budget's current token level. It is 0
+		// both for a policy with no retry budget and for one whose budget has
+		// fully drained; read it together with whether the policy has a budget
+		// (a non-zero capacity) to tell the two apart. When one RetryBudget is
+		// shared across policies (WithSharedRetryBudget), every sharing policy
+		// reports the same level under its own name — aggregate with max/avg,
+		// not sum.
+		RetryBudgetTokens float64 `json:"retry_budget_tokens"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -38,16 +48,17 @@ type (
 	// wired in via instrumented [Hooks], so every emitted lifecycle event
 	// increments its counter regardless of whether the caller set that hook.
 	policyMetrics struct {
-		retries          atomic.Int64
-		timeouts         atomic.Int64
-		circuitOpens     atomic.Int64
-		circuitCloses    atomic.Int64
-		circuitHalfOpens atomic.Int64
-		rateLimited      atomic.Int64
-		bulkheadRejected atomic.Int64
-		hedgesTriggered  atomic.Int64
-		hedgesWon        atomic.Int64
-		fallbacksUsed    atomic.Int64
+		retries             atomic.Int64
+		timeouts            atomic.Int64
+		circuitOpens        atomic.Int64
+		circuitCloses       atomic.Int64
+		circuitHalfOpens    atomic.Int64
+		rateLimited         atomic.Int64
+		bulkheadRejected    atomic.Int64
+		hedgesTriggered     atomic.Int64
+		hedgesWon           atomic.Int64
+		fallbacksUsed       atomic.Int64
+		retryBudgetExceeded atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -142,6 +153,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnFallbackUsed(err)
 			}
 		},
+		OnRetryBudgetExceeded: func() {
+			m.retryBudgetExceeded.Add(1)
+
+			if user.OnRetryBudgetExceeded != nil {
+				user.OnRetryBudgetExceeded()
+			}
+		},
 	}
 }
 
@@ -151,19 +169,20 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	health := p.HealthStatus()
 
 	metrics := PolicyMetrics{
-		Name:             p.name,
-		Retries:          p.metrics.retries.Load(),
-		Timeouts:         p.metrics.timeouts.Load(),
-		CircuitOpens:     p.metrics.circuitOpens.Load(),
-		CircuitCloses:    p.metrics.circuitCloses.Load(),
-		CircuitHalfOpens: p.metrics.circuitHalfOpens.Load(),
-		RateLimited:      p.metrics.rateLimited.Load(),
-		BulkheadRejected: p.metrics.bulkheadRejected.Load(),
-		HedgesTriggered:  p.metrics.hedgesTriggered.Load(),
-		HedgesWon:        p.metrics.hedgesWon.Load(),
-		FallbacksUsed:    p.metrics.fallbacksUsed.Load(),
-		Criticality:      health.Criticality,
-		Healthy:          health.Healthy,
+		Name:                p.name,
+		Retries:             p.metrics.retries.Load(),
+		Timeouts:            p.metrics.timeouts.Load(),
+		CircuitOpens:        p.metrics.circuitOpens.Load(),
+		CircuitCloses:       p.metrics.circuitCloses.Load(),
+		CircuitHalfOpens:    p.metrics.circuitHalfOpens.Load(),
+		RateLimited:         p.metrics.rateLimited.Load(),
+		BulkheadRejected:    p.metrics.bulkheadRejected.Load(),
+		HedgesTriggered:     p.metrics.hedgesTriggered.Load(),
+		HedgesWon:           p.metrics.hedgesWon.Load(),
+		FallbacksUsed:       p.metrics.fallbacksUsed.Load(),
+		RetryBudgetExceeded: p.metrics.retryBudgetExceeded.Load(),
+		Criticality:         health.Criticality,
+		Healthy:             health.Healthy,
 	}
 
 	if p.circuitBreaker != nil {
@@ -177,6 +196,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	if p.bulkhead != nil {
 		metrics.BulkheadInUse = p.bulkhead.InUse()
 		metrics.BulkheadCap = p.bulkhead.Cap()
+	}
+
+	if p.retryBudget != nil {
+		metrics.RetryBudgetTokens = p.retryBudget.Tokens()
 	}
 
 	return metrics

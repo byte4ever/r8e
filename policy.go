@@ -25,6 +25,7 @@ type (
 		circuitBreaker *CircuitBreaker
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
+		retryBudget    *RetryBudget
 		registry       *Registry
 		metrics        *policyMetrics
 		// Reloadable cells for the stateless patterns; nil when the pattern is
@@ -72,6 +73,7 @@ type (
 		hedge          *time.Duration
 		fallbackValue  *staticFallback
 		fallbackFunc   *funcFallback
+		retryBudget    *RetryBudget
 		deps           []HealthReporter
 
 		affectsReadiness bool
@@ -179,6 +181,26 @@ func WithRetry(
 	})
 }
 
+// WithRetryBudget adds an adaptive retry budget that throttles retries when the
+// downstream failure rate drains the budget, preventing retry storms. It
+// requires WithRetry; a policy configured with a budget but no retry pattern
+// panics in NewPolicy. To coordinate retries across several policies, share one
+// budget via NewRetryBudget and WithSharedRetryBudget instead.
+func WithRetryBudget(opts ...RetryBudgetOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.retryBudget = NewRetryBudget(opts...)
+	})
+}
+
+// WithSharedRetryBudget attaches an existing RetryBudget, letting several
+// policies share one bucket so their retries are throttled in concert. Like
+// WithRetryBudget it requires WithRetry. A nil budget is ignored.
+func WithSharedRetryBudget(budget *RetryBudget) Option {
+	return optionFunc(func(s *policySetup) {
+		s.retryBudget = budget
+	})
+}
+
 // WithCircuitBreaker adds a circuit breaker that fast-fails when the downstream
 // is unhealthy.
 func WithCircuitBreaker(opts ...CircuitBreakerOption) Option {
@@ -268,6 +290,14 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		opt.apply(&setup)
 	}
 
+	// A retry budget gates retries; without a retry pattern it has nothing to
+	// do, so reject the misconfiguration loudly rather than silently ignore it.
+	// BuildOptions catches the same case for config-driven construction and
+	// returns ErrRetryBudgetWithoutRetry instead of reaching this panic.
+	if setup.retryBudget != nil && setup.retry == nil {
+		panic(ErrRetryBudgetWithoutRetry)
+	}
+
 	if setup.clock == nil {
 		setup.clock = RealClock{}
 	}
@@ -301,7 +331,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 			opts:        setup.retry.opts,
 			maxAttempts: setup.retry.maxAttempts,
 		})
-		entries = append(entries, newRetryEntry[T](retryCell, &hooks, clock))
+		entries = append(
+			entries,
+			newRetryEntry[T](retryCell, &hooks, clock, setup.retryBudget),
+		)
 	}
 
 	if setup.circuitBreaker != nil {
@@ -349,6 +382,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker:   circuitBreaker,
 		rateLimiter:      rateLimiter,
 		bulkhead:         bulkhead,
+		retryBudget:      setup.retryBudget,
 		metrics:          metrics,
 		timeout:          timeoutCell,
 		hedge:            hedgeCell,
@@ -385,6 +419,7 @@ func newRetryEntry[T any](
 	cell *atomic.Pointer[retryRuntime],
 	hooks *Hooks,
 	clock Clock,
+	budget *RetryBudget,
 ) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityRetry,
@@ -398,6 +433,7 @@ func newRetryEntry[T any](
 					Strategy:    rt.strategy,
 					Hooks:       hooks,
 					Clock:       clock,
+					Budget:      budget,
 					Opts:        rt.opts,
 				})
 			}

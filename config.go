@@ -29,6 +29,9 @@ type (
 		// Bulkhead is the maximum concurrent requests.
 		// Optional. Example: 10.
 		Bulkhead *int `json:"bulkhead,omitempty" yaml:"bulkhead,omitempty"`
+		// RetryBudget configures the adaptive retry budget. Requires Retry.
+		// Optional. Example: {"max_tokens": 10, "token_ratio": 0.1}.
+		RetryBudget *RetryBudgetConfig `json:"retry_budget,omitempty" yaml:"retry_budget,omitempty"`
 	}
 
 	// CircuitBreakerConfig holds circuit breaker configuration
@@ -63,6 +66,18 @@ type (
 		// MaxAttempts is the maximum number of retry attempts.
 		// Required. Example: 3.
 		MaxAttempts *int `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+	}
+
+	// RetryBudgetConfig holds retry-budget configuration values. Embed it
+	// (via [PolicyConfig]) in your own config struct for JSON or YAML
+	// unmarshaling.
+	RetryBudgetConfig struct {
+		// MaxTokens is the budget capacity.
+		// Optional. Example: 10.
+		MaxTokens *int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+		// TokenRatio is the tokens returned per success.
+		// Optional. Example: 0.1.
+		TokenRatio *float64 `json:"token_ratio,omitempty" yaml:"token_ratio,omitempty"`
 	}
 )
 
@@ -120,7 +135,40 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		opts = append(opts, WithHedge(d))
 	}
 
+	if pc.RetryBudget != nil {
+		// A retry budget gates retries; a config that asks for one without a
+		// retry block would panic in NewPolicy. Reject it here so config-driven
+		// misconfiguration surfaces as an error, not a panic.
+		if pc.Retry == nil {
+			return nil, fmt.Errorf(
+				"retry_budget: %w",
+				ErrRetryBudgetWithoutRetry,
+			)
+		}
+
+		opts = append(
+			opts,
+			WithRetryBudget(retryBudgetOptionsFromConfig(pc.RetryBudget)...),
+		)
+	}
+
 	return opts, nil
+}
+
+// retryBudgetOptionsFromConfig converts a [RetryBudgetConfig] into retry-budget
+// options. Shared by [BuildOptions] and [Policy.Reconfigure].
+func retryBudgetOptionsFromConfig(cfg *RetryBudgetConfig) []RetryBudgetOption {
+	var opts []RetryBudgetOption
+
+	if cfg.MaxTokens != nil {
+		opts = append(opts, MaxTokens(*cfg.MaxTokens))
+	}
+
+	if cfg.TokenRatio != nil {
+		opts = append(opts, TokenRatio(*cfg.TokenRatio))
+	}
+
+	return opts
 }
 
 // cbOptionsFromConfig converts a [CircuitBreakerConfig] into circuit-breaker

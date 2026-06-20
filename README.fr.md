@@ -54,6 +54,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 |---|---|
 | **Timeout** | Annule les appels lents après un délai |
 | **Retry** | Réessaie les erreurs transitoires avec backoff configurable (constant, exponentiel, linéaire, jitter) |
+| **Retry Budget** | Token bucket adaptatif qui throttle les retries quand les échecs dominent, évitant les retry storms |
 | **Circuit Breaker** | Échoue rapidement quand une dépendance est en panne, récupération automatique via sonde half-open |
 | **Rate Limiter** | Contrôle de débit par token bucket (mode rejet ou blocage) |
 | **Bulkhead** | Limitation de concurrence par sémaphore |
@@ -304,12 +305,52 @@ Requête
       → Circuit Breaker  (échec rapide si ouvert)
         → Rate Limiter   (contrôle du débit)
           → Bulkhead     (limite la concurrence)
-            → Retry       (réessaie les erreurs transitoires)
+            → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
               → Hedge     (le plus interne — lance des appels redondants)
                 → fn()    (votre fonction)
 ```
 
+Le retry budget n'est pas une étape séparée : il vit à l'intérieur de Retry et
+throttle les tentatives de retry selon le ratio succès/échec courant (voir [Retry Budget](#retry-budget)).
+
 StaleCache est autonome et enveloppe l'appel entier de la policy depuis l'extérieur (voir [Stale Cache](#stale-cache)).
+
+## Retry Budget
+
+Un retry budget plafonne le nombre de retries relativement au taux d'échec, pour
+qu'une dépendance en difficulté ne soit pas ensevelie sous une *retry storm*. Il
+suit le modèle `retryThrottling` de gRPC : un token bucket adaptatif (capacité
+`MaxTokens`) où chaque succès rend `TokenRatio` tokens et chaque échec réessayable
+en retire un. Tant que le bucket est à la moitié de sa capacité ou en dessous,
+les retries sont supprimés — l'appel renvoie l'erreur réelle du downstream, et la
+tentative initiale de chaque requête passe toujours.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(50*time.Millisecond)),
+    r8e.WithRetryBudget(r8e.MaxTokens(10), r8e.TokenRatio(0.1)), // défauts gRPC
+)
+```
+
+Pour coordonner les retries entre plusieurs policies d'un même process,
+construisez un budget et partagez-le :
+
+```go
+budget := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.TokenRatio(0.1))
+
+a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
+b := r8e.NewPolicy[string]("b", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
+```
+
+Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
+`NewPolicy` (ou, en construction par config, `BuildOptions` renvoie
+`ErrRetryBudgetWithoutRetry`). Le throttling est observable via le hook
+`OnRetryBudgetExceeded`, les métriques `RetryBudgetExceeded` /
+`RetryBudgetTokens`, et une condition de santé dégradée `retry_budget_exhausted`
+(elle ne bloque jamais la readiness — les tentatives initiales passent toujours).
+Un budget *partagé* reporte le même niveau de tokens et la même condition sous le
+nom de chaque policy qui le partage : agrégez sa jauge avec `max`/`avg`, pas
+`sum`. Voir [`examples/19-retry-budget`](examples/19-retry-budget).
 
 ## Classification des erreurs
 

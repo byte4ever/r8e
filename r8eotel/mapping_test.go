@@ -62,6 +62,17 @@ func (m erroringMeter) Int64ObservableGauge(
 	return m.Meter.Int64ObservableGauge(name, options...)
 }
 
+func (m erroringMeter) Float64ObservableGauge(
+	name string,
+	options ...metric.Float64ObservableGaugeOption,
+) (metric.Float64ObservableGauge, error) {
+	if m.failOn == "gauge_f64" {
+		return nil, errors.New("float gauge create failed")
+	}
+
+	return m.Meter.Float64ObservableGauge(name, options...)
+}
+
 func (m erroringMeter) RegisterCallback(
 	callback metric.Callback,
 	instruments ...metric.Observable,
@@ -77,9 +88,10 @@ func TestRegisterPropagatesInstrumentError(t *testing.T) {
 	reg := r8e.NewRegistry()
 
 	cases := map[string]string{
-		"counter":  "counter create failed",
-		"gauge":    "gauge create failed",
-		"register": "register otel metrics callback", // wrapped
+		"counter":   "counter create failed",
+		"gauge":     "gauge create failed",
+		"gauge_f64": "float gauge create failed",
+		"register":  "register otel metrics callback", // wrapped
 	}
 
 	for failOn, wantSub := range cases {

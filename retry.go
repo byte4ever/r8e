@@ -22,6 +22,7 @@ type (
 		Strategy    BackoffStrategy
 		Hooks       *Hooks
 		Clock       Clock
+		Budget      *RetryBudget
 		Opts        []RetryOption
 		MaxAttempts int
 	}
@@ -61,7 +62,7 @@ func RetryIf(fn func(error) bool) RetryOption {
 func DoRetry[T any](
 	ctx context.Context,
 	fn func(context.Context) (T, error),
-	params RetryParams,
+	params RetryParams, //nolint:gocritic // by-value keeps exported signature stable
 ) (T, error) {
 	var cfg retryConfig
 	for _, opt := range params.Opts {
@@ -95,26 +96,43 @@ func DoRetry[T any](
 			result, err = fn(ctx)
 		}
 
-		// On success: return result immediately.
+		// On success: credit the retry budget and return immediately.
 		if err == nil {
+			params.Budget.recordSuccess()
+
 			return result, nil
 		}
 
 		lastErr = err
 
-		// If error is Permanent: stop immediately.
+		// If error is Permanent: stop immediately. A non-retryable failure
+		// leaves the budget untouched — it cannot drive a retry storm.
 		if IsPermanent(err) {
 			return zero, err //nolint:wrapcheck // caller's error returned as-is
 		}
 
-		// If retryIf predicate is set and returns false: stop.
+		// If retryIf predicate is set and returns false: stop (non-retryable).
 		if cfg.retryIf != nil && !cfg.retryIf(err) {
 			return zero, err //nolint:wrapcheck // caller's error returned as-is
 		}
 
+		// Retryable failure: charge it against the retry budget. The terminal
+		// attempt is charged too — it is a real downstream failure and a
+		// storm contributor — even though no retry follows it.
+		params.Budget.recordFailure()
+
 		// If this is the last attempt, don't sleep or emit hook.
 		if attempt == maxAttempts-1 {
 			break
+		}
+
+		// If the budget is exhausted, stop retrying and return the real
+		// downstream error; the suppression is observable via the
+		// OnRetryBudgetExceeded hook and metrics, not the error value.
+		if !params.Budget.allowRetry() {
+			params.Hooks.emitRetryBudgetExceeded()
+
+			return zero, lastErr //nolint:wrapcheck // real downstream error
 		}
 
 		// Emit OnRetry hook with 1-indexed attempt number.

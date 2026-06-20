@@ -133,6 +133,19 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 		actions = append(actions, func() { p.retry.Store(rt) })
 	}
 
+	if cfg.RetryBudget != nil {
+		if p.retryBudget == nil {
+			return absentPatternError("retry_budget")
+		}
+
+		budgetOpts := retryBudgetOptionsFromConfig(cfg.RetryBudget)
+
+		actions = append(
+			actions,
+			func() { p.retryBudget.Reconfigure(budgetOpts...) },
+		)
+	}
+
 	// Phase 2 — all validated; apply.
 	for _, apply := range actions {
 		apply()

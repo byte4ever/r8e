@@ -68,6 +68,9 @@ const (
 	ConditionDependencyDegraded Condition = "dependency_degraded"
 	// ConditionCircuitHalfOpen means the breaker is probing recovery.
 	ConditionCircuitHalfOpen Condition = "circuit_half_open"
+	// ConditionRetryBudgetExhausted means the retry budget is throttling
+	// retries (degraded); first attempts still flow.
+	ConditionRetryBudgetExhausted Condition = "retry_budget_exhausted"
 )
 
 // conditionSeverity is the single source of truth for the degradation model: it
@@ -85,6 +88,7 @@ var conditionSeverity = []struct {
 	{ConditionCircuitOpen, CriticalityCritical},
 	{ConditionRateLimited, CriticalityDegraded},
 	{ConditionBulkheadFull, CriticalityDegraded},
+	{ConditionRetryBudgetExhausted, CriticalityDegraded},
 	{ConditionDependencyDegraded, CriticalityDegraded},
 	{ConditionCircuitHalfOpen, CriticalityNone},
 }
@@ -152,6 +156,11 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// Bulkhead — degraded (not unhealthy on its own).
 	if p.bulkhead != nil && p.bulkhead.Full() {
 		conditions = append(conditions, ConditionBulkheadFull)
+	}
+
+	// Retry budget — degraded; retries are throttled but first attempts flow.
+	if p.retryBudget != nil && p.retryBudget.Exhausted() {
+		conditions = append(conditions, ConditionRetryBudgetExhausted)
 	}
 
 	// Dependencies — a critically-down dependency degrades this policy.

@@ -21,13 +21,19 @@ type (
 		get  func(*r8e.PolicyMetrics) int64
 	}
 
+	observationFloat64 struct {
+		inst metric.Float64Observable
+		get  func(*r8e.PolicyMetrics) float64
+	}
+
 	// instrumentBuilder accumulates instruments and the first error
 	// encountered while creating them.
 	instrumentBuilder struct {
-		meter        metric.Meter
-		err          error
-		observations []observation
-		instruments  []metric.Observable
+		meter           metric.Meter
+		err             error
+		observations    []observation
+		observationsF64 []observationFloat64
+		instruments     []metric.Observable
 	}
 )
 
@@ -67,6 +73,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.HedgesWon })
 	builder.counter("r8e.policy.fallbacks_used", "Fallbacks invoked",
 		func(m *r8e.PolicyMetrics) int64 { return m.FallbacksUsed })
+	builder.counter("r8e.policy.retry_budget_exceeded", "Retries suppressed by the retry budget",
+		func(m *r8e.PolicyMetrics) int64 { return m.RetryBudgetExceeded })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })
@@ -78,6 +86,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Healthy }))
 	builder.gauge("r8e.policy.saturated", "1 if the rate limiter has no tokens, else 0",
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Saturated }))
+	builder.gaugeFloat64("r8e.policy.retry_budget_tokens", "Retry budget tokens currently available",
+		func(m *r8e.PolicyMetrics) float64 { return m.RetryBudgetTokens })
 
 	if builder.err != nil {
 		return nil, builder.err
@@ -92,6 +102,10 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 				)
 				for _, obs := range builder.observations {
 					observer.ObserveInt64(obs.inst, obs.get(&snapshot[i]), attrs)
+				}
+
+				for _, obs := range builder.observationsF64 {
+					observer.ObserveFloat64(obs.inst, obs.get(&snapshot[i]), attrs)
 				}
 			}
 
@@ -140,6 +154,31 @@ func (b *instrumentBuilder) gauge(
 	}
 
 	b.add(inst, get)
+}
+
+func (b *instrumentBuilder) gaugeFloat64(
+	name, desc string,
+	get func(*r8e.PolicyMetrics) float64,
+) {
+	if b.err != nil {
+		return
+	}
+
+	inst, err := b.meter.Float64ObservableGauge(
+		name,
+		metric.WithDescription(desc),
+	)
+	if err != nil {
+		b.err = err
+
+		return
+	}
+
+	b.observationsF64 = append(
+		b.observationsF64,
+		observationFloat64{inst: inst, get: get},
+	)
+	b.instruments = append(b.instruments, inst)
 }
 
 func (b *instrumentBuilder) add(

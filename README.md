@@ -55,6 +55,7 @@ health reporting, and configuration hot-reload.
 |---|---|
 | **Timeout** | Cancel slow calls after a deadline |
 | **Retry** | Retry transient failures with pluggable backoff (constant, exponential, linear, jitter) |
+| **Retry Budget** | Adaptive token bucket that throttles retries when failures dominate, preventing retry storms |
 | **Circuit Breaker** | Fast-fail when a dependency is down, auto-recover via half-open probe |
 | **Rate Limiter** | Token-bucket throughput control (reject or blocking mode) |
 | **Bulkhead** | Semaphore-based concurrency limiting |
@@ -305,12 +306,52 @@ Request
       → Circuit Breaker  (fast-fail if open)
         → Rate Limiter   (throttle throughput)
           → Bulkhead     (limit concurrency)
-            → Retry       (retry transient failures)
+            → Retry       (retry transient failures, gated by the retry budget)
               → Hedge     (innermost — races redundant calls)
                 → fn()    (your function)
 ```
 
+The retry budget is not a separate stage: it lives inside Retry, throttling
+retry attempts against the live success/failure ratio (see [Retry Budget](#retry-budget)).
+
 StaleCache is standalone and wraps the entire policy call from the outside (see [Stale Cache](#stale-cache)).
+
+## Retry Budget
+
+A retry budget caps how many retries fire relative to the failure rate, so a
+struggling dependency is not buried under a *retry storm*. It follows gRPC's
+`retryThrottling` model: an adaptive token bucket (capacity `MaxTokens`) where
+every success returns `TokenRatio` tokens and every retryable failure removes
+one. While the bucket sits at or below half capacity, retries are suppressed —
+the call returns the real downstream error, and the original (first) attempt of
+every request always proceeds.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(50*time.Millisecond)),
+    r8e.WithRetryBudget(r8e.MaxTokens(10), r8e.TokenRatio(0.1)), // gRPC defaults
+)
+```
+
+To coordinate retries across several policies in one process, build one budget
+and share it:
+
+```go
+budget := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.TokenRatio(0.1))
+
+a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
+b := r8e.NewPolicy[string]("b", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
+```
+
+A budget requires `WithRetry` — configuring one without a retry pattern panics
+in `NewPolicy` (or, for config-driven construction, `BuildOptions` returns
+`ErrRetryBudgetWithoutRetry`). Throttling is observable via the
+`OnRetryBudgetExceeded` hook, the `RetryBudgetExceeded` / `RetryBudgetTokens`
+metrics, and a degraded `retry_budget_exhausted` health condition (it never
+gates readiness — first attempts still flow). A *shared* budget reports the same
+token level and exhausted condition under every sharing policy's name, so
+aggregate its gauge with `max`/`avg`, not `sum`. See
+[`examples/19-retry-budget`](examples/19-retry-budget).
 
 ## Error Classification
 
