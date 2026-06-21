@@ -24,6 +24,13 @@ type Hooks struct {
 	// budget is exhausted. The underlying downstream error is still returned by
 	// the policy call.
 	OnRetryBudgetExceeded func()
+
+	// OnCoalesceLeader fires when a call begins a shared execution for a
+	// coalescing key (it ran the work the followers share).
+	OnCoalesceLeader func()
+	// OnCoalesceFollower fires when a call joins a shared execution already in
+	// flight (its work was deduplicated away).
+	OnCoalesceFollower func()
 }
 
 func (h *Hooks) emitRetry(attempt int, err error) {
@@ -101,5 +108,17 @@ func (h *Hooks) emitFallbackUsed(err error) {
 func (h *Hooks) emitRetryBudgetExceeded() {
 	if h.OnRetryBudgetExceeded != nil {
 		h.OnRetryBudgetExceeded()
+	}
+}
+
+func (h *Hooks) emitCoalesceLeader() {
+	if h.OnCoalesceLeader != nil {
+		h.OnCoalesceLeader()
+	}
+}
+
+func (h *Hooks) emitCoalesceFollower() {
+	if h.OnCoalesceFollower != nil {
+		h.OnCoalesceFollower()
 	}
 }

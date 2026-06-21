@@ -26,6 +26,13 @@ type (
 		FallbacksUsed    int64 `json:"fallbacks_used"`
 		// RetryBudgetExceeded counts retries suppressed by the retry budget.
 		RetryBudgetExceeded int64 `json:"retry_budget_exceeded"`
+		// CoalesceLeaders counts calls that ran a shared execution; together with
+		// CoalesceFollowers it gives the deduplication ratio
+		// followers/(leaders+followers).
+		CoalesceLeaders int64 `json:"coalesce_leaders"`
+		// CoalesceFollowers counts calls deduplicated into an in-flight execution
+		// — the downstream calls coalescing saved.
+		CoalesceFollowers int64 `json:"coalesce_followers"`
 
 		// Live gauges at snapshot time.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
@@ -38,6 +45,9 @@ type (
 		// reports the same level under its own name — aggregate with max/avg,
 		// not sum.
 		RetryBudgetTokens float64 `json:"retry_budget_tokens"`
+		// CoalesceInFlight is the number of distinct coalescing keys currently
+		// executing; 0 when the policy has no coalescer.
+		CoalesceInFlight int64 `json:"coalesce_in_flight"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -59,6 +69,8 @@ type (
 		hedgesWon           atomic.Int64
 		fallbacksUsed       atomic.Int64
 		retryBudgetExceeded atomic.Int64
+		coalesceLeaders     atomic.Int64
+		coalesceFollowers   atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -160,6 +172,20 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnRetryBudgetExceeded()
 			}
 		},
+		OnCoalesceLeader: func() {
+			m.coalesceLeaders.Add(1)
+
+			if user.OnCoalesceLeader != nil {
+				user.OnCoalesceLeader()
+			}
+		},
+		OnCoalesceFollower: func() {
+			m.coalesceFollowers.Add(1)
+
+			if user.OnCoalesceFollower != nil {
+				user.OnCoalesceFollower()
+			}
+		},
 	}
 }
 
@@ -181,6 +207,8 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		HedgesWon:           p.metrics.hedgesWon.Load(),
 		FallbacksUsed:       p.metrics.fallbacksUsed.Load(),
 		RetryBudgetExceeded: p.metrics.retryBudgetExceeded.Load(),
+		CoalesceLeaders:     p.metrics.coalesceLeaders.Load(),
+		CoalesceFollowers:   p.metrics.coalesceFollowers.Load(),
 		Criticality:         health.Criticality,
 		Healthy:             health.Healthy,
 	}
@@ -200,6 +228,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 
 	if p.retryBudget != nil {
 		metrics.RetryBudgetTokens = p.retryBudget.Tokens()
+	}
+
+	if p.coalescer != nil {
+		metrics.CoalesceInFlight = int64(p.coalescer.InFlight())
 	}
 
 	return metrics

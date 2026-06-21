@@ -1,6 +1,6 @@
 ---
 name: r8e
-description: Guide for using the r8e Go resilience library. Use when writing, reviewing, or modifying code that uses github.com/byte4ever/r8e — including creating policies, composing resilience patterns (retry, circuit breaker, timeout, rate limiter, bulkhead, hedge, fallback, stale cache), classifying errors, wiring health/readiness, using the httpx adapter, or loading configuration from JSON. Also use when the user asks about resilience, fault tolerance, or retry patterns in Go.
+description: Guide for using the r8e Go resilience library. Use when writing, reviewing, or modifying code that uses github.com/byte4ever/r8e — including creating policies, composing resilience patterns (retry, circuit breaker, timeout, rate limiter, bulkhead, hedge, request coalescing/singleflight, fallback, stale cache), classifying errors, wiring health/readiness, using the httpx adapter, or loading configuration from JSON. Also use when the user asks about resilience, fault tolerance, or retry patterns in Go.
 ---
 
 # r8e — Go Resilience Library
@@ -26,7 +26,7 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Timeout > CircuitBreaker > RateLimiter > Bulkhead > Retry > Hedge.
+Fallback > Coalesce > Timeout > CircuitBreaker > RateLimiter > Bulkhead > Retry > Hedge.
 The retry budget is not a stage; it gates retries from within Retry.
 
 ## Pattern Options
@@ -111,6 +111,29 @@ r8e.WithHedge(delay time.Duration)
 
 Fires a second concurrent call after `delay`. Returns first success, cancels the other.
 
+### Request Coalescing (singleflight)
+
+```go
+r8e.WithCoalesce(keyFn func(context.Context) string)
+```
+
+Collapses concurrent calls sharing a key into one shared execution; followers
+wait for and share the leader's result (kills cache stampede). `keyFn` derives
+the key from the call context — stamp request identity into `ctx` upstream and
+read it back. An **empty** key opts that call out of coalescing. Sits just inside
+Fallback and outside every other pattern, so duplicates share one trip through
+the chain while each caller keeps its own fallback.
+
+The shared call runs under a **detached context** (`context.WithoutCancel`): one
+caller cancelling never aborts the group, and each caller still bails on its own
+`ctx.Done()`. Detaching strips the deadline, so **`WithCoalesce` requires
+`WithTimeout`** to bound the shared call. Two `NewPolicy` panics: a **nil** keyFn
+→ `r8e.ErrCoalesceNilKeyFunc`; **no `WithTimeout`** → `r8e.ErrCoalesceWithoutTimeout`.
+Not a cache (only dedups time-overlapping calls). Usable standalone via
+`r8e.NewCoalescer[T](hooks)` + `c.Do(ctx, key, fn)` (bound `fn` yourself — no
+policy timeout). Code-only — not expressible in `PolicyConfig` (the key function
+is code), so absent from `BuildOptions`/`Reconfigure`.
+
 ### Fallback
 
 ```go
@@ -150,6 +173,8 @@ r8e.WithHooks(&r8e.Hooks{
     OnHedgeWon:         func() {},
     OnFallbackUsed:     func(err error) {},
     OnRetryBudgetExceeded: func() {},  // retry suppressed by the budget
+    OnCoalesceLeader:   func() {},     // call ran a shared coalesced execution
+    OnCoalesceFollower: func() {},     // call deduplicated into an in-flight one
 })
 ```
 
@@ -167,8 +192,9 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
-`HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`) and
-gauges (`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
+`HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
+`CoalesceLeaders`, `CoalesceFollowers`) and gauges (`CircuitState`,
+`BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`, `CoalesceInFlight`,
 `Saturated`, `Healthy`, `Criticality`).
 
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
@@ -350,4 +376,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/18-httpx-retry`.
+Examples: `examples/01-quickstart` through `examples/20-coalesce`.

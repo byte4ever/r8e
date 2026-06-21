@@ -131,9 +131,11 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.bulkhead_rejected", "r8e.policy.hedges_triggered",
 		"r8e.policy.hedges_won", "r8e.policy.fallbacks_used",
 		"r8e.policy.retry_budget_exceeded",
+		"r8e.policy.coalesce_leaders", "r8e.policy.coalesce_followers",
 		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
 		"r8e.policy.circuit_state", "r8e.policy.healthy",
 		"r8e.policy.saturated", "r8e.policy.retry_budget_tokens",
+		"r8e.policy.coalesce_in_flight",
 	}
 	for _, name := range want {
 		assert.Contains(t, got, name)

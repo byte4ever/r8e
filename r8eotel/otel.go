@@ -75,6 +75,10 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.FallbacksUsed })
 	builder.counter("r8e.policy.retry_budget_exceeded", "Retries suppressed by the retry budget",
 		func(m *r8e.PolicyMetrics) int64 { return m.RetryBudgetExceeded })
+	builder.counter("r8e.policy.coalesce_leaders", "Calls that ran a shared coalesced execution",
+		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceLeaders })
+	builder.counter("r8e.policy.coalesce_followers", "Calls deduplicated by request coalescing",
+		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceFollowers })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })
@@ -86,6 +90,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Healthy }))
 	builder.gauge("r8e.policy.saturated", "1 if the rate limiter has no tokens, else 0",
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Saturated }))
+	builder.gauge("r8e.policy.coalesce_in_flight", "Distinct coalescing keys currently executing",
+		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceInFlight })
 	builder.gaugeFloat64("r8e.policy.retry_budget_tokens", "Retry budget tokens currently available",
 		func(m *r8e.PolicyMetrics) float64 { return m.RetryBudgetTokens })
 

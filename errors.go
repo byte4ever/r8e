@@ -40,6 +40,20 @@ var (
 	ErrRetryBudgetWithoutRetry error = resilienceError(
 		"retry budget requires a retry pattern",
 	)
+	// ErrCoalesceNilKeyFunc indicates [WithCoalesce] was given a nil key
+	// function; coalescing has no way to group calls without one. It is the
+	// value [NewPolicy] panics with for that misconfiguration.
+	ErrCoalesceNilKeyFunc error = resilienceError(
+		"coalesce requires a non-nil key function",
+	)
+	// ErrCoalesceWithoutTimeout indicates [WithCoalesce] was configured on a
+	// policy with no [WithTimeout]. The coalesced call runs under a context
+	// detached from its callers, so without a timeout to bound it a leader whose
+	// fn never returns would park a goroutine and wedge its key indefinitely. It
+	// is the value [NewPolicy] panics with for that misconfiguration.
+	ErrCoalesceWithoutTimeout error = resilienceError(
+		"coalesce requires a timeout to bound the detached shared call",
+	)
 )
 
 func (e *transientError) Error() string { return "transient: " + e.err.Error() }

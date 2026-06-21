@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 12 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 15 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -60,6 +60,7 @@ health reporting, and configuration hot-reload.
 | **Rate Limiter** | Token-bucket throughput control (reject or blocking mode) |
 | **Bulkhead** | Semaphore-based concurrency limiting |
 | **Hedged Requests** | Fire a second call after a delay to reduce tail latency |
+| **Request Coalescing** | Collapse concurrent identical calls into one shared execution (singleflight), killing cache stampede |
 | **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper with pluggable cache backends) |
 | **Fallback** | Static value or function fallback as last resort |
 
@@ -302,17 +303,23 @@ Patterns are auto-sorted by priority. The outermost middleware executes first:
 ```
 Request
   → Fallback          (outermost — catches final error)
-    → Timeout         (global deadline)
-      → Circuit Breaker  (fast-fail if open)
-        → Rate Limiter   (throttle throughput)
-          → Bulkhead     (limit concurrency)
-            → Retry       (retry transient failures, gated by the retry budget)
-              → Hedge     (innermost — races redundant calls)
-                → fn()    (your function)
+    → Coalesce        (collapse duplicate concurrent calls)
+      → Timeout         (global deadline)
+        → Circuit Breaker  (fast-fail if open)
+          → Rate Limiter   (throttle throughput)
+            → Bulkhead     (limit concurrency)
+              → Retry       (retry transient failures, gated by the retry budget)
+                → Hedge     (innermost — races redundant calls)
+                  → fn()    (your function)
 ```
 
 The retry budget is not a separate stage: it lives inside Retry, throttling
 retry attempts against the live success/failure ratio (see [Retry Budget](#retry-budget)).
+
+Coalescing sits just inside Fallback and outside everything else, so a burst of
+duplicate calls shares one trip through timeout, circuit breaker, rate limiter,
+bulkhead, retry, and hedge — while each caller still gets its own fallback (see
+[Request Coalescing](#request-coalescing)).
 
 StaleCache is standalone and wraps the entire policy call from the outside (see [Stale Cache](#stale-cache)).
 
@@ -353,6 +360,57 @@ token level and exhausted condition under every sharing policy's name, so
 aggregate its gauge with `max`/`avg`, not `sum`. See
 [`examples/19-retry-budget`](examples/19-retry-budget).
 
+## Request Coalescing
+
+Request coalescing (a.k.a. *singleflight*) collapses concurrent calls that share
+a key into a single shared execution: the first caller (the *leader*) runs the
+work, and every caller that arrives while it is in flight (a *follower*) waits
+for and shares that one result. When a hot cache key expires, N simultaneous
+misses become one downstream call instead of N — the classic cache-stampede fix.
+
+```go
+policy := r8e.NewPolicy[string]("user-fetch",
+    r8e.WithTimeout(time.Second),       // required — bounds the shared call
+    r8e.WithCoalesce(func(ctx context.Context) string {
+        return "user:" + userIDFrom(ctx) // derive the key from the call context
+    }),
+)
+```
+
+The key function reads the call's context, so stamp request identity into `ctx`
+upstream and read it back here. Returning an empty string opts a call out of
+coalescing entirely (it runs on its own). Two misconfigurations panic in
+`NewPolicy`: a nil key function (`ErrCoalesceNilKeyFunc`) and a policy with no
+`WithTimeout` to bound the detached shared call (`ErrCoalesceWithoutTimeout`).
+
+Coalescing deduplicates only calls that overlap in time; once the leader
+finishes its key is released, so a later call starts fresh. It is **not** a cache
+— put one in front or behind it for that.
+
+**Detached shared context.** The shared call runs under a context detached from
+any single caller (`context.WithoutCancel`), so one caller cancelling cannot
+abort work the whole group depends on, and the work runs to completion even if
+every caller leaves (handy for still populating a cache). Each caller — leader
+included — independently stops waiting the moment *its own* context is done and
+returns `ctx.Err()`, so a slow leader never pins a follower past its deadline.
+Detaching also strips the caller's deadline — which is why coalescing **requires**
+a `WithTimeout` to bound the shared work; without it a leader whose `fn` never
+returns would park a goroutine and wedge its key.
+
+Observability: the `OnCoalesceLeader` / `OnCoalesceFollower` hooks, the
+`CoalesceLeaders` / `CoalesceFollowers` counters (their ratio is the dedup rate),
+and the `CoalesceInFlight` gauge. Coalescing is a healthy optimisation, so it
+surfaces no health condition. See
+[`examples/20-coalesce`](examples/20-coalesce).
+
+A `Coalescer` can also be used standalone, without a `Policy` (there is no policy
+timeout here, so give `fetch` its own deadline):
+
+```go
+c := r8e.NewCoalescer[string](&r8e.Hooks{})
+val, err := c.Do(ctx, "user:42", fetch)
+```
+
 ## Error Classification
 
 Classify errors to control retry behavior:
@@ -388,7 +446,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (12): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`.
+Available hooks on `Hooks` (15): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -655,6 +713,10 @@ go run ./examples/13-health-readiness/
 go run ./examples/14-config/
 go run ./examples/15-presets/
 go run ./examples/16-convenience-do/
+go run ./examples/17-httpx-basic/
+go run ./examples/18-httpx-retry/
+go run ./examples/19-retry-budget/
+go run ./examples/20-coalesce/
 ```
 
 ## License

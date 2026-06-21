@@ -26,6 +26,7 @@ type (
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
 		retryBudget    *RetryBudget
+		coalescer      *Coalescer[T]
 		registry       *Registry
 		metrics        *policyMetrics
 		// Reloadable cells for the stateless patterns; nil when the pattern is
@@ -74,6 +75,7 @@ type (
 		fallbackValue  *staticFallback
 		fallbackFunc   *funcFallback
 		retryBudget    *RetryBudget
+		coalesce       *coalesceDesc
 		deps           []HealthReporter
 
 		affectsReadiness bool
@@ -95,6 +97,13 @@ type (
 	rateLimitDesc struct {
 		opts []RateLimitOption
 		rate float64
+	}
+
+	// coalesceDesc holds deferred request-coalescing configuration. A non-nil
+	// pointer marks coalescing as requested; keyFn nil within it is the
+	// misconfiguration NewPolicy rejects with ErrCoalesceNilKeyFunc.
+	coalesceDesc struct {
+		keyFn func(context.Context) string
 	}
 
 	// staticFallback carries a WithFallback value (typed T, erased to any).
@@ -233,6 +242,30 @@ func WithHedge(delay time.Duration) Option {
 	})
 }
 
+// WithCoalesce adds request coalescing (singleflight): concurrent calls for
+// which keyFn returns the same non-empty key collapse into a single shared
+// execution, and every caller receives that one result (see [Coalescer]). keyFn
+// derives the coalescing key from the call's context — stamp request identity
+// into ctx upstream and read it back here. Returning an empty string opts a call
+// out of coalescing, so it runs on its own.
+//
+// Coalescing sits just inside the fallback layer and outside every other
+// pattern, so the shared execution runs the timeout, circuit breaker, rate
+// limiter, bulkhead, retry, and hedge once for the whole group while each caller
+// still gets its own fallback.
+//
+// Because [Coalescer] runs the shared call under a context detached from its
+// callers, coalescing requires a [WithTimeout] to bound that call — a leader
+// whose fn never returns would otherwise park a goroutine and wedge its key.
+// Both a nil keyFn and a missing timeout are misconfigurations: [NewPolicy]
+// panics with [ErrCoalesceNilKeyFunc] or [ErrCoalesceWithoutTimeout]
+// respectively.
+func WithCoalesce(keyFn func(context.Context) string) Option {
+	return optionFunc(func(s *policySetup) {
+		s.coalesce = &coalesceDesc{keyFn: keyFn}
+	})
+}
+
 // WithFallback adds a static fallback value returned when the call fails.
 // The value's type must match the Policy's type parameter T; a mismatch panics
 // in [NewPolicy].
@@ -298,6 +331,19 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		panic(ErrRetryBudgetWithoutRetry)
 	}
 
+	if setup.coalesce != nil {
+		// Coalescing cannot group calls without a key function, and its detached
+		// shared call needs a timeout to bound it (see WithCoalesce). Reject both
+		// misconfigurations loudly rather than degrade silently or leak.
+		if setup.coalesce.keyFn == nil {
+			panic(ErrCoalesceNilKeyFunc)
+		}
+
+		if setup.timeout == nil {
+			panic(ErrCoalesceWithoutTimeout)
+		}
+	}
+
 	if setup.clock == nil {
 		setup.clock = RealClock{}
 	}
@@ -313,6 +359,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker *CircuitBreaker
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
+		coalescer      *Coalescer[T]
 		timeoutCell    *atomic.Int64
 		hedgeCell      *atomic.Int64
 		retryCell      *atomic.Pointer[retryRuntime]
@@ -358,6 +405,14 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		entries = append(entries, newHedgeEntry[T](hedgeCell, &hooks, clock))
 	}
 
+	if setup.coalesce != nil {
+		coalescer = NewCoalescer[T](&hooks)
+		entries = append(
+			entries,
+			newCoalesceEntry[T](coalescer, setup.coalesce.keyFn),
+		)
+	}
+
 	if setup.fallbackValue != nil {
 		entries = append(entries, newStaticFallbackEntry[T](*setup.fallbackValue, &hooks))
 	}
@@ -383,6 +438,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		rateLimiter:      rateLimiter,
 		bulkhead:         bulkhead,
 		retryBudget:      setup.retryBudget,
+		coalescer:        coalescer,
 		metrics:          metrics,
 		timeout:          timeoutCell,
 		hedge:            hedgeCell,
@@ -515,6 +571,27 @@ func newHedgeEntry[T any](cell *atomic.Int64, hooks *Hooks, clock Clock) Pattern
 					Hooks: hooks,
 					Clock: clock,
 				})
+			}
+		},
+	}
+}
+
+func newCoalesceEntry[T any](
+	coalescer *Coalescer[T],
+	keyFn func(context.Context) string,
+) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityCoalesce,
+		Name:     "coalesce",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				key := keyFn(ctx)
+				if key == "" {
+					// No key: opt this call out of coalescing entirely.
+					return next(ctx)
+				}
+
+				return coalescer.Do(ctx, key, next)
 			}
 		},
 	}

@@ -13,12 +13,13 @@ type PatternEntry[T any] struct {
 // Lower priority = outermost middleware (executed first).
 const (
 	priorityFallback       = 0 // outermost — last resort
-	priorityTimeout        = 1 // global timeout
-	priorityCircuitBreaker = 2
-	priorityRateLimiter    = 3
-	priorityBulkhead       = 4
-	priorityRetry          = 5
-	priorityHedge          = 6 // innermost — closest to user function
+	priorityCoalesce       = 1 // collapse duplicate concurrent calls before any work
+	priorityTimeout        = 2 // global timeout
+	priorityCircuitBreaker = 3
+	priorityRateLimiter    = 4
+	priorityBulkhead       = 5
+	priorityRetry          = 6
+	priorityHedge          = 7 // innermost — closest to user function
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).
