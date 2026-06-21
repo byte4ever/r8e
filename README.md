@@ -139,6 +139,15 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
+**Retry-After:** if a failed attempt's error implements `r8e.RetryAfterProvider`
+(`RetryAfter() (time.Duration, bool)`), retry honors that delay (with ±10% jitter,
+capped by `MaxDelay`) in place of the computed backoff — the precise wait a server
+asked for beats anything you'd guess. Attach a fixed hint to any error with
+`r8e.RetryAfterError(err, d)`, or implement the interface yourself; the
+[`httpx`](httpx) adapter does it automatically from an HTTP `429`/`503`
+`Retry-After` header (delay-seconds or HTTP-date). See
+[`examples/23-retry-after`](examples/23-retry-after).
+
 ### Circuit Breaker
 
 Fast-fail when a dependency is unhealthy. After `FailureThreshold` consecutive failures, the breaker opens. After `RecoveryTimeout`, it enters half-open state and allows a probe. `HalfOpenMaxAttempts` successful probes close the breaker.
@@ -784,6 +793,7 @@ go run ./examples/19-retry-budget/
 go run ./examples/20-coalesce/
 go run ./examples/21-adaptive-concurrency/
 go run ./examples/22-time-budget/
+go run ./examples/23-retry-after/
 ```
 
 ## License

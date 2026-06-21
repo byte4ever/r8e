@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/byte4ever/r8e"
 )
@@ -55,10 +56,59 @@ const (
 	Permanent
 )
 
+// Compile-time check that StatusError supplies a retry-after
+// hint to r8e's retry; a signature drift on either side fails
+// the build here rather than silently disabling the feature.
+//
+//nolint:errcheck // interface satisfaction assertion, not a discarded error
+var _ r8e.RetryAfterProvider = (*StatusError)(nil)
+
 // Error returns a human-readable description of the status
 // error.
 func (e *StatusError) Error() string {
 	return "http status " + strconv.Itoa(e.StatusCode)
+}
+
+// RetryAfter reports the delay requested by the response's
+// Retry-After header, parsing either the delay-seconds form
+// ("120") or the HTTP-date form ("Wed, 21 Oct 2026 07:28:00
+// GMT"). The second result is true only for a strictly positive
+// delay; an absent, unparseable, zero, negative, or already-past
+// value yields (0, false) so retry falls back to its configured
+// backoff. r8e's retry honors a positive hint over that backoff,
+// so an HTTP 429/503 with Retry-After is respected automatically.
+func (e *StatusError) RetryAfter() (time.Duration, bool) {
+	if e.Response == nil {
+		return 0, false
+	}
+
+	value := e.Response.Header.Get("Retry-After")
+	if value == "" {
+		return 0, false
+	}
+
+	// Delay-seconds form.
+	if secs, err := strconv.Atoi(value); err == nil {
+		return positiveDelay(time.Duration(secs) * time.Second)
+	}
+
+	// HTTP-date form: wait until the given instant.
+	if when, err := http.ParseTime(value); err == nil {
+		return positiveDelay(time.Until(when))
+	}
+
+	return 0, false
+}
+
+// positiveDelay reports d as a present hint only when it is
+// strictly positive; a non-positive delay carries no useful wait
+// and is reported as absent.
+func positiveDelay(d time.Duration) (time.Duration, bool) {
+	if d <= 0 {
+		return 0, false
+	}
+
+	return d, true
 }
 
 // NewClient creates a Client that executes HTTP requests

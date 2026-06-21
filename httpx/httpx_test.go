@@ -316,3 +316,67 @@ func TestStatusErrorMessage(t *testing.T) {
 	se := &httpx.StatusError{StatusCode: 503}
 	assert.Equal(t, "http status 503", se.Error())
 }
+
+// statusErrorWithRetryAfter builds a StatusError whose response carries the
+// given Retry-After header value (omitted when empty).
+func statusErrorWithRetryAfter(value string) *httpx.StatusError {
+	header := http.Header{}
+	if value != "" {
+		header.Set("Retry-After", value)
+	}
+
+	return &httpx.StatusError{
+		Response:   &http.Response{Header: header},
+		StatusCode: http.StatusTooManyRequests,
+	}
+}
+
+func TestStatusErrorRetryAfterSeconds(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		value   string
+		want    time.Duration
+		present bool
+	}{
+		"seconds":          {"120", 120 * time.Second, true},
+		"zero":             {"0", 0, false}, // non-positive -> no useful hint
+		"negative seconds": {"-5", 0, false},
+		"unparseable":      {"soon", 0, false},
+		"absent":           {"", 0, false},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := statusErrorWithRetryAfter(tc.value).RetryAfter()
+			assert.Equal(t, tc.present, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestStatusErrorRetryAfterHTTPDate(t *testing.T) {
+	t.Parallel()
+
+	// A future HTTP-date yields a positive, roughly-correct delay.
+	future := time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)
+	got, ok := statusErrorWithRetryAfter(future).RetryAfter()
+	require.True(t, ok)
+	assert.Greater(t, got, 55*time.Minute)
+	assert.LessOrEqual(t, got, time.Hour)
+
+	// A past HTTP-date carries no useful wait, so it is reported as absent.
+	past := time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)
+	got, ok = statusErrorWithRetryAfter(past).RetryAfter()
+	assert.False(t, ok)
+	assert.Equal(t, time.Duration(0), got)
+}
+
+func TestStatusErrorRetryAfterNilResponse(t *testing.T) {
+	t.Parallel()
+
+	_, ok := (&httpx.StatusError{StatusCode: 429}).RetryAfter()
+	assert.False(t, ok)
+}

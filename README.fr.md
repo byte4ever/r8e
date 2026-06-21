@@ -138,6 +138,15 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
+**Retry-After :** si l'erreur d'une tentative échouée implémente
+`r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
+ce délai (avec un jitter ±10%, plafonné par `MaxDelay`) à la place du backoff
+calculé — l'attente exacte demandée par le serveur vaut mieux que toute
+estimation. Attachez un indice fixe à n'importe quelle erreur avec
+`r8e.RetryAfterError(err, d)`, ou implémentez l'interface vous-même ; l'adaptateur
+[`httpx`](httpx) le fait automatiquement depuis un en-tête HTTP `429`/`503`
+`Retry-After` (secondes ou HTTP-date). Voir [`examples/23-retry-after`](examples/23-retry-after).
+
 ### Circuit Breaker
 
 Échoue rapidement quand une dépendance est en mauvais état. Après `FailureThreshold` échecs consécutifs, le breaker s'ouvre. Après `RecoveryTimeout`, il passe en état half-open et autorise une sonde. `HalfOpenMaxAttempts` sondes réussies referment le breaker.
@@ -786,6 +795,7 @@ go run ./examples/19-retry-budget/
 go run ./examples/20-coalesce/
 go run ./examples/21-adaptive-concurrency/
 go run ./examples/22-time-budget/
+go run ./examples/23-retry-after/
 ```
 
 ## Licence

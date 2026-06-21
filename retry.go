@@ -138,7 +138,13 @@ func DoRetry[T any](
 		// Compute backoff delay.
 		delay := params.Strategy.Delay(attempt)
 
-		// Apply MaxDelay cap.
+		// Honor a server-supplied Retry-After hint (e.g. an HTTP 429/503 header)
+		// over the computed backoff, with ±10% jitter to avoid a thundering herd.
+		if after, ok := retryAfterFromError(err); ok {
+			delay = jitteredRetryAfter(after)
+		}
+
+		// Apply MaxDelay cap (also bounds an over-large Retry-After).
 		if cfg.maxDelay > 0 && delay > cfg.maxDelay {
 			delay = cfg.maxDelay
 		}

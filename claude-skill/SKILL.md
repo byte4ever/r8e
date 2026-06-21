@@ -73,6 +73,14 @@ r8e.WithRetry(maxAttempts int, strategy BackoffStrategy, opts ...RetryOption)
 
 Returns `r8e.ErrRetriesExhausted` wrapping the last error.
 
+**Retry-After**: if a failed attempt's error implements `r8e.RetryAfterProvider`
+(`RetryAfter() (time.Duration, bool)`), retry honors that delay (±10% jitter,
+capped by `MaxDelay`) over the computed backoff. Attach a fixed hint to any error
+with `r8e.RetryAfterError(err, d)`, or implement the interface on your own type;
+the httpx adapter's `StatusError` implements it from the HTTP `429`/`503`
+`Retry-After` header (delay-seconds or HTTP-date), so httpx honors it
+automatically. Only a strictly-positive delay counts as a hint.
+
 ### Retry Budget
 
 ```go
@@ -344,6 +352,8 @@ resp, err := client.Do(ctx, req)
 // Transient: body drained+closed for connection reuse during retries
 // Permanent: body preserved but caller must close it
 // Access status: var se *httpx.StatusError; errors.As(err, &se)
+// StatusError.RetryAfter() parses the Retry-After header; retry honors it
+// automatically (over the configured backoff) on 429/503.
 ```
 
 ## Presets
@@ -420,4 +430,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/22-time-budget`.
+Examples: `examples/01-quickstart` through `examples/23-retry-after`.
