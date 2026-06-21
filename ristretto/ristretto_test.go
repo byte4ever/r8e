@@ -7,14 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/byte4ever/r8e"
 )
-
-// waitForAdmission gives ristretto time to process buffered writes.
-func waitForAdmission() {
-	//nolint:mnd // small sleep for ristretto's async admission policy
-	time.Sleep(10 * time.Millisecond)
-}
 
 func newTestConfig() r8e.CacheConfig {
 	return r8e.CacheConfig{
@@ -23,145 +20,127 @@ func newTestConfig() r8e.CacheConfig {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// New creates a valid cache without panicking
-// ---------------------------------------------------------------------------
+// awaitGet polls Get until the key is admitted — ristretto admits writes
+// asynchronously, so a deterministic poll replaces a fixed sleep.
+func awaitGet[K comparable, V any](
+	t *testing.T,
+	c r8e.Cache[K, V],
+	key K,
+) V {
+	t.Helper()
+
+	var val V
+
+	require.Eventuallyf(t, func() bool {
+		v, ok := c.Get(key)
+		val = v
+
+		return ok
+	}, time.Second, time.Millisecond, "key %v never admitted", key)
+
+	return val
+}
 
 func TestNewDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
-	if cache == nil {
-		t.Fatal("New() returned nil")
-	}
+	require.NotNil(t, cache)
 }
 
-// ---------------------------------------------------------------------------
-// Set + Get returns stored value (string key)
-// ---------------------------------------------------------------------------
+func TestMustNewPanicsOnInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "MustNew should panic on an invalid config")
+
+		msg, ok := r.(string)
+		require.True(t, ok, "panic value should be a string")
+		assert.Contains(t, msg, "r8e/ristretto: failed to build cache")
+	}()
+
+	_ = MustNew[string, string](r8e.CacheConfig{MaxSize: 0})
+}
 
 func TestSetGetStringKey(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
-
 	cache.Set("hello", "world", time.Minute)
-	waitForAdmission()
 
-	got, ok := cache.Get("hello")
-	if !ok {
-		t.Fatal("Get(hello) = _, false; want _, true")
-	}
-
-	if got != "world" {
-		t.Fatalf("Get(hello) = %q, want %q", got, "world")
-	}
+	assert.Equal(t, "world", awaitGet(t, cache, "hello"))
 }
-
-// ---------------------------------------------------------------------------
-// Set + Get returns stored value (int key)
-// ---------------------------------------------------------------------------
 
 func TestSetGetIntKey(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[int, int](newTestConfig())
-
 	cache.Set(42, 100, time.Minute)
-	waitForAdmission()
 
-	got, ok := cache.Get(42)
-	if !ok {
-		t.Fatal("Get(42) = _, false; want _, true")
-	}
-
-	if got != 100 {
-		t.Fatalf("Get(42) = %d, want 100", got)
-	}
+	assert.Equal(t, 100, awaitGet(t, cache, 42))
 }
-
-// ---------------------------------------------------------------------------
-// Set + Get returns stored value (uint64 key)
-// ---------------------------------------------------------------------------
 
 func TestSetGetUint64Key(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[uint64, string](newTestConfig())
-
 	cache.Set(99, "value", time.Minute)
-	waitForAdmission()
 
-	got, ok := cache.Get(99)
-	if !ok {
-		t.Fatal("Get(99) = _, false; want _, true")
-	}
-
-	if got != "value" {
-		t.Fatalf("Get(99) = %q, want %q", got, "value")
-	}
+	assert.Equal(t, "value", awaitGet(t, cache, uint64(99)))
 }
 
-// ---------------------------------------------------------------------------
-// Get on missing key returns zero + false
-// ---------------------------------------------------------------------------
-
 func TestGetMissingKeyReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
 
 	got, ok := cache.Get("missing")
-	if ok {
-		t.Fatal("Get(missing) = _, true; want _, false")
-	}
-
-	if got != "" {
-		t.Fatalf("Get(missing) = %q, want zero value", got)
-	}
+	assert.False(t, ok)
+	assert.Empty(t, got)
 }
-
-// ---------------------------------------------------------------------------
-// Delete removes entry
-// ---------------------------------------------------------------------------
 
 func TestDeleteRemovesEntry(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
-
 	cache.Set("key", "value", time.Minute)
-	waitForAdmission()
-
-	// Confirm it's there.
-	if _, ok := cache.Get("key"); !ok {
-		t.Fatal("Get(key) = _, false before Delete; want _, true")
-	}
+	_ = awaitGet(t, cache, "key")
 
 	cache.Delete("key")
-	waitForAdmission()
 
-	if _, ok := cache.Get("key"); ok {
-		t.Fatal("Get(key) = _, true after Delete; want _, false")
-	}
+	require.Eventually(t, func() bool {
+		_, ok := cache.Get("key")
+
+		return !ok
+	}, time.Second, time.Millisecond, "entry should be gone after Delete")
 }
-
-// ---------------------------------------------------------------------------
-// Set overwrites existing value
-// ---------------------------------------------------------------------------
 
 func TestSetOverwritesExistingValue(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
 
+	// Let the first write be admitted before overwriting, so the update is not
+	// racing the initial admission (ristretto applies writes asynchronously).
 	cache.Set("key", "old", time.Minute)
-	waitForAdmission()
+	require.Eventually(t, func() bool {
+		v, ok := cache.Get("key")
+
+		return ok && v == "old"
+	}, time.Second, time.Millisecond, "first write should be admitted")
 
 	cache.Set("key", "new", time.Minute)
-	waitForAdmission()
+	require.Eventually(t, func() bool {
+		v, ok := cache.Get("key")
 
-	got, ok := cache.Get("key")
-	if !ok {
-		t.Fatal("Get(key) = _, false; want _, true")
-	}
-
-	if got != "new" {
-		t.Fatalf("Get(key) = %q, want %q", got, "new")
-	}
+		return ok && v == "new"
+	}, time.Second, time.Millisecond, "overwrite should become visible")
 }
 
-// ---------------------------------------------------------------------------
-// Concurrent Set and Get
-// ---------------------------------------------------------------------------
-
 func TestConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[int, int](newTestConfig())
 
 	const goroutines = 50
@@ -182,21 +161,17 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// ---------------------------------------------------------------------------
-// Interface compliance: adapter satisfies r8e.Cache
-// ---------------------------------------------------------------------------
-
 func TestInterfaceCompliance(t *testing.T) {
+	t.Parallel()
+
 	var _ r8e.Cache[string, string] = MustNew[string, string](newTestConfig())
 	var _ r8e.Cache[int, int] = MustNew[int, int](newTestConfig())
 	var _ r8e.Cache[uint64, string] = MustNew[uint64, string](newTestConfig())
 }
 
-// ---------------------------------------------------------------------------
-// Integration: works with r8e.StaleCache
-// ---------------------------------------------------------------------------
-
 func TestIntegrationWithStaleCache(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
 	sc := r8e.NewStaleCache(cache, time.Minute)
 
@@ -208,16 +183,11 @@ func TestIntegrationWithStaleCache(t *testing.T) {
 			return "hello-" + key, nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-
-	if result != "hello-key1" {
-		t.Fatalf("Do() = %q, want %q", result, "hello-key1")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "hello-key1", result)
 
 	// Wait for ristretto's async admission before the stale-serve path.
-	waitForAdmission()
+	_ = awaitGet(t, cache, "key1")
 
 	// Second call fails — should serve stale.
 	result, err = sc.Do(
@@ -227,15 +197,10 @@ func TestIntegrationWithStaleCache(t *testing.T) {
 			return "", errors.New("downstream failure")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (stale served)", err)
-	}
+	require.NoError(t, err, "stale value should be served")
+	assert.Equal(t, "hello-key1", result)
 
-	if result != "hello-key1" {
-		t.Fatalf("Do() = %q, want %q (stale)", result, "hello-key1")
-	}
-
-	// Third call with unknown key fails — error propagates.
+	// Unknown key with no cache — error propagates.
 	sentinel := errors.New("no cache")
 
 	_, err = sc.Do(
@@ -245,15 +210,8 @@ func TestIntegrationWithStaleCache(t *testing.T) {
 			return "", sentinel
 		},
 	)
-
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
-
-// ---------------------------------------------------------------------------
-// Benchmark: Set + Get
-// ---------------------------------------------------------------------------
 
 func BenchmarkSetGet(b *testing.B) {
 	cache := MustNew[string, string](newTestConfig())

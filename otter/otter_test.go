@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/byte4ever/r8e"
 )
 
@@ -17,60 +20,46 @@ func newTestConfig() r8e.CacheConfig {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// New creates a valid cache without panicking
-// ---------------------------------------------------------------------------
-
 func TestNewDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
-	if cache == nil {
-		t.Fatal("New() returned nil")
-	}
+	require.NotNil(t, cache)
 }
 
-// ---------------------------------------------------------------------------
-// Set + Get returns stored value (string key)
-// ---------------------------------------------------------------------------
+func TestMustNewPanicsOnInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	require.Panics(t, func() {
+		_ = MustNew[string, string](r8e.CacheConfig{MaxSize: 0})
+	})
+}
 
 func TestSetGetStringKey(t *testing.T) {
-	cache := MustNew[string, string](newTestConfig())
+	t.Parallel()
 
+	cache := MustNew[string, string](newTestConfig())
 	cache.Set("hello", "world", time.Minute)
 
 	got, ok := cache.Get("hello")
-	if !ok {
-		t.Fatal("Get(hello) = _, false; want _, true")
-	}
-
-	if got != "world" {
-		t.Fatalf("Get(hello) = %q, want %q", got, "world")
-	}
+	require.True(t, ok)
+	assert.Equal(t, "world", got)
 }
 
-// ---------------------------------------------------------------------------
-// Set + Get returns stored value (int key)
-// ---------------------------------------------------------------------------
-
 func TestSetGetIntKey(t *testing.T) {
-	cache := MustNew[int, int](newTestConfig())
+	t.Parallel()
 
+	cache := MustNew[int, int](newTestConfig())
 	cache.Set(42, 100, time.Minute)
 
 	got, ok := cache.Get(42)
-	if !ok {
-		t.Fatal("Get(42) = _, false; want _, true")
-	}
-
-	if got != 100 {
-		t.Fatalf("Get(42) = %d, want 100", got)
-	}
+	require.True(t, ok)
+	assert.Equal(t, 100, got)
 }
 
-// ---------------------------------------------------------------------------
-// Set + Get with struct value
-// ---------------------------------------------------------------------------
-
 func TestSetGetStructValue(t *testing.T) {
+	t.Parallel()
+
 	type user struct {
 		Name string
 		Age  int
@@ -82,80 +71,51 @@ func TestSetGetStructValue(t *testing.T) {
 	cache.Set("user:1", want, time.Minute)
 
 	got, ok := cache.Get("user:1")
-	if !ok {
-		t.Fatal("Get(user:1) = _, false; want _, true")
-	}
-
-	if got != want {
-		t.Fatalf("Get(user:1) = %+v, want %+v", got, want)
-	}
+	require.True(t, ok)
+	assert.Equal(t, want, got)
 }
 
-// ---------------------------------------------------------------------------
-// Get on missing key returns zero + false
-// ---------------------------------------------------------------------------
-
 func TestGetMissingKeyReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
 
 	got, ok := cache.Get("missing")
-	if ok {
-		t.Fatal("Get(missing) = _, true; want _, false")
-	}
-
-	if got != "" {
-		t.Fatalf("Get(missing) = %q, want zero value", got)
-	}
+	assert.False(t, ok)
+	assert.Empty(t, got)
 }
 
-// ---------------------------------------------------------------------------
-// Delete removes entry
-// ---------------------------------------------------------------------------
-
 func TestDeleteRemovesEntry(t *testing.T) {
-	cache := MustNew[string, string](newTestConfig())
+	t.Parallel()
 
+	cache := MustNew[string, string](newTestConfig())
 	cache.Set("key", "value", time.Minute)
 
-	// Confirm it's there.
-	if _, ok := cache.Get("key"); !ok {
-		t.Fatal("Get(key) = _, false before Delete; want _, true")
-	}
+	_, ok := cache.Get("key")
+	require.True(t, ok, "entry should be present before Delete")
 
 	cache.Delete("key")
 
-	if _, ok := cache.Get("key"); ok {
-		t.Fatal("Get(key) = _, true after Delete; want _, false")
-	}
+	_, ok = cache.Get("key")
+	assert.False(t, ok, "entry should be gone after Delete")
 }
 
-// ---------------------------------------------------------------------------
-// Set overwrites existing value
-// ---------------------------------------------------------------------------
-
 func TestSetOverwritesExistingValue(t *testing.T) {
-	cache := MustNew[string, string](newTestConfig())
+	t.Parallel()
 
+	cache := MustNew[string, string](newTestConfig())
 	cache.Set("key", "old", time.Minute)
 	cache.Set("key", "new", time.Minute)
 
 	got, ok := cache.Get("key")
-	if !ok {
-		t.Fatal("Get(key) = _, false; want _, true")
-	}
-
-	if got != "new" {
-		t.Fatalf("Get(key) = %q, want %q", got, "new")
-	}
+	require.True(t, ok)
+	assert.Equal(t, "new", got)
 }
 
-// ---------------------------------------------------------------------------
-// Multiple distinct keys
-// ---------------------------------------------------------------------------
-
 func TestMultipleDistinctKeys(t *testing.T) {
-	cache := MustNew[string, int](newTestConfig())
+	t.Parallel()
 
+	cache := MustNew[string, int](newTestConfig())
 	cache.Set("a", 1, time.Minute)
 	cache.Set("b", 2, time.Minute)
 	cache.Set("c", 3, time.Minute)
@@ -169,21 +129,14 @@ func TestMultipleDistinctKeys(t *testing.T) {
 		{"c", 3},
 	} {
 		got, ok := cache.Get(tc.key)
-		if !ok {
-			t.Fatalf("Get(%q) = _, false; want _, true", tc.key)
-		}
-
-		if got != tc.want {
-			t.Fatalf("Get(%q) = %d, want %d", tc.key, got, tc.want)
-		}
+		require.Truef(t, ok, "Get(%q) missing", tc.key)
+		assert.Equalf(t, tc.want, got, "Get(%q)", tc.key)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Concurrent Set and Get
-// ---------------------------------------------------------------------------
-
 func TestConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[int, int](newTestConfig())
 
 	const goroutines = 50
@@ -197,7 +150,6 @@ func TestConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 
 			cache.Set(i, i*10, time.Minute)
-
 			// Read back — may or may not be set yet from other goroutines.
 			cache.Get(i)
 		}()
@@ -206,21 +158,17 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// ---------------------------------------------------------------------------
-// Interface compliance: adapter satisfies r8e.Cache
-// ---------------------------------------------------------------------------
-
 func TestInterfaceCompliance(t *testing.T) {
+	t.Parallel()
+
 	var _ r8e.Cache[string, string] = MustNew[string, string](newTestConfig())
 	var _ r8e.Cache[int, int] = MustNew[int, int](newTestConfig())
 	var _ r8e.Cache[uint64, string] = MustNew[uint64, string](newTestConfig())
 }
 
-// ---------------------------------------------------------------------------
-// Integration: works with r8e.StaleCache
-// ---------------------------------------------------------------------------
-
 func TestIntegrationWithStaleCache(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
 	sc := r8e.NewStaleCache(cache, time.Minute)
 
@@ -232,13 +180,8 @@ func TestIntegrationWithStaleCache(t *testing.T) {
 			return "hello-" + key, nil
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil", err)
-	}
-
-	if result != "hello-key1" {
-		t.Fatalf("Do() = %q, want %q", result, "hello-key1")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "hello-key1", result)
 
 	// Second call fails — should serve stale.
 	result, err = sc.Do(
@@ -248,13 +191,8 @@ func TestIntegrationWithStaleCache(t *testing.T) {
 			return "", errors.New("downstream failure")
 		},
 	)
-	if err != nil {
-		t.Fatalf("Do() error = %v, want nil (stale served)", err)
-	}
-
-	if result != "hello-key1" {
-		t.Fatalf("Do() = %q, want %q (stale)", result, "hello-key1")
-	}
+	require.NoError(t, err, "stale value should be served")
+	assert.Equal(t, "hello-key1", result)
 
 	// Different key with no cache — error propagates.
 	sentinel := errors.New("no cache")
@@ -266,56 +204,38 @@ func TestIntegrationWithStaleCache(t *testing.T) {
 			return "", sentinel
 		},
 	)
-
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do() error = %v, want %v", err, sentinel)
-	}
+	require.ErrorIs(t, err, sentinel)
 }
 
-// ---------------------------------------------------------------------------
-// Integration: different keys have separate entries in StaleCache
-// ---------------------------------------------------------------------------
-
 func TestIntegrationStaleCacheDifferentKeys(t *testing.T) {
+	t.Parallel()
+
 	cache := MustNew[string, string](newTestConfig())
 	sc := r8e.NewStaleCache(cache, time.Minute)
 
-	// Populate two keys.
 	_, _ = sc.Do(
 		context.Background(),
 		"k1",
-		func(_ context.Context, _ string) (string, error) {
-			return "v1", nil
-		},
+		func(_ context.Context, _ string) (string, error) { return "v1", nil },
 	)
-
 	_, _ = sc.Do(
 		context.Background(),
 		"k2",
-		func(_ context.Context, _ string) (string, error) {
-			return "v2", nil
-		},
+		func(_ context.Context, _ string) (string, error) { return "v2", nil },
 	)
 
-	// Fail both — each serves its own stale value.
 	fail := func(_ context.Context, _ string) (string, error) {
 		return "", errors.New("fail")
 	}
 
 	r1, err := sc.Do(context.Background(), "k1", fail)
-	if err != nil || r1 != "v1" {
-		t.Fatalf("Do(k1) = %q, %v; want %q, nil", r1, err, "v1")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "v1", r1)
 
 	r2, err := sc.Do(context.Background(), "k2", fail)
-	if err != nil || r2 != "v2" {
-		t.Fatalf("Do(k2) = %q, %v; want %q, nil", r2, err, "v2")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "v2", r2)
 }
-
-// ---------------------------------------------------------------------------
-// Benchmark: Set + Get
-// ---------------------------------------------------------------------------
 
 func BenchmarkSetGet(b *testing.B) {
 	cache := MustNew[string, string](newTestConfig())
