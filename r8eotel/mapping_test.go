@@ -14,10 +14,11 @@ import (
 
 func TestCircuitStateGauge(t *testing.T) {
 	cases := map[string]int64{
-		"":          circuitClosedGauge,
-		"closed":    circuitClosedGauge,
-		"half_open": circuitHalfOpenGauge,
-		"open":      circuitOpenGauge,
+		"":             circuitClosedGauge,
+		"closed":       circuitClosedGauge,
+		"half_open":    circuitHalfOpenGauge,
+		"open":         circuitOpenGauge,
+		"future_state": circuitUnknownGauge,
 	}
 
 	for state, want := range cases {

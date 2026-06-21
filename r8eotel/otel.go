@@ -16,6 +16,15 @@ import (
 )
 
 type (
+	// MetricsSource is the consumer-side port r8eotel needs: a snapshot of
+	// per-policy metrics. *r8e.Registry satisfies it, but so can any type that
+	// can produce a snapshot (a test double or a custom reporter set), so the
+	// bridge is not tied to the concrete registry.
+	MetricsSource interface {
+		// Snapshot returns the current per-policy metrics.
+		Snapshot() []r8e.PolicyMetrics
+	}
+
 	observation struct {
 		inst metric.Int64Observable
 		get  func(*r8e.PolicyMetrics) int64
@@ -39,18 +48,19 @@ type (
 
 // Circuit-breaker state encoded as a gauge value.
 const (
+	circuitUnknownGauge  int64 = -1
 	circuitClosedGauge   int64 = 0
 	circuitHalfOpenGauge int64 = 1
 	circuitOpenGauge     int64 = 2
 )
 
 // Register creates OpenTelemetry observable instruments on meter and a callback
-// that reports metrics for every policy registered with reg, labelled by the
+// that reports metrics for every policy exposed by reg, labelled by the
 // "policy" attribute. The returned [metric.Registration] can be used to stop
 // reporting via its Unregister method.
 //
 //nolint:ireturn // returns the OpenTelemetry metric.Registration by design
-func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error) {
+func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error) {
 	builder := &instrumentBuilder{meter: meter}
 
 	builder.counter("r8e.policy.retries", "Total retry attempts",
@@ -104,7 +114,7 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadCap })
 	builder.gauge("r8e.policy.bulkhead_queued", "Callers currently waiting for a bulkhead slot",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadQueued })
-	builder.gauge("r8e.policy.circuit_state", "Circuit state (0=closed, 1=half-open, 2=open)",
+	builder.gauge("r8e.policy.circuit_state", "Circuit state (-1=unknown, 0=closed, 1=half-open, 2=open)",
 		circuitStateGauge)
 	builder.gauge("r8e.policy.healthy", "1 if the policy is healthy, else 0",
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Healthy }))
@@ -225,12 +235,17 @@ func (b *instrumentBuilder) add(
 
 func circuitStateGauge(m *r8e.PolicyMetrics) int64 {
 	switch m.CircuitState {
-	case "open":
-		return circuitOpenGauge
-	case "half_open":
-		return circuitHalfOpenGauge
-	default:
+	case "", string(r8e.CircuitClosed):
+		// Empty = the policy has no circuit breaker; report closed (no-trip).
 		return circuitClosedGauge
+	case string(r8e.CircuitHalfOpen):
+		return circuitHalfOpenGauge
+	case string(r8e.CircuitOpen):
+		return circuitOpenGauge
+	default:
+		// An unrecognized state (e.g. a renamed constant) surfaces as -1 rather
+		// than masquerading as the healthy "closed" value.
+		return circuitUnknownGauge
 	}
 }
 
