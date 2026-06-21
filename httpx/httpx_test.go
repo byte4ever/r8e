@@ -380,3 +380,28 @@ func TestStatusErrorRetryAfterNilResponse(t *testing.T) {
 	_, ok := (&httpx.StatusError{StatusCode: 429}).RetryAfter()
 	assert.False(t, ok)
 }
+
+// FuzzStatusErrorRetryAfter throws arbitrary header strings at the Retry-After
+// parser, asserting it never panics and upholds its contract: a present hint is
+// always strictly positive, and an absent hint is zero.
+func FuzzStatusErrorRetryAfter(f *testing.F) {
+	for _, value := range []string{
+		"", "120", "0", "-5", "soon", "Wed, 21 Oct 2026 07:28:00 GMT",
+		"99999999999999999999", "9999999999", "Mon, 02 Jan 2006 15:04:05 GMT",
+		"  ", "+10", "1.5", "0x10",
+	} {
+		f.Add(value)
+	}
+
+	f.Fuzz(func(t *testing.T, header string) {
+		got, ok := statusErrorWithRetryAfter(header).RetryAfter() // must not panic
+
+		if ok && got <= 0 {
+			t.Errorf("RetryAfter(%q) = (%v, true), want a strictly positive hint", header, got)
+		}
+
+		if !ok && got != 0 {
+			t.Errorf("RetryAfter(%q) = (%v, false), want zero when absent", header, got)
+		}
+	})
+}

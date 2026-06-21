@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -66,6 +67,12 @@ func TestJitteredRetryAfter(t *testing.T) {
 		got := jitteredRetryAfter(base)
 		assert.GreaterOrEqual(t, got, base-base/10)
 		assert.LessOrEqual(t, got, base+base/10)
+	}
+
+	// Near math.MaxInt64 the +10% jitter overflows int64 on ~half the draws;
+	// the result must always be clamped non-negative, never a wrapped negative.
+	for range 1000 {
+		assert.GreaterOrEqual(t, jitteredRetryAfter(math.MaxInt64), time.Duration(0))
 	}
 }
 
@@ -154,4 +161,38 @@ func TestDoRetryRetryAfterCappedByMaxDelay(t *testing.T) {
 	for _, d := range clk.getDurations() {
 		assert.Equal(t, time.Second, d, "Retry-After must be capped by MaxDelay")
 	}
+}
+
+// FuzzJitteredRetryAfter asserts the jittered delay never panics and stays
+// within ±10% of the input for any int64 duration — including values near
+// math.MaxInt64 where the upper end would otherwise overflow and wrap negative.
+func FuzzJitteredRetryAfter(f *testing.F) {
+	for _, nanos := range []int64{
+		0, 1, 9, 10, 100, int64(time.Second), int64(time.Hour),
+		-1, math.MaxInt64, math.MinInt64, math.MaxInt64 - 1,
+	} {
+		f.Add(nanos)
+	}
+
+	f.Fuzz(func(t *testing.T, nanos int64) {
+		delay := time.Duration(nanos)
+		got := jitteredRetryAfter(delay) // must not panic
+
+		require.GreaterOrEqual(t, got, time.Duration(0), "delay must never be negative")
+
+		if delay <= 0 {
+			require.Equal(t, time.Duration(0), got)
+
+			return
+		}
+
+		jitter := delay / 10
+		require.GreaterOrEqual(t, got, delay-jitter, "below the -10%% floor")
+
+		// The +10%% ceiling can overflow int64; when it does, the result is
+		// clamped to math.MaxInt64, which trivially satisfies the upper bound.
+		if hi := delay + jitter; hi >= delay {
+			require.LessOrEqual(t, got, hi, "above the +10%% ceiling")
+		}
+	})
 }

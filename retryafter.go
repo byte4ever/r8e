@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"errors"
+	"math"
 	"math/rand/v2"
 	"time"
 )
@@ -77,6 +78,13 @@ func jitteredRetryAfter(delay time.Duration) time.Duration {
 		return delay
 	}
 
-	// Uniform in [delay-jitter, delay+jitter].
-	return delay - jitter + time.Duration(rand.Int64N(int64(2*jitter)+1))
+	// Uniform in [delay-jitter, delay+jitter]. For a delay near math.MaxInt64
+	// the upper end can exceed int64 and wrap negative; clamp it to the maximum
+	// duration in that case.
+	result := delay - jitter + time.Duration(rand.Int64N(int64(2*jitter)+1))
+	if result < 0 {
+		return math.MaxInt64
+	}
+
+	return result
 }

@@ -188,3 +188,30 @@ func BenchmarkExponentialJitterBackoff(b *testing.B) {
 		s.Delay(5)
 	}
 }
+
+// FuzzBackoffDelay asserts every backoff strategy returns a non-negative delay
+// and never panics for any attempt — including the large values where the
+// 2^attempt computation overflows int64 (which previously yielded a negative
+// delay from ExponentialBackoff and a panic from ExponentialJitterBackoff).
+func FuzzBackoffDelay(f *testing.F) {
+	for _, attempt := range []int{0, 1, 5, 30, 40, 63, 64, 100, 1000, -1, -100, math.MaxInt32} {
+		f.Add(attempt)
+	}
+
+	base := 100 * time.Millisecond
+	strategies := map[string]r8e.BackoffStrategy{
+		"constant":    r8e.ConstantBackoff(base),
+		"exponential": r8e.ExponentialBackoff(base),
+		"linear":      r8e.LinearBackoff(base),
+		"jitter":      r8e.ExponentialJitterBackoff(base),
+	}
+
+	f.Fuzz(func(t *testing.T, attempt int) {
+		for name, strategy := range strategies {
+			got := strategy.Delay(attempt) // must not panic
+			if got < 0 {
+				t.Errorf("%s.Delay(%d) = %v, want >= 0", name, attempt, got)
+			}
+		}
+	})
+}

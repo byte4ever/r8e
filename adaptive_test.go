@@ -2,6 +2,8 @@ package r8e
 
 import (
 	"context"
+	"encoding/binary"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -515,4 +517,43 @@ func TestReconfigureAdaptiveAbsent(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrPatternAbsent)
 	require.ErrorContains(t, err, "adaptive_concurrency")
+}
+
+// FuzzAdaptiveRecompute drives the Gradient2 controller through an arbitrary
+// sequence of (rtt, inflight) samples decoded from the fuzz input, asserting
+// the limit stays finite and within [minLimit, maxLimit] and the latency
+// baseline stays finite after every step — the invariants a float feedback
+// loop is most likely to break on degenerate inputs (zero, huge, negative).
+func FuzzAdaptiveRecompute(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 50})            // 10ns rtt, inflight 50
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})              // zero rtt, zero inflight
+	f.Add([]byte{255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 1}) // -1ns rtt
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		limiter := NewAdaptiveLimiter(&stubClock{}, &Hooks{},
+			InitialLimit(20), MinLimit(1), MaxLimit(200))
+
+		// Each 12-byte chunk is one sample: 8 bytes rtt, 4 bytes inflight.
+		for len(data) >= 12 {
+			rtt := time.Duration(int64(binary.BigEndian.Uint64(data[:8])))
+			inflight := int(int32(binary.BigEndian.Uint32(data[8:12])))
+			data = data[12:]
+
+			limiter.recompute(rtt, inflight)
+
+			if math.IsNaN(limiter.limit) || math.IsInf(limiter.limit, 0) {
+				t.Fatalf("limit became non-finite: %v (rtt=%v inflight=%d)", limiter.limit, rtt, inflight)
+			}
+
+			if limiter.limit < limiter.minLimit || limiter.limit > limiter.maxLimit {
+				t.Fatalf("limit %v left band [%v, %v] (rtt=%v inflight=%d)",
+					limiter.limit, limiter.minLimit, limiter.maxLimit, rtt, inflight)
+			}
+
+			if math.IsNaN(limiter.longRTT) || math.IsInf(limiter.longRTT, 0) {
+				t.Fatalf("longRTT became non-finite: %v (rtt=%v)", limiter.longRTT, rtt)
+			}
+		}
+	})
 }
