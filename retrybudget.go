@@ -15,6 +15,9 @@ type (
 	}
 
 	// RetryBudgetOption configures a RetryBudget.
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config, keeping NewRetryBudget's signature stable.
 	RetryBudgetOption func(*retryBudgetConfig)
 
 	// RetryBudget is an adaptive token bucket that throttles retries so a burst

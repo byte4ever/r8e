@@ -28,6 +28,10 @@ type (
 	}
 
 	// CircuitBreakerOption configures a circuit breaker.
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config; each constructor returns one, keeping NewCircuitBreaker's
+	// signature stable as options are added.
 	CircuitBreakerOption func(*circuitBreakerConfig)
 
 	// CircuitState is the lifecycle state of a [CircuitBreaker], reported by

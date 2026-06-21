@@ -20,6 +20,9 @@ type (
 	}
 
 	// AdaptiveOption configures an AdaptiveLimiter.
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config, keeping NewAdaptiveLimiter's signature stable.
 	AdaptiveOption func(*adaptiveConfig)
 
 	// AdaptiveLimiter caps in-flight calls at a concurrency limit that it tunes

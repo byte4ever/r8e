@@ -15,6 +15,10 @@ type (
 	}
 
 	// RetryOption configures retry behavior.
+	//
+	// Pattern: Functional Options — composable optional settings (MaxDelay,
+	// PerAttemptTimeout, RetryIf) applied to the private config, keeping the
+	// retry call signature stable as options are added.
 	RetryOption func(*retryConfig)
 
 	// RetryParams holds the required configuration for retry behavior.

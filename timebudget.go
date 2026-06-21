@@ -20,6 +20,9 @@ type (
 	}
 
 	// TimeBudgetOption configures the time budget passed to [WithTimeBudget].
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config, keeping [WithTimeBudget]'s signature stable.
 	TimeBudgetOption func(*timeBudgetConfig)
 
 	// timeBudgetState is the reloadable time-budget configuration. It is swapped

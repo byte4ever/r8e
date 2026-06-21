@@ -17,6 +17,9 @@ type (
 	}
 
 	// RateLimitOption configures rate limiter behavior.
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config, keeping NewRateLimiter's signature stable.
 	RateLimitOption func(*rateLimitConfig)
 
 	// RateLimiter controls the rate of calls using a token bucket algorithm.

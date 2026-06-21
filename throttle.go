@@ -23,6 +23,9 @@ type (
 	}
 
 	// ThrottleOption configures a Throttler / WithAdaptiveThrottle.
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config, keeping NewThrottler's signature stable.
 	ThrottleOption func(*throttleConfig)
 
 	// throttleBucket is one time slice of the sliding window: the requests

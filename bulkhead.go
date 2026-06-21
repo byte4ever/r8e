@@ -36,6 +36,9 @@ type (
 	// BulkheadOption configures optional [Bulkhead] behaviour — the bounded FIFO
 	// wait. With no options the bulkhead keeps the default reject-immediately
 	// semantics.
+	//
+	// Pattern: Functional Options — composable optional settings applied to the
+	// private config, keeping NewBulkhead's signature stable as options are added.
 	BulkheadOption func(*bulkheadConfig)
 
 	bulkheadConfig struct {
