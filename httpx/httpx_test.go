@@ -297,6 +297,79 @@ func TestDoRetryReplaysRequestBody(t *testing.T) {
 	}
 }
 
+// TestDoGetBodyErrorPropagates verifies a GetBody failure surfaces as an error
+// rather than silently sending an empty body on the retried request.
+func TestDoGetBodyErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			},
+		),
+	)
+	defer srv.Close()
+
+	cl := httpx.NewClient(
+		"do-getbody-error",
+		srv.Client(),
+		testClassifier,
+	)
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		srv.URL,
+		strings.NewReader("x"),
+	)
+	require.NoError(t, err)
+
+	req.GetBody = func() (io.ReadCloser, error) {
+		return nil, errors.New("getbody boom")
+	}
+
+	_, err = cl.Do(context.Background(), req)
+	require.ErrorContains(t, err, "getbody boom")
+}
+
+// TestDoUnknownClassPassesThrough verifies an out-of-range ErrorClass from a
+// custom classifier passes the response through unchanged (the switch default).
+func TestDoUnknownClassPassesThrough(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			},
+		),
+	)
+	defer srv.Close()
+
+	cl := httpx.NewClient(
+		"do-unknown-class",
+		srv.Client(),
+		func(int) httpx.ErrorClass { return httpx.ErrorClass(99) },
+	)
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		srv.URL,
+		nil,
+	)
+	require.NoError(t, err)
+
+	resp, err := cl.Do(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
 func TestDoTransportError(t *testing.T) {
 	t.Parallel()
 
