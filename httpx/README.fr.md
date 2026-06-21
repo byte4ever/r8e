@@ -18,6 +18,9 @@ l'utilisateur.
 - Draine et ferme automatiquement le corps de la reponse sur les erreurs
   transitoires afin que les connexions TCP soient reutilisees lors des
   tentatives.
+- Rejoue le corps de la requete a chaque tentative via `req.GetBody`, afin
+  qu'une requete `POST`/`PUT` retentee renvoie correctement son corps (un corps
+  sans `GetBody` n'est pas rejouable).
 
 ## Concepts cles
 

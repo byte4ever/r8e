@@ -15,6 +15,9 @@ and a user-provided HTTP status code classifier.
   `http.Client.Do` — the caller stays in full control of the response.
 - Drains and closes the response body automatically on transient errors so TCP
   connections are reused during retries.
+- Replays the request body on each retry via `req.GetBody`, so a retried
+  `POST`/`PUT` resends its body correctly (a body without `GetBody` is not
+  replayable).
 
 ## Key concepts
 
