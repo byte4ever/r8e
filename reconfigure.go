@@ -58,6 +58,11 @@ func (r *Registry) Reconfigure(name string, cfg PolicyConfig) error { //nolint:g
 // error wrapping [ErrPatternAbsent] if cfg specifies a pattern the policy does
 // not have, or a parse error for an invalid duration or backoff strategy.
 func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // value-passed Reconfigurer API
+	// Serialize reconfigures so concurrent callers cannot interleave the
+	// load-modify-store of a shared cell (e.g. timeBudget) and lose an update.
+	p.reconfigureMu.Lock()
+	defer p.reconfigureMu.Unlock()
+
 	// Phase 1 — validate everything into deferred apply actions; no mutation.
 	var actions []func()
 

@@ -39,7 +39,7 @@ type (
 	}
 
 	// exponentialJitterBackoff returns a random duration in [0, base *
-	// 2^attempt].
+	// 2^attempt) (half-open: the upper bound is exclusive).
 	exponentialJitterBackoff struct {
 		base time.Duration
 	}
@@ -139,8 +139,9 @@ func (b *exponentialJitterBackoff) Delay(attempt int) time.Duration {
 }
 
 // ExponentialJitterBackoff returns a [BackoffStrategy] whose delay is a random
-// duration uniformly distributed in [0, base * 2^attempt]. This prevents
-// thundering-herd problems by spreading retries across time.
+// duration uniformly distributed in [0, base * 2^attempt) (the upper bound is
+// exclusive). This prevents thundering-herd problems by spreading retries
+// across time.
 //
 //nolint:ireturn,iface // each backoff function returns a distinct
 // implementation of BackoffStrategy.

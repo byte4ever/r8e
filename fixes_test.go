@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,6 +98,13 @@ func TestBuildOptionsErrorPaths(t *testing.T) {
 			&PolicyConfig{Hedge: &bad},
 			"hedge",
 		},
+		{
+			// max_attempts is required: omitting it must error, not silently
+			// collapse the retry to a single attempt.
+			"retry without max_attempts",
+			&PolicyConfig{Retry: &RetryConfig{Backoff: &backoff, BaseDelay: &good}},
+			"max_attempts",
+		},
 	}
 
 	for _, tt := range tests {
@@ -108,6 +116,61 @@ func TestBuildOptionsErrorPaths(t *testing.T) {
 			require.ErrorContains(t, err, tt.wantSub)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Reconfigure — concurrent callers are serialized by the per-policy mutex, so
+// the load-modify-store of the shared timeBudget cell cannot lose an update.
+// ---------------------------------------------------------------------------
+
+func TestPolicyReconfigureConcurrent(t *testing.T) {
+	t.Parallel()
+
+	p := NewPolicy[string](
+		"reconf-concurrent",
+		WithTimeout(time.Second),
+		WithTimeBudget(time.Second),
+		WithRetry(3, ConstantBackoff(time.Millisecond)),
+		WithClock(newPolicyClock()),
+	)
+
+	budgetA, budgetB := "2s", "5s"
+	enable, disable := true, false
+
+	const goroutines = 50
+
+	errs := make([]error, goroutines)
+
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		go func() {
+			defer wg.Done()
+
+			cfg := PolicyConfig{TimeBudget: &budgetA, PropagateDeadline: &enable}
+			if i%2 == 0 {
+				cfg = PolicyConfig{TimeBudget: &budgetB, PropagateDeadline: &disable}
+			}
+
+			errs[i] = p.Reconfigure(cfg)
+		}()
+	}
+
+	wg.Wait()
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	// The policy remains usable after the concurrent reconfigures.
+	result, err := p.Do(
+		context.Background(),
+		func(_ context.Context) (string, error) { return "ok", nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
 }
 
 // ---------------------------------------------------------------------------

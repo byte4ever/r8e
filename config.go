@@ -472,15 +472,16 @@ func retryRuntimeFromConfig(cfg *RetryConfig) (*retryRuntime, error) {
 		opts = append(opts, MaxDelay(maxDelay))
 	}
 
-	maxAttempts := 0
-	if cfg.MaxAttempts != nil {
-		maxAttempts = *cfg.MaxAttempts
+	// max_attempts is required: a nil value would silently collapse the retry to
+	// a single attempt. Checked after parsing so duration/strategy errors win.
+	if cfg.MaxAttempts == nil {
+		return nil, fmt.Errorf("retry: %w", ErrRetryMaxAttemptsRequired)
 	}
 
 	return &retryRuntime{
 		strategy:    strategy,
 		opts:        opts,
-		maxAttempts: maxAttempts,
+		maxAttempts: *cfg.MaxAttempts,
 	}, nil
 }
 

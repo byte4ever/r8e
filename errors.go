@@ -138,6 +138,13 @@ var (
 	ErrBulkheadQueueWithoutWait error = resilienceError(
 		"bulkhead_queue_depth requires bulkhead_max_wait",
 	)
+	// ErrRetryMaxAttemptsRequired indicates a [RetryConfig] omitted max_attempts.
+	// It is required: without it the retry would silently collapse to a single
+	// attempt. It is the error [BuildOptions] and [Policy.Reconfigure] return for
+	// that misconfiguration.
+	ErrRetryMaxAttemptsRequired error = resilienceError(
+		"retry max_attempts is required",
+	)
 )
 
 func (e *transientError) Error() string { return "transient: " + e.err.Error() }

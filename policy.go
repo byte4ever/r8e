@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,6 +43,10 @@ type (
 		retry      *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
 		name       string
 		deps       []HealthReporter
+		// reconfigureMu serializes Reconfigure so two concurrent callers cannot
+		// lose a load-modify-store update to a hot-swapped cell (e.g. timeBudget,
+		// whose budget and propagate-deadline flag share one atomic pointer).
+		reconfigureMu sync.Mutex
 		// affectsReadiness gates Kubernetes readiness when this policy is
 		// critically unhealthy (see WithReadinessImpact). False by default.
 		affectsReadiness bool
