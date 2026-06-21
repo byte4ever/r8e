@@ -33,9 +33,10 @@ type (
 		// Reloadable cells for the stateless patterns; nil when the pattern is
 		// absent. The middleware reads them per call so Reconfigure takes
 		// effect without rebuilding the chain.
-		timeout *atomic.Int64                 // timeout in nanoseconds
-		hedge   *atomic.Int64                 // hedge delay in nanoseconds
-		retry   *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
+		timeout    *atomic.Int64                 // timeout in nanoseconds
+		timeBudget *atomic.Int64                 // total time budget in nanoseconds
+		hedge      *atomic.Int64                 // hedge delay in nanoseconds
+		retry      *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
 		name    string
 		deps    []HealthReporter
 		// affectsReadiness gates Kubernetes readiness when this policy is
@@ -68,6 +69,7 @@ type (
 		registry *Registry
 
 		timeout        *time.Duration
+		timeBudget     *time.Duration
 		retry          *retryDesc
 		circuitBreaker *circuitBreakerDesc
 		rateLimit      *rateLimitDesc
@@ -178,6 +180,29 @@ func WithRegistry(reg *Registry) Option {
 func WithTimeout(d time.Duration) Option {
 	return optionFunc(func(s *policySetup) {
 		s.timeout = &d
+	})
+}
+
+// WithTimeBudget adds a single total time budget shared across the whole call,
+// so retry and hedge stop starting new work once the budget is spent. Before
+// each retry, if the backoff alone would exhaust the remaining budget the retry
+// stops early with [ErrTimeBudgetExceeded] (observable via the
+// OnTimeBudgetExceeded hook and the TimeBudgetExceeded metric) instead of
+// sleeping and launching an attempt that cannot finish in time; a hedge is not
+// fired once the budget is spent.
+//
+// The budget is cooperative and measured against the policy's [Clock]: it gates
+// whether more work starts but does not cancel an in-flight attempt — pair it
+// with [WithTimeout] (a hard deadline) or PerAttemptTimeout to bound a single
+// attempt. It is tighter than a per-attempt timeout because it caps the total
+// time across all attempts, not each one.
+//
+// The budget gates only retry and hedge, so it requires [WithRetry] or
+// [WithHedge]; configured with neither it would do nothing, and [NewPolicy]
+// panics with [ErrTimeBudgetWithoutConsumer] instead.
+func WithTimeBudget(d time.Duration) Option {
+	return optionFunc(func(s *policySetup) {
+		s.timeBudget = &d
 	})
 }
 
@@ -381,6 +406,13 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		panic(ErrConcurrencyLimiterConflict)
 	}
 
+	// A time budget only gates retry and hedge; with neither, it would silently
+	// do nothing. Reject it loudly, matching ErrRetryBudgetWithoutRetry.
+	// BuildOptions returns ErrTimeBudgetWithoutConsumer for the same config case.
+	if setup.timeBudget != nil && setup.retry == nil && setup.hedge == nil {
+		panic(ErrTimeBudgetWithoutConsumer)
+	}
+
 	if setup.clock == nil {
 		setup.clock = RealClock{}
 	}
@@ -399,6 +431,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		adaptive       *AdaptiveLimiter
 		coalescer      *Coalescer[T]
 		timeoutCell    *atomic.Int64
+		timeBudgetCell *atomic.Int64
 		hedgeCell      *atomic.Int64
 		retryCell      *atomic.Pointer[retryRuntime]
 	)
@@ -407,6 +440,12 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		timeoutCell = new(atomic.Int64)
 		timeoutCell.Store(int64(*setup.timeout))
 		entries = append(entries, newTimeoutEntry[T](timeoutCell, &hooks))
+	}
+
+	if setup.timeBudget != nil {
+		timeBudgetCell = new(atomic.Int64)
+		timeBudgetCell.Store(int64(*setup.timeBudget))
+		entries = append(entries, newTimeBudgetEntry[T](timeBudgetCell, clock))
 	}
 
 	if setup.retry != nil {
@@ -485,6 +524,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		coalescer:        coalescer,
 		metrics:          metrics,
 		timeout:          timeoutCell,
+		timeBudget:       timeBudgetCell,
 		hedge:            hedgeCell,
 		retry:            retryCell,
 		deps:             setup.deps,
@@ -510,6 +550,20 @@ func newTimeoutEntry[T any](cell *atomic.Int64, hooks *Hooks) PatternEntry[T] {
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
 				return DoTimeout[T](ctx, time.Duration(cell.Load()), next, hooks)
+			}
+		},
+	}
+}
+
+func newTimeBudgetEntry[T any](cell *atomic.Int64, clock Clock) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityTimeBudget,
+		Name:     "time_budget",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				deadline := clock.Now().Add(time.Duration(cell.Load()))
+
+				return next(attachTimeBudget(ctx, deadline))
 			}
 		},
 	}

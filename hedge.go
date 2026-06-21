@@ -69,7 +69,15 @@ func DoHedge[T any](
 		return result.val, nil
 
 	case <-timer.C():
-		// Delay elapsed; primary is still running. Fire hedge.
+		// Delay elapsed; primary is still running. Skip the hedge if the total
+		// time budget is spent — a second request cannot help within it — and
+		// just wait for the primary.
+		if remaining, ok := timeBudgetRemaining(ctx, params.Clock); ok && remaining <= 0 {
+			//nolint:wrapcheck // primary/context error returned as-is
+			return waitForPrimary(ctx, results)
+		}
+
+		// Fire hedge.
 		params.Hooks.emitHedgeTriggered()
 
 		hedgeCtx, hedgeCancel := context.WithCancel(ctx)
@@ -92,6 +100,24 @@ func DoHedge[T any](
 
 	case <-ctx.Done():
 		timer.Stop()
+
+		return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
+	}
+}
+
+// waitForPrimary waits for the primary attempt to complete, or for ctx to be
+// cancelled — used when the time budget is spent so no hedge is launched.
+//
+//nolint:ireturn // generic type parameter T, not an interface
+func waitForPrimary[T any](
+	ctx context.Context,
+	results <-chan hedgeResult[T],
+) (T, error) {
+	select {
+	case result := <-results:
+		return result.val, result.err //nolint:wrapcheck // caller's error as-is
+	case <-ctx.Done():
+		var zero T
 
 		return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
 	}

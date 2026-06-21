@@ -14,12 +14,13 @@ type PatternEntry[T any] struct {
 const (
 	priorityFallback       = 0 // outermost — last resort
 	priorityCoalesce       = 1 // collapse duplicate concurrent calls before any work
-	priorityTimeout        = 2 // global timeout
-	priorityCircuitBreaker = 3
-	priorityRateLimiter    = 4
-	priorityBulkhead       = 5
-	priorityRetry          = 6
-	priorityHedge          = 7 // innermost — closest to user function
+	priorityTimeout        = 2 // global timeout (hard cancel)
+	priorityTimeBudget     = 3 // total time budget shared across retry + hedge
+	priorityCircuitBreaker = 4
+	priorityRateLimiter    = 5
+	priorityBulkhead       = 6
+	priorityRetry          = 7
+	priorityHedge          = 8 // innermost — closest to user function
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

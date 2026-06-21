@@ -74,6 +74,19 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 		actions = append(actions, func() { p.timeout.Store(int64(dur)) })
 	}
 
+	if cfg.TimeBudget != nil {
+		if p.timeBudget == nil {
+			return absentPatternError("time_budget")
+		}
+
+		dur, err := time.ParseDuration(*cfg.TimeBudget)
+		if err != nil {
+			return fmt.Errorf("r8e: reconfigure time_budget: %w", err)
+		}
+
+		actions = append(actions, func() { p.timeBudget.Store(int64(dur)) })
+	}
+
 	if cfg.Hedge != nil {
 		if p.hedge == nil {
 			return absentPatternError("hedge")

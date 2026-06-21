@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 17 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 18 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -53,6 +53,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | Pattern | Ce qu'il fait |
 |---|---|
 | **Timeout** | Annule les appels lents après un délai |
+| **Budget de temps** | Un budget temps total sur toute la chaîne ; retry/hedge s'arrêtent avant de le dépasser |
 | **Retry** | Réessaie les erreurs transitoires avec backoff configurable (constant, exponentiel, linéaire, jitter) |
 | **Retry Budget** | Token bucket adaptatif qui throttle les retries quand les échecs dominent, évitant les retry storms |
 | **Circuit Breaker** | Échoue rapidement quand une dépendance est en panne, récupération automatique via sonde half-open |
@@ -304,13 +305,14 @@ Les patterns sont triés automatiquement par priorité. Le middleware le plus ex
 Requête
   → Fallback          (le plus externe — attrape l'erreur finale)
     → Coalesce        (fusionne les appels concurrents dupliqués)
-      → Timeout         (deadline globale)
-        → Circuit Breaker  (échec rapide si ouvert)
-          → Rate Limiter   (contrôle du débit)
-            → Bulkhead     (limite la concurrence — fixe, ou adaptative)
-              → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
-                → Hedge     (le plus interne — lance des appels redondants)
-                  → fn()    (votre fonction)
+      → Timeout         (deadline globale — annulation dure)
+        → Budget temps   (budget total coopératif pour retry + hedge)
+          → Circuit Breaker  (échec rapide si ouvert)
+            → Rate Limiter   (contrôle du débit)
+              → Bulkhead     (limite la concurrence — fixe, ou adaptative)
+                → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
+                  → Hedge     (le plus interne — lance des appels redondants)
+                    → fn()    (votre fonction)
 ```
 
 Le retry budget n'est pas une étape séparée : il vit à l'intérieur de Retry et
@@ -322,6 +324,31 @@ circuit breaker, rate limiter, bulkhead, retry et hedge — tandis que chaque
 appelant garde son propre fallback (voir [Coalescing de requêtes](#coalescing-de-requêtes)).
 
 StaleCache est autonome et enveloppe l'appel entier de la policy depuis l'extérieur (voir [Stale Cache](#stale-cache)).
+
+## Budget de temps
+
+`WithTimeBudget` fixe un budget temps **total** pour tout l'appel, partagé entre
+retry et hedge. Avant chaque retry, si le backoff seul dépasserait le budget
+restant, le retry **s'arrête tôt** avec `ErrTimeBudgetExceeded` (enveloppant la
+vraie erreur downstream) au lieu de dormir puis lancer une tentative qui ne peut
+pas finir à temps ; un hedge n'est pas lancé une fois le budget épuisé.
+
+```go
+policy := r8e.NewPolicy[Response]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(100*time.Millisecond)),
+    r8e.WithTimeBudget(350*time.Millisecond), // plafonne le temps total
+)
+```
+
+C'est **plus serré qu'un timeout par tentative** : `PerAttemptTimeout` borne
+chaque tentative indépendamment (5 × 1s = jusqu'à 5s), tandis que le budget
+plafonne la *somme*. Le budget est **coopératif** et mesuré contre le `Clock` de
+la policy : il décide si plus de travail démarre mais n'annule pas une tentative
+en cours — associez-le à `WithTimeout` (deadline dure) pour borner un appel
+bloqué. Le budget ne contrôle que retry et hedge : il **exige** donc `WithRetry`
+ou `WithHedge` — configuré sans aucun des deux, `NewPolicy` panique avec
+`ErrTimeBudgetWithoutConsumer`. Observabilité : le hook `OnTimeBudgetExceeded` et
+la métrique `TimeBudgetExceeded`. Voir [`examples/22-time-budget`](examples/22-time-budget).
 
 ## Retry Budget
 
@@ -486,7 +513,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (17) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`.
+Hooks disponibles sur `Hooks` (18) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
@@ -758,6 +785,7 @@ go run ./examples/18-httpx-retry/
 go run ./examples/19-retry-budget/
 go run ./examples/20-coalesce/
 go run ./examples/21-adaptive-concurrency/
+go run ./examples/22-time-budget/
 ```
 
 ## Licence

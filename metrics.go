@@ -26,6 +26,8 @@ type (
 		FallbacksUsed    int64 `json:"fallbacks_used"`
 		// RetryBudgetExceeded counts retries suppressed by the retry budget.
 		RetryBudgetExceeded int64 `json:"retry_budget_exceeded"`
+		// TimeBudgetExceeded counts retries stopped early by the time budget.
+		TimeBudgetExceeded int64 `json:"time_budget_exceeded"`
 		// CoalesceLeaders counts calls that ran a shared execution; together with
 		// CoalesceFollowers it gives the deduplication ratio
 		// followers/(leaders+followers).
@@ -81,6 +83,7 @@ type (
 		coalesceLeaders     atomic.Int64
 		coalesceFollowers   atomic.Int64
 		concurrencyRejected atomic.Int64
+		timeBudgetExceeded  atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -204,6 +207,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 			}
 		},
 		OnConcurrencyLimitChanged: user.OnConcurrencyLimitChanged,
+		OnTimeBudgetExceeded: func() {
+			m.timeBudgetExceeded.Add(1)
+
+			if user.OnTimeBudgetExceeded != nil {
+				user.OnTimeBudgetExceeded()
+			}
+		},
 	}
 }
 
@@ -228,6 +238,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CoalesceLeaders:     p.metrics.coalesceLeaders.Load(),
 		CoalesceFollowers:   p.metrics.coalesceFollowers.Load(),
 		ConcurrencyRejected: p.metrics.concurrencyRejected.Load(),
+		TimeBudgetExceeded:  p.metrics.timeBudgetExceeded.Load(),
 		Criticality:         health.Criticality,
 		Healthy:             health.Healthy,
 	}

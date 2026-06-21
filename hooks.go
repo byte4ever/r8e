@@ -25,6 +25,10 @@ type Hooks struct {
 	// the policy call.
 	OnRetryBudgetExceeded func()
 
+	// OnTimeBudgetExceeded fires when retry stops early because the total time
+	// budget would be exhausted by the next backoff (see [WithTimeBudget]).
+	OnTimeBudgetExceeded func()
+
 	// OnCoalesceLeader fires when a call begins a shared execution for a
 	// coalescing key (it ran the work the followers share).
 	OnCoalesceLeader func()
@@ -115,6 +119,12 @@ func (h *Hooks) emitFallbackUsed(err error) {
 func (h *Hooks) emitRetryBudgetExceeded() {
 	if h.OnRetryBudgetExceeded != nil {
 		h.OnRetryBudgetExceeded()
+	}
+}
+
+func (h *Hooks) emitTimeBudgetExceeded() {
+	if h.OnTimeBudgetExceeded != nil {
+		h.OnTimeBudgetExceeded()
 	}
 }
 

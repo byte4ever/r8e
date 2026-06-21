@@ -1,6 +1,6 @@
 ---
 name: r8e
-description: Guide for using the r8e Go resilience library. Use when writing, reviewing, or modifying code that uses github.com/byte4ever/r8e — including creating policies, composing resilience patterns (retry, circuit breaker, timeout, rate limiter, bulkhead, adaptive concurrency, hedge, request coalescing/singleflight, fallback, stale cache), classifying errors, wiring health/readiness, using the httpx adapter, or loading configuration from JSON. Also use when the user asks about resilience, fault tolerance, or retry patterns in Go.
+description: Guide for using the r8e Go resilience library. Use when writing, reviewing, or modifying code that uses github.com/byte4ever/r8e — including creating policies, composing resilience patterns (retry, circuit breaker, timeout, time budget, rate limiter, bulkhead, adaptive concurrency, hedge, request coalescing/singleflight, fallback, stale cache), classifying errors, wiring health/readiness, using the httpx adapter, or loading configuration from JSON. Also use when the user asks about resilience, fault tolerance, or retry patterns in Go.
 ---
 
 # r8e — Go Resilience Library
@@ -26,8 +26,9 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Coalesce > Timeout > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
-The retry budget is not a stage; it gates retries from within Retry. Bulkhead and
+Fallback > Coalesce > Timeout > TimeBudget > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
+The retry budget is not a stage; it gates retries from within Retry. The time
+budget stamps a ctx deadline that retry/hedge read. Bulkhead and
 AdaptiveConcurrency share the concurrency slot and are mutually exclusive.
 
 ## Pattern Options
@@ -39,6 +40,25 @@ r8e.WithTimeout(5 * time.Second)
 ```
 
 Returns `r8e.ErrTimeout` if exceeded.
+
+### Time Budget
+
+```go
+r8e.WithTimeBudget(350 * time.Millisecond)
+```
+
+One **total** time budget shared across retry + hedge. Before each retry, if the
+backoff alone would overrun the remaining budget, retry stops early with
+`r8e.ErrTimeBudgetExceeded` (wrapping the real downstream error) instead of
+sleeping into a doomed attempt; a hedge is not fired once the budget is spent.
+**Tighter than `PerAttemptTimeout`** (which bounds each attempt — the budget caps
+the sum). **Cooperative**, measured against the policy `Clock`: it gates whether
+more work starts but does not cancel an in-flight attempt — pair with
+`WithTimeout` for a hard per-call deadline. Sits between Timeout and the inner
+patterns (stamps a clock-based deadline into ctx that retry/hedge read).
+**Requires `WithRetry` or `WithHedge`** (gates only those) — neither panics
+`NewPolicy` with `r8e.ErrTimeBudgetWithoutConsumer`. Observability:
+`OnTimeBudgetExceeded` hook + `TimeBudgetExceeded` metric.
 
 ### Retry
 
@@ -171,7 +191,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrConcurrencyLimited`, `r8e.ErrTimeout`, `r8e.ErrRetriesExhausted`.
+`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrConcurrencyLimited`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`.
 
 ## Hooks
 
@@ -190,6 +210,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnHedgeWon:         func() {},
     OnFallbackUsed:     func(err error) {},
     OnRetryBudgetExceeded: func() {},  // retry suppressed by the budget
+    OnTimeBudgetExceeded:  func() {},  // retry stopped early by the time budget
     OnCoalesceLeader:   func() {},     // call ran a shared coalesced execution
     OnCoalesceFollower: func() {},     // call deduplicated into an in-flight one
     OnConcurrencyRejected:     func() {},     // adaptive limiter shed a call
@@ -212,7 +233,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
 `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
-`CoalesceLeaders`, `CoalesceFollowers`, `ConcurrencyRejected`) and gauges
+`TimeBudgetExceeded`, `CoalesceLeaders`, `CoalesceFollowers`,
+`ConcurrencyRejected`) and gauges
 (`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
 `CoalesceInFlight`, `ConcurrencyLimit`, `ConcurrencyInFlight`, `Saturated`,
 `Healthy`, `Criticality`).
@@ -398,4 +420,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/21-adaptive-concurrency`.
+Examples: `examples/01-quickstart` through `examples/22-time-budget`.

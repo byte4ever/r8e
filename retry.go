@@ -135,9 +135,6 @@ func DoRetry[T any](
 			return zero, lastErr //nolint:wrapcheck // real downstream error
 		}
 
-		// Emit OnRetry hook with 1-indexed attempt number.
-		params.Hooks.emitRetry(attempt+1, err)
-
 		// Compute backoff delay.
 		delay := params.Strategy.Delay(attempt)
 
@@ -145,6 +142,23 @@ func DoRetry[T any](
 		if cfg.maxDelay > 0 && delay > cfg.maxDelay {
 			delay = cfg.maxDelay
 		}
+
+		// Honor a total time budget: stop early rather than sleep a backoff that
+		// would exhaust the remaining budget and launch an attempt that cannot
+		// finish in time. delay >= remaining also covers an already-spent budget
+		// (remaining <= 0). The suppression is observable via the
+		// OnTimeBudgetExceeded hook and metric. Unlike the retry-budget
+		// suppression above (which returns the bare downstream error), this wraps
+		// a matchable ErrTimeBudgetExceeded sentinel, since a budget-exhausted
+		// deadline is a distinct outcome a caller may want to branch on.
+		if remaining, ok := timeBudgetRemaining(ctx, params.Clock); ok && delay >= remaining {
+			params.Hooks.emitTimeBudgetExceeded()
+
+			return zero, fmt.Errorf("%w: %w", ErrTimeBudgetExceeded, lastErr)
+		}
+
+		// Emit OnRetry hook with 1-indexed attempt number.
+		params.Hooks.emitRetry(attempt+1, err)
 
 		// Sleep using Clock.NewTimer, respecting context cancellation.
 		timer := params.Clock.NewTimer(delay)

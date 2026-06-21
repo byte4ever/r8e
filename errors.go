@@ -34,6 +34,10 @@ var (
 	ErrConcurrencyLimited error = resilienceError("concurrency limited")
 	// ErrTimeout is returned when an operation exceeds its deadline.
 	ErrTimeout error = resilienceError("timeout")
+	// ErrTimeBudgetExceeded is returned (wrapping the last downstream error) when
+	// retry stops early because the total time budget would be exhausted by the
+	// next backoff. See [WithTimeBudget].
+	ErrTimeBudgetExceeded error = resilienceError("time budget exceeded")
 	// ErrRetriesExhausted is returned when all retry attempts have been used.
 	ErrRetriesExhausted error = resilienceError("retries exhausted")
 	// ErrRetryBudgetWithoutRetry indicates a retry budget was configured on a
@@ -64,6 +68,14 @@ var (
 	// misconfiguration.
 	ErrConcurrencyLimiterConflict error = resilienceError(
 		"bulkhead and adaptive concurrency are mutually exclusive",
+	)
+	// ErrTimeBudgetWithoutConsumer indicates [WithTimeBudget] was configured on a
+	// policy with neither [WithRetry] nor [WithHedge]. The budget only gates
+	// those two patterns, so without one it would silently do nothing. It is the
+	// value [NewPolicy] panics with, and the error [BuildOptions] returns, for
+	// that misconfiguration.
+	ErrTimeBudgetWithoutConsumer error = resilienceError(
+		"time budget requires a retry or hedge pattern to gate",
 	)
 )
 

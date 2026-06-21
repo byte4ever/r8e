@@ -20,6 +20,9 @@ type (
 		// Timeout is the maximum duration for a single call.
 		// Optional. Parsed via time.ParseDuration. Example: "2s".
 		Timeout *string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+		// TimeBudget is the total time budget shared across retry and hedge.
+		// Optional. Parsed via time.ParseDuration. Example: "5s".
+		TimeBudget *string `json:"time_budget,omitempty" yaml:"time_budget,omitempty"`
 		// Hedge is the delay before launching a hedged request.
 		// Optional. Parsed via time.ParseDuration. Example: "200ms".
 		Hedge *string `json:"hedge,omitempty" yaml:"hedge,omitempty"`
@@ -117,6 +120,21 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		}
 
 		opts = append(opts, WithTimeout(d))
+	}
+
+	if pc.TimeBudget != nil {
+		// The budget gates only retry and hedge; without one it would panic in
+		// NewPolicy. Surface the misconfiguration as an error here instead.
+		if pc.Retry == nil && pc.Hedge == nil {
+			return nil, fmt.Errorf("time_budget: %w", ErrTimeBudgetWithoutConsumer)
+		}
+
+		d, err := time.ParseDuration(*pc.TimeBudget)
+		if err != nil {
+			return nil, fmt.Errorf("time_budget: %w", err)
+		}
+
+		opts = append(opts, WithTimeBudget(d))
 	}
 
 	if pc.CircuitBreaker != nil {

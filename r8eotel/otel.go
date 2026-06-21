@@ -75,6 +75,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.FallbacksUsed })
 	builder.counter("r8e.policy.retry_budget_exceeded", "Retries suppressed by the retry budget",
 		func(m *r8e.PolicyMetrics) int64 { return m.RetryBudgetExceeded })
+	builder.counter("r8e.policy.time_budget_exceeded", "Retries stopped early by the time budget",
+		func(m *r8e.PolicyMetrics) int64 { return m.TimeBudgetExceeded })
 	builder.counter("r8e.policy.coalesce_leaders", "Calls that ran a shared coalesced execution",
 		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceLeaders })
 	builder.counter("r8e.policy.coalesce_followers", "Calls deduplicated by request coalescing",
