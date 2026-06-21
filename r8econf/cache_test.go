@@ -15,7 +15,6 @@ func TestLoadCacheConfigValid(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 5*time.Minute, cfg.TTL)
 	assert.Equal(t, 1000, cfg.MaxSize)
-	assert.Equal(t, true, cfg.Options["reset_ttl_on_access"])
 }
 
 func TestLoadCacheConfigReadError(t *testing.T) {

@@ -15,9 +15,8 @@ type (
 	}
 
 	cacheConfigJSON struct {
-		Options map[string]any `json:"options,omitempty"`
-		TTL     string         `json:"ttl"`
-		MaxSize int            `json:"max_size"`
+		TTL     string `json:"ttl"`
+		MaxSize int    `json:"max_size"`
 	}
 )
 
@@ -43,7 +42,6 @@ func LoadCacheConfig(path, name string) (r8e.CacheConfig, error) {
 	}
 
 	cacheCfg := r8e.CacheConfig{
-		Options: raw.Options,
 		MaxSize: raw.MaxSize,
 	}
 

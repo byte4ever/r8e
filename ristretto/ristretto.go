@@ -30,7 +30,8 @@ type (
 
 // MustNew creates an r8e.Cache backed by a Ristretto cache.
 // K must satisfy [Key] (comparable subset of ristretto key types).
-// MaxSize from [r8e.CacheConfig] configures the cache capacity.
+// Only MaxSize from [r8e.CacheConfig] is consumed (the cache capacity); the
+// freshness TTL is applied per Set call, not from the config.
 // Ristretto recommends NumCounters = 10 * MaxSize for good performance.
 // It panics if the underlying Ristretto cache cannot be built.
 //
@@ -57,7 +58,11 @@ func (a *adapter[K, V]) Get(key K) (V, bool) {
 	return a.cache.Get(key)
 }
 
-// Set stores a value with the given TTL.
+// Set stores a value with the given TTL and a fixed cost of 1 per entry, so
+// MaxSize bounds the entry count. Ristretto admits writes asynchronously and
+// may drop them under buffer pressure; SetWithTTL's bool admission result is
+// intentionally ignored because a dropped write degrades to a cache miss (the
+// read-through layer re-executes), never a wrong value.
 func (a *adapter[K, V]) Set(key K, value V, ttl time.Duration) {
 	a.cache.SetWithTTL(key, value, 1, ttl)
 }

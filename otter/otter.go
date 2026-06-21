@@ -21,8 +21,8 @@ type adapter[K comparable, V any] struct {
 }
 
 // MustNew creates an r8e.Cache backed by an Otter cache with per-entry TTL
-// support.
-// MaxSize from [r8e.CacheConfig] configures the underlying cache capacity.
+// support. Only MaxSize from [r8e.CacheConfig] is consumed (the cache
+// capacity); the freshness TTL is applied per Set call, not from the config.
 // It panics if the underlying Otter cache cannot be built.
 //
 //nolint:ireturn,varnamelen // generic type params K,V are idiomatic in Go
