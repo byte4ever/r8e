@@ -117,30 +117,36 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 
-	got := make(map[string]bool)
+	gotNames := make([]string, 0)
 	for _, scope := range rm.ScopeMetrics {
 		for _, metric := range scope.Metrics {
-			got[metric.Name] = true
+			gotNames = append(gotNames, metric.Name)
 		}
 	}
 
+	// The full set of instruments Register emits. ElementsMatch (not Contains)
+	// so a dropped OR an added-but-untested instrument both fail the guard.
 	want := []string{
+		// Counters.
 		"r8e.policy.retries", "r8e.policy.timeouts",
 		"r8e.policy.circuit_opens", "r8e.policy.circuit_closes",
 		"r8e.policy.circuit_half_opens", "r8e.policy.rate_limited",
-		"r8e.policy.bulkhead_rejected", "r8e.policy.hedges_triggered",
-		"r8e.policy.hedges_won", "r8e.policy.fallbacks_used",
-		"r8e.policy.retry_budget_exceeded", "r8e.policy.time_budget_exceeded",
-		"r8e.policy.coalesce_leaders", "r8e.policy.coalesce_followers",
-		"r8e.policy.concurrency_rejected", "r8e.policy.throttled",
+		"r8e.policy.bulkhead_rejected", "r8e.policy.bulkhead_timeouts",
+		"r8e.policy.hedges_triggered", "r8e.policy.hedges_won",
+		"r8e.policy.fallbacks_used", "r8e.policy.retry_budget_exceeded",
+		"r8e.policy.time_budget_exceeded", "r8e.policy.coalesce_leaders",
+		"r8e.policy.coalesce_followers", "r8e.policy.concurrency_rejected",
+		"r8e.policy.throttled", "r8e.policy.slow_call_rate_exceeded",
+		"r8e.policy.cache_hits", "r8e.policy.cache_misses",
+		"r8e.policy.cache_stores", "r8e.policy.cache_stale_served",
+		// Gauges.
 		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
-		"r8e.policy.circuit_state", "r8e.policy.healthy",
-		"r8e.policy.saturated", "r8e.policy.retry_budget_tokens",
-		"r8e.policy.coalesce_in_flight",
-		"r8e.policy.concurrency_limit", "r8e.policy.concurrency_in_flight",
-		"r8e.policy.throttle_probability",
+		"r8e.policy.bulkhead_queued", "r8e.policy.circuit_state",
+		"r8e.policy.healthy", "r8e.policy.saturated",
+		"r8e.policy.coalesce_in_flight", "r8e.policy.concurrency_limit",
+		"r8e.policy.concurrency_in_flight", "r8e.policy.retry_budget_tokens",
+		"r8e.policy.throttle_probability", "r8e.policy.slow_call_rate",
 	}
-	for _, name := range want {
-		assert.Contains(t, got, name)
-	}
+	assert.ElementsMatch(t, want, gotNames,
+		"registered instruments drifted from the expected set")
 }

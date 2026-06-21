@@ -63,22 +63,26 @@ func TestDoTimeoutFnErrorBeforeDeadline(t *testing.T) {
 func TestDoTimeoutExceedsDeadline(t *testing.T) {
 	t.Parallel()
 
-	hooks := &r8e.Hooks{}
+	// Virtual time: fn runs well past the deadline without cooperating, so the
+	// timeout fires first deterministically. (A cooperative fn that returns
+	// ctx.Err() exactly at the deadline races DoTimeout's select between the
+	// result channel and the timeout, which is inherently ambiguous.)
+	synctest.Test(t, func(t *testing.T) {
+		result, err := r8e.DoTimeout[string](
+			context.Background(),
+			10*time.Millisecond,
+			func(ctx context.Context) (string, error) {
+				<-ctx.Done()
 
-	result, err := r8e.DoTimeout[string](
-		context.Background(),
-		10*time.Millisecond,
-		func(ctx context.Context) (string, error) {
-			// Block until context is cancelled (timeout).
-			<-ctx.Done()
-			return "late", ctx.Err()
-		},
-		hooks,
-	)
+				return "late", ctx.Err()
+			},
+			nil,
+		)
 
-	require.ErrorIs(t, err, r8e.ErrTimeout)
-	// Zero-value should be returned on timeout.
-	require.Equal(t, "", result)
+		require.ErrorIs(t, err, r8e.ErrTimeout)
+		// Zero-value should be returned on timeout.
+		require.Equal(t, "", result)
+	})
 }
 
 // ---------------------------------------------------------------------------
