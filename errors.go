@@ -27,8 +27,15 @@ var (
 	ErrCircuitOpen error = resilienceError("circuit breaker is open")
 	// ErrRateLimited is returned when a request is rejected by a rate limiter.
 	ErrRateLimited error = resilienceError("rate limited")
-	// ErrBulkheadFull is returned when the bulkhead has no available capacity.
+	// ErrBulkheadFull is returned when the bulkhead has no available capacity and
+	// the call is rejected immediately — either no max-wait is configured or the
+	// bounded wait queue is already at its depth (see [BulkheadMaxWait]).
 	ErrBulkheadFull error = resilienceError("bulkhead full")
+	// ErrBulkheadTimeout is returned when a call waited the full [BulkheadMaxWait]
+	// for a slot without one becoming available. It is distinct from
+	// [ErrBulkheadFull] (an immediate rejection) so callers can tell a shed-on-
+	// arrival apart from a shed-after-waiting.
+	ErrBulkheadTimeout error = resilienceError("bulkhead wait timeout")
 	// ErrConcurrencyLimited is returned when the adaptive concurrency limiter is
 	// at its current limit and rejects a call.
 	ErrConcurrencyLimited error = resilienceError("concurrency limited")
@@ -107,6 +114,20 @@ var (
 	ErrSlowCallConfigIncomplete error = resilienceError(
 		"circuit breaker slow_call_duration and slow_call_rate_threshold " +
 			"must be set together",
+	)
+	// ErrBulkheadWaitWithoutBulkhead indicates a [PolicyConfig] set
+	// bulkhead_max_wait or bulkhead_queue_depth without bulkhead; the wait
+	// settings have no bulkhead to apply to. It is the error [BuildOptions]
+	// returns for that misconfiguration.
+	ErrBulkheadWaitWithoutBulkhead error = resilienceError(
+		"bulkhead wait settings require a bulkhead",
+	)
+	// ErrBulkheadQueueWithoutWait indicates a [PolicyConfig] set
+	// bulkhead_queue_depth without bulkhead_max_wait; the queue is only used
+	// while waiting. It is the error [BuildOptions] returns for that
+	// misconfiguration.
+	ErrBulkheadQueueWithoutWait error = resilienceError(
+		"bulkhead_queue_depth requires bulkhead_max_wait",
 	)
 )
 

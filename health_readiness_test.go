@@ -149,7 +149,7 @@ func TestHealthStatusConditionsComplete(t *testing.T) {
 	// conditions are simultaneously active (the chain would reject at the rate
 	// limiter before reaching the bulkhead, so we exercise the components).
 	require.NoError(t, p.rateLimiter.Allow(context.Background()))
-	require.NoError(t, p.bulkhead.Acquire())
+	require.NoError(t, p.bulkhead.Acquire(context.Background()))
 
 	status := p.HealthStatus()
 	assert.True(t, status.AffectsReadiness)

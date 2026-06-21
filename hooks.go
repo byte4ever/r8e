@@ -15,10 +15,16 @@ type Hooks struct {
 	OnBulkheadFull     func()
 	OnBulkheadAcquired func()
 	OnBulkheadReleased func()
-	OnTimeout          func()
-	OnHedgeTriggered   func()
-	OnHedgeWon         func()
-	OnFallbackUsed     func(err error)
+	// OnBulkheadQueued fires when a full bulkhead enqueues a caller for the
+	// bounded FIFO wait instead of rejecting it (see [BulkheadMaxWait]).
+	OnBulkheadQueued func()
+	// OnBulkheadTimeout fires when a queued caller gives up after waiting the full
+	// max-wait without a slot, returning [ErrBulkheadTimeout].
+	OnBulkheadTimeout func()
+	OnTimeout         func()
+	OnHedgeTriggered  func()
+	OnHedgeWon        func()
+	OnFallbackUsed    func(err error)
 
 	// OnRetryBudgetExceeded fires when a retry is suppressed because the retry
 	// budget is exhausted. The underlying downstream error is still returned by
@@ -113,6 +119,18 @@ func (h *Hooks) emitBulkheadAcquired() {
 func (h *Hooks) emitBulkheadReleased() {
 	if h.OnBulkheadReleased != nil {
 		h.OnBulkheadReleased()
+	}
+}
+
+func (h *Hooks) emitBulkheadQueued() {
+	if h.OnBulkheadQueued != nil {
+		h.OnBulkheadQueued()
+	}
+}
+
+func (h *Hooks) emitBulkheadTimeout() {
+	if h.OnBulkheadTimeout != nil {
+		h.OnBulkheadTimeout()
 	}
 }
 

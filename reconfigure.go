@@ -115,9 +115,21 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 			return absentPatternError("bulkhead")
 		}
 
+		bhOpts, err := bulkheadOptionsFromConfig(&cfg)
+		if err != nil {
+			return fmt.Errorf("r8e: reconfigure: %w", err)
+		}
+
 		slots := *cfg.Bulkhead
 
-		actions = append(actions, func() { p.bulkhead.Reconfigure(slots) })
+		actions = append(
+			actions,
+			func() { p.bulkhead.Reconfigure(slots, bhOpts...) },
+		)
+	} else if cfg.BulkheadMaxWait != nil || cfg.BulkheadQueueDepth != nil {
+		// Wait settings without a bulkhead have nothing to apply to — reject the
+		// same input BuildOptions rejects, so cold start and hot reload agree.
+		return ErrBulkheadWaitWithoutBulkhead
 	}
 
 	if cfg.AdaptiveConcurrency != nil {

@@ -140,10 +140,25 @@ Returns `r8e.ErrRateLimited` in non-blocking mode.
 ### Bulkhead
 
 ```go
-r8e.WithBulkhead(maxConcurrent int)
+r8e.WithBulkhead(maxConcurrent int, opts ...BulkheadOption)
 ```
 
-Returns `r8e.ErrBulkheadFull` when all slots occupied.
+Returns `r8e.ErrBulkheadFull` when all slots occupied (immediate rejection by
+default).
+
+**Bounded FIFO wait** (opt-in): `r8e.BulkheadMaxWait(d)` makes a full bulkhead
+queue callers in FIFO order for up to `d` (timed against the injected `Clock`),
+handing each freed slot to the head of the queue. `r8e.BulkheadQueueDepth(n)`
+bounds the queue (default = maxConcurrent); when full, callers are rejected
+immediately with `ErrBulkheadFull`. A caller that waits the full max-wait gives
+up with `r8e.ErrBulkheadTimeout` (distinct from `ErrBulkheadFull`); a cancelled
+ctx returns the context error. Config-expressible (`bulkhead_max_wait` +
+`bulkhead_queue_depth`, both requiring `bulkhead`; queue depth requires max-wait,
+else `ErrBulkheadQueueWithoutWait` / `ErrBulkheadWaitWithoutBulkhead`),
+hot-reloadable. Observability: `OnBulkheadQueued` / `OnBulkheadTimeout` hooks,
+`BulkheadTimeouts` counter, `BulkheadQueued` gauge. Standalone admission API is
+`Bulkhead.Acquire(ctx) error` (takes a ctx — may block on the wait) + `Release()`
++ `Queued()`.
 
 ### Adaptive Concurrency
 
@@ -266,7 +281,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`.
+`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`.
 
 ## Hooks
 
@@ -281,6 +296,8 @@ r8e.WithHooks(&r8e.Hooks{
     OnBulkheadFull:     func() {},
     OnBulkheadAcquired: func() {},
     OnBulkheadReleased: func() {},
+    OnBulkheadQueued:   func() {},  // full bulkhead enqueued a caller (bounded wait)
+    OnBulkheadTimeout:  func() {},  // queued caller gave up after max-wait
     OnTimeout:          func() {},
     OnHedgeTriggered:   func() {},
     OnHedgeWon:         func() {},
@@ -313,12 +330,12 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
-`HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
-`TimeBudgetExceeded`, `CoalesceLeaders`, `CoalesceFollowers`,
-`ConcurrencyRejected`, `Throttled`, `SlowCallRateExceeded`, `CacheHits`,
-`CacheMisses`, `CacheStores`, `CacheStaleServed`) and gauges
+`BulkheadTimeouts`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
+`RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
+`CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `SlowCallRateExceeded`,
+`CacheHits`, `CacheMisses`, `CacheStores`, `CacheStaleServed`) and gauges
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
-`RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
+`BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `Saturated`, `Healthy`,
 `Criticality`).
 

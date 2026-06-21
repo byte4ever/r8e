@@ -67,6 +67,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.RateLimited })
 	builder.counter("r8e.policy.bulkhead_rejected", "Calls rejected by the bulkhead",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadRejected })
+	builder.counter("r8e.policy.bulkhead_timeouts", "Calls that timed out waiting for a bulkhead slot",
+		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadTimeouts })
 	builder.counter("r8e.policy.hedges_triggered", "Hedged requests launched",
 		func(m *r8e.PolicyMetrics) int64 { return m.HedgesTriggered })
 	builder.counter("r8e.policy.hedges_won", "Hedged requests that won",
@@ -100,6 +102,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })
 	builder.gauge("r8e.policy.bulkhead_capacity", "Bulkhead slot capacity",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadCap })
+	builder.gauge("r8e.policy.bulkhead_queued", "Callers currently waiting for a bulkhead slot",
+		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadQueued })
 	builder.gauge("r8e.policy.circuit_state", "Circuit state (0=closed, 1=half-open, 2=open)",
 		circuitStateGauge)
 	builder.gauge("r8e.policy.healthy", "1 if the policy is healthy, else 0",

@@ -141,6 +141,101 @@ func TestSlowCallConfigRoundTrip(t *testing.T) {
 	assert.Equal(t, 5, p.circuitBreaker.cfg.slowCallMinCalls)
 }
 
+// TestBulkheadWaitConfigRoundTrip builds a policy with the bounded-wait fields
+// and confirms the bulkhead carries them.
+func TestBulkheadWaitConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	opts, err := BuildOptions(&PolicyConfig{
+		Bulkhead:           intPtr(5),
+		BulkheadMaxWait:    strPtr("50ms"),
+		BulkheadQueueDepth: intPtr(20),
+	})
+	require.NoError(t, err)
+
+	p := NewPolicy[string]("from-config", opts...)
+	assert.Equal(t, int64(5), p.bulkhead.Cap())
+	assert.Equal(t, 50*time.Millisecond, p.bulkhead.maxWait)
+	assert.Equal(t, 20, p.bulkhead.maxQueue)
+}
+
+// TestBulkheadWaitConfigWithoutBulkhead rejects wait fields with no bulkhead.
+func TestBulkheadWaitConfigWithoutBulkhead(t *testing.T) {
+	t.Parallel()
+
+	_, err := BuildOptions(&PolicyConfig{BulkheadMaxWait: strPtr("50ms")})
+	require.ErrorIs(t, err, ErrBulkheadWaitWithoutBulkhead)
+
+	_, err = BuildOptions(&PolicyConfig{BulkheadQueueDepth: intPtr(10)})
+	require.ErrorIs(t, err, ErrBulkheadWaitWithoutBulkhead)
+}
+
+// TestBulkheadQueueDepthWithoutWait rejects a queue depth with no max-wait.
+func TestBulkheadQueueDepthWithoutWait(t *testing.T) {
+	t.Parallel()
+
+	_, err := BuildOptions(&PolicyConfig{
+		Bulkhead:           intPtr(5),
+		BulkheadQueueDepth: intPtr(10),
+	})
+	require.ErrorIs(t, err, ErrBulkheadQueueWithoutWait)
+}
+
+// TestBulkheadMaxWaitBadDuration surfaces the parse error with the field name.
+func TestBulkheadMaxWaitBadDuration(t *testing.T) {
+	t.Parallel()
+
+	_, err := BuildOptions(&PolicyConfig{
+		Bulkhead:        intPtr(5),
+		BulkheadMaxWait: strPtr("nope"),
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "bulkhead_max_wait")
+	assert.ErrorContains(t, err, "invalid duration")
+}
+
+// TestPolicyReconfigureBulkheadWait reloads the bulkhead wait parameters.
+func TestPolicyReconfigureBulkheadWait(t *testing.T) {
+	t.Parallel()
+
+	p := kitchenSinkPolicy(t)
+
+	err := p.Reconfigure(PolicyConfig{
+		Bulkhead:           intPtr(8),
+		BulkheadMaxWait:    strPtr("30ms"),
+		BulkheadQueueDepth: intPtr(16),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(8), p.bulkhead.Cap())
+	assert.Equal(t, 30*time.Millisecond, p.bulkhead.maxWait)
+	assert.Equal(t, 16, p.bulkhead.maxQueue)
+}
+
+// TestPolicyReconfigureBulkheadWaitInvalid surfaces a bad reconfigure value.
+func TestPolicyReconfigureBulkheadWaitInvalid(t *testing.T) {
+	t.Parallel()
+
+	p := kitchenSinkPolicy(t)
+
+	err := p.Reconfigure(PolicyConfig{
+		Bulkhead:        intPtr(8),
+		BulkheadMaxWait: strPtr("nope"),
+	})
+	require.Error(t, err)
+}
+
+// TestPolicyReconfigureBulkheadWaitWithoutBulkhead rejects wait settings sent
+// without a bulkhead, so hot reload agrees with cold start (BuildOptions).
+func TestPolicyReconfigureBulkheadWaitWithoutBulkhead(t *testing.T) {
+	t.Parallel()
+
+	p := kitchenSinkPolicy(t)
+
+	err := p.Reconfigure(PolicyConfig{BulkheadMaxWait: strPtr("50ms")})
+	require.ErrorIs(t, err, ErrBulkheadWaitWithoutBulkhead)
+}
+
 func TestPolicyReconfigureNilFieldsLeaveUnchanged(t *testing.T) {
 	t.Parallel()
 

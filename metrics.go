@@ -21,6 +21,10 @@ type (
 		CircuitHalfOpens int64 `json:"circuit_half_opens"`
 		RateLimited      int64 `json:"rate_limited"`
 		BulkheadRejected int64 `json:"bulkhead_rejected"`
+		// BulkheadTimeouts counts calls that waited the full bulkhead max-wait
+		// without a slot and gave up with [ErrBulkheadTimeout]; with
+		// BulkheadRejected (immediate rejections) it splits the two shed modes.
+		BulkheadTimeouts int64 `json:"bulkhead_timeouts"`
 		HedgesTriggered  int64 `json:"hedges_triggered"`
 		HedgesWon        int64 `json:"hedges_won"`
 		FallbacksUsed    int64 `json:"fallbacks_used"`
@@ -62,6 +66,9 @@ type (
 		// Live gauges at snapshot time.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
 		BulkheadCap   int64 `json:"bulkhead_cap"`    // configured slot capacity
+		// BulkheadQueued is the number of callers currently waiting for a bulkhead
+		// slot; 0 unless a max-wait is configured (see [BulkheadMaxWait]).
+		BulkheadQueued int64 `json:"bulkhead_queued"`
 		// RetryBudgetTokens is the retry budget's current token level. It is 0
 		// both for a policy with no retry budget and for one whose budget has
 		// fully drained; read it together with whether the policy has a budget
@@ -104,6 +111,7 @@ type (
 		circuitHalfOpens     atomic.Int64
 		rateLimited          atomic.Int64
 		bulkheadRejected     atomic.Int64
+		bulkheadTimeouts     atomic.Int64
 		hedgesTriggered      atomic.Int64
 		hedgesWon            atomic.Int64
 		fallbacksUsed        atomic.Int64
@@ -184,6 +192,14 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 		},
 		OnBulkheadAcquired: user.OnBulkheadAcquired,
 		OnBulkheadReleased: user.OnBulkheadReleased,
+		OnBulkheadQueued:   user.OnBulkheadQueued,
+		OnBulkheadTimeout: func() {
+			m.bulkheadTimeouts.Add(1)
+
+			if user.OnBulkheadTimeout != nil {
+				user.OnBulkheadTimeout()
+			}
+		},
 		OnTimeout: func() {
 			m.timeouts.Add(1)
 
@@ -307,6 +323,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CircuitHalfOpens:     p.metrics.circuitHalfOpens.Load(),
 		RateLimited:          p.metrics.rateLimited.Load(),
 		BulkheadRejected:     p.metrics.bulkheadRejected.Load(),
+		BulkheadTimeouts:     p.metrics.bulkheadTimeouts.Load(),
 		HedgesTriggered:      p.metrics.hedgesTriggered.Load(),
 		HedgesWon:            p.metrics.hedgesWon.Load(),
 		FallbacksUsed:        p.metrics.fallbacksUsed.Load(),
@@ -337,6 +354,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	if p.bulkhead != nil {
 		metrics.BulkheadInUse = p.bulkhead.InUse()
 		metrics.BulkheadCap = p.bulkhead.Cap()
+		metrics.BulkheadQueued = p.bulkhead.Queued()
 	}
 
 	if p.retryBudget != nil {

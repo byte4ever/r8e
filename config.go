@@ -32,6 +32,15 @@ type (
 		// Bulkhead is the maximum concurrent requests.
 		// Optional. Example: 10.
 		Bulkhead *int `json:"bulkhead,omitempty" yaml:"bulkhead,omitempty"`
+		// BulkheadMaxWait enables the bounded FIFO wait: a full bulkhead queues
+		// callers for up to this duration instead of rejecting immediately.
+		// Optional; requires Bulkhead. Parsed via time.ParseDuration. Example:
+		// "50ms".
+		BulkheadMaxWait *string `json:"bulkhead_max_wait,omitempty" yaml:"bulkhead_max_wait,omitempty"`
+		// BulkheadQueueDepth caps how many callers may wait at once.
+		// Optional; requires Bulkhead and BulkheadMaxWait. Default: the bulkhead
+		// max-concurrency. Example: 20.
+		BulkheadQueueDepth *int `json:"bulkhead_queue_depth,omitempty" yaml:"bulkhead_queue_depth,omitempty"`
 		// AdaptiveConcurrency configures the adaptive concurrency limiter.
 		// Mutually exclusive with Bulkhead.
 		// Optional. Example: {"initial_limit": 20, "max_limit": 200}.
@@ -209,7 +218,14 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	if pc.Bulkhead != nil {
-		opts = append(opts, WithBulkhead(*pc.Bulkhead))
+		bhOpts, err := bulkheadOptionsFromConfig(pc)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithBulkhead(*pc.Bulkhead, bhOpts...))
+	} else if pc.BulkheadMaxWait != nil || pc.BulkheadQueueDepth != nil {
+		return nil, ErrBulkheadWaitWithoutBulkhead
 	}
 
 	if pc.AdaptiveConcurrency != nil {
@@ -328,6 +344,33 @@ func retryBudgetOptionsFromConfig(cfg *RetryBudgetConfig) []RetryBudgetOption {
 	}
 
 	return opts
+}
+
+// bulkheadOptionsFromConfig converts the bulkhead wait fields of a
+// [PolicyConfig] into bulkhead options. Shared by [BuildOptions] and
+// [Policy.Reconfigure]. Returns an error if a queue depth is given without a
+// max-wait (the queue is only used while waiting).
+func bulkheadOptionsFromConfig(pc *PolicyConfig) ([]BulkheadOption, error) {
+	var opts []BulkheadOption
+
+	if pc.BulkheadMaxWait != nil {
+		d, err := time.ParseDuration(*pc.BulkheadMaxWait)
+		if err != nil {
+			return nil, fmt.Errorf("bulkhead_max_wait: %w", err)
+		}
+
+		opts = append(opts, BulkheadMaxWait(d))
+	}
+
+	if pc.BulkheadQueueDepth != nil {
+		if pc.BulkheadMaxWait == nil {
+			return nil, ErrBulkheadQueueWithoutWait
+		}
+
+		opts = append(opts, BulkheadQueueDepth(*pc.BulkheadQueueDepth))
+	}
+
+	return opts, nil
 }
 
 // cbOptionsFromConfig converts a [CircuitBreakerConfig] into circuit-breaker

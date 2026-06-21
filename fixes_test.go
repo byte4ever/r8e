@@ -200,7 +200,7 @@ func TestCircuitBreakerHalfOpenAdmitsUpToMax(t *testing.T) {
 func TestBulkheadReleaseWithoutAcquireIsNoOp(t *testing.T) {
 	t.Parallel()
 
-	bh := NewBulkhead(1, &Hooks{})
+	bh := NewBulkhead(1, RealClock{}, &Hooks{})
 
 	// Unpaired releases must not drive the counter below zero.
 	bh.Release()
@@ -209,8 +209,8 @@ func TestBulkheadReleaseWithoutAcquireIsNoOp(t *testing.T) {
 	require.False(t, bh.Full(), "Full() = true after spurious releases, want false")
 
 	// The single slot is still enforced.
-	require.NoError(t, bh.Acquire())
-	require.ErrorIs(t, bh.Acquire(), ErrBulkheadFull)
+	require.NoError(t, bh.Acquire(t.Context()))
+	require.ErrorIs(t, bh.Acquire(t.Context()), ErrBulkheadFull)
 }
 
 // ---------------------------------------------------------------------------

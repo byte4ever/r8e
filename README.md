@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 24 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 26 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -203,6 +203,17 @@ policy := r8e.NewPolicy[string]("bulkhead-example",
     r8e.WithBulkhead(5), // max 5 concurrent calls
 )
 ```
+
+**Bounded FIFO wait.** By default a full bulkhead rejects immediately. With `BulkheadMaxWait(d)` a full bulkhead instead queues callers in FIFO order for up to `d` (timed against the injected `Clock`), handing each freed slot to the head of the queue. The queue is bounded by `BulkheadQueueDepth(n)` (default: the concurrency limit); once it is full, callers are rejected immediately with `ErrBulkheadFull`. A caller that waits the full max-wait gives up with `ErrBulkheadTimeout` (distinct from the immediate `ErrBulkheadFull`); a caller whose context is cancelled while queued returns the context error. Observability: the `OnBulkheadQueued` / `OnBulkheadTimeout` hooks, the `BulkheadTimeouts` counter, and the `BulkheadQueued` gauge. See [`examples/27-bulkhead-wait`](examples/27-bulkhead-wait).
+
+```go
+r8e.WithBulkhead(10,
+    r8e.BulkheadMaxWait(50*time.Millisecond), // queue a full bulkhead…
+    r8e.BulkheadQueueDepth(20),               // …up to 20 waiters
+)
+```
+
+> The standalone `Bulkhead.Acquire(ctx)` takes a context (it may block on the bounded wait), aligning with `RateLimiter.Allow(ctx)`.
 
 ### Hedged Request
 
@@ -633,7 +644,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (24): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
+Available hooks on `Hooks` (26): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -910,6 +921,7 @@ go run ./examples/23-retry-after/
 go run ./examples/24-read-through-cache/
 go run ./examples/25-adaptive-throttle/
 go run ./examples/26-slow-call-breaker/
+go run ./examples/27-bulkhead-wait/
 ```
 
 ## License

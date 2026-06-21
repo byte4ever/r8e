@@ -74,7 +74,7 @@ type (
 		retry          *retryDesc
 		circuitBreaker *circuitBreakerDesc
 		rateLimit      *rateLimitDesc
-		bulkhead       *int
+		bulkhead       *bulkheadDesc
 		adaptive       *adaptiveDesc
 		throttle       *throttleDesc
 		hedge          *time.Duration
@@ -98,6 +98,12 @@ type (
 	// circuitBreakerDesc holds deferred circuit breaker configuration.
 	circuitBreakerDesc struct {
 		opts []CircuitBreakerOption
+	}
+
+	// bulkheadDesc holds deferred bulkhead configuration.
+	bulkheadDesc struct {
+		opts          []BulkheadOption
+		maxConcurrent int
 	}
 
 	// rateLimitDesc holds deferred rate limiter configuration.
@@ -278,10 +284,12 @@ func WithRateLimit(rate float64, opts ...RateLimitOption) Option {
 }
 
 // WithBulkhead adds a concurrency limiter that rejects calls when all slots are
-// in use.
-func WithBulkhead(maxConcurrent int) Option {
+// in use. By default rejection is immediate ([ErrBulkheadFull]); pass
+// [BulkheadMaxWait] (and optionally [BulkheadQueueDepth]) to make a full bulkhead
+// queue callers for a bounded time instead.
+func WithBulkhead(maxConcurrent int, opts ...BulkheadOption) Option {
 	return optionFunc(func(s *policySetup) {
-		s.bulkhead = &maxConcurrent
+		s.bulkhead = &bulkheadDesc{maxConcurrent: maxConcurrent, opts: opts}
 	})
 }
 
@@ -467,57 +475,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		opt.apply(&setup)
 	}
 
-	// A retry budget gates retries; without a retry pattern it has nothing to
-	// do, so reject the misconfiguration loudly rather than silently ignore it.
-	// BuildOptions catches the same case for config-driven construction and
-	// returns ErrRetryBudgetWithoutRetry instead of reaching this panic.
-	if setup.retryBudget != nil && setup.retry == nil {
-		panic(ErrRetryBudgetWithoutRetry)
-	}
-
-	if setup.coalesce != nil {
-		// Coalescing cannot group calls without a key function, and its detached
-		// shared call needs a timeout to bound it (see WithCoalesce). Reject both
-		// misconfigurations loudly rather than degrade silently or leak.
-		if setup.coalesce.keyFn == nil {
-			panic(ErrCoalesceNilKeyFunc)
-		}
-
-		if setup.timeout == nil {
-			panic(ErrCoalesceWithoutTimeout)
-		}
-	}
-
-	if setup.cache != nil {
-		// The cache cannot key calls without a key function, has nothing to back
-		// it without a cache, and could never serve a hit with a non-positive TTL
-		// (every entry would be stale on arrival). Reject all three loudly.
-		if setup.cache.keyFn == nil {
-			panic(ErrCacheNilKeyFunc)
-		}
-
-		if setup.cache.cache == nil {
-			panic(ErrCacheNilCache)
-		}
-
-		if setup.cache.ttl <= 0 {
-			panic(ErrCacheNonPositiveTTL)
-		}
-	}
-
-	// The bulkhead and the adaptive limiter both drive the concurrency slot;
-	// configuring both is contradictory. BuildOptions catches the same case for
-	// config-driven construction and returns ErrConcurrencyLimiterConflict.
-	if setup.bulkhead != nil && setup.adaptive != nil {
-		panic(ErrConcurrencyLimiterConflict)
-	}
-
-	// A time budget only gates retry and hedge; with neither, it would silently
-	// do nothing. Reject it loudly, matching ErrRetryBudgetWithoutRetry.
-	// BuildOptions returns ErrTimeBudgetWithoutConsumer for the same config case.
-	if setup.timeBudget != nil && setup.retry == nil && setup.hedge == nil {
-		panic(ErrTimeBudgetWithoutConsumer)
-	}
+	validateSetup(&setup)
 
 	if setup.clock == nil {
 		setup.clock = RealClock{}
@@ -579,7 +537,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	}
 
 	if setup.bulkhead != nil {
-		bulkhead = NewBulkhead(*setup.bulkhead, &hooks)
+		bulkhead = NewBulkhead(setup.bulkhead.maxConcurrent, clock, &hooks, setup.bulkhead.opts...)
 		entries = append(entries, newBulkheadEntry[T](bulkhead))
 	}
 
@@ -654,6 +612,55 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	}
 
 	return policy
+}
+
+// validateSetup panics on a self-contradictory policy configuration — the same
+// misconfigurations [BuildOptions] rejects with an error for the config-driven
+// path. It runs once before any pattern is constructed.
+func validateSetup(setup *policySetup) {
+	// A retry budget gates retries; without a retry pattern it has nothing to do.
+	if setup.retryBudget != nil && setup.retry == nil {
+		panic(ErrRetryBudgetWithoutRetry)
+	}
+
+	if setup.coalesce != nil {
+		// Coalescing cannot group calls without a key function, and its detached
+		// shared call needs a timeout to bound it (see WithCoalesce).
+		if setup.coalesce.keyFn == nil {
+			panic(ErrCoalesceNilKeyFunc)
+		}
+
+		if setup.timeout == nil {
+			panic(ErrCoalesceWithoutTimeout)
+		}
+	}
+
+	if setup.cache != nil {
+		// The cache cannot key calls without a key function, has nothing to back
+		// it without a cache, and could never serve a hit with a non-positive TTL.
+		if setup.cache.keyFn == nil {
+			panic(ErrCacheNilKeyFunc)
+		}
+
+		if setup.cache.cache == nil {
+			panic(ErrCacheNilCache)
+		}
+
+		if setup.cache.ttl <= 0 {
+			panic(ErrCacheNonPositiveTTL)
+		}
+	}
+
+	// The bulkhead and the adaptive limiter both drive the concurrency slot;
+	// configuring both is contradictory.
+	if setup.bulkhead != nil && setup.adaptive != nil {
+		panic(ErrConcurrencyLimiterConflict)
+	}
+
+	// A time budget only gates retry and hedge; with neither it would do nothing.
+	if setup.timeBudget != nil && setup.retry == nil && setup.hedge == nil {
+		panic(ErrTimeBudgetWithoutConsumer)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -762,7 +769,7 @@ func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
 		Name:     "bulkhead",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				if err := bh.Acquire(); err != nil {
+				if err := bh.Acquire(ctx); err != nil {
 					var zero T
 
 					return zero, err //nolint:wrapcheck // bulkhead error returned as-is
