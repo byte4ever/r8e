@@ -264,7 +264,7 @@ func TestDoTimeoutZeroValueOnTimeoutStruct(t *testing.T) {
 func TestDoTimeoutNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	hooks := &r8e.Hooks{} // all nil
+	var hooks *r8e.Hooks // nil *Hooks must be a no-op
 
 	_, _ = r8e.DoTimeout[string](
 		context.Background(),

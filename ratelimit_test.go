@@ -319,11 +319,11 @@ func TestRateLimiterNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
 	clk := newRateLimitClock(time.Now())
-	rl := NewRateLimiter(1, clk, &Hooks{})
+	rl := NewRateLimiter(1, clk, nil) // nil *Hooks must be a no-op
 
 	// Drain.
 	_ = rl.Allow(context.Background())
-	// This should not panic even with nil OnRateLimited hook.
+	// This should not panic even with a nil Hooks.
 	_ = rl.Allow(context.Background())
 }
 

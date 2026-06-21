@@ -175,7 +175,7 @@ func TestBulkheadMultipleSequentialCycles(t *testing.T) {
 func TestBulkheadNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	bh := r8e.NewBulkhead(1, r8e.RealClock{}, &r8e.Hooks{})
+	bh := r8e.NewBulkhead(1, r8e.RealClock{}, nil) // nil *Hooks must be a no-op
 
 	bh.Acquire(t.Context())
 	bh.Release()

@@ -140,21 +140,45 @@ func TestEmitFallbackUsedCallsHook(t *testing.T) {
 func TestNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	var h Hooks // all fields nil
+	// Exercise every emit method against both a value with nil fields and a
+	// nil *Hooks receiver: both must be a no-op rather than a panic.
+	emitAll := func(h *Hooks) {
+		h.emitRetry(1, errors.New("err"))
+		h.emitCircuitOpen()
+		h.emitCircuitClose()
+		h.emitCircuitHalfOpen()
+		h.emitRateLimited()
+		h.emitBulkheadFull()
+		h.emitBulkheadAcquired()
+		h.emitBulkheadReleased()
+		h.emitBulkheadQueued()
+		h.emitBulkheadTimeout()
+		h.emitTimeout()
+		h.emitHedgeTriggered()
+		h.emitHedgeWon()
+		h.emitFallbackUsed(errors.New("err"))
+		h.emitRetryBudgetExceeded()
+		h.emitTimeBudgetExceeded()
+		h.emitCoalesceLeader()
+		h.emitCoalesceFollower()
+		h.emitCacheHit()
+		h.emitCacheMiss()
+		h.emitCacheStored()
+		h.emitStaleServed()
+		h.emitConcurrencyRejected()
+		h.emitConcurrencyLimitChanged(7)
+		h.emitThrottled()
+		h.emitSlowCallRateExceeded()
+	}
 
-	// None of these should panic.
-	h.emitRetry(1, errors.New("err"))
-	h.emitCircuitOpen()
-	h.emitCircuitClose()
-	h.emitCircuitHalfOpen()
-	h.emitRateLimited()
-	h.emitBulkheadFull()
-	h.emitBulkheadAcquired()
-	h.emitBulkheadReleased()
-	h.emitTimeout()
-	h.emitHedgeTriggered()
-	h.emitHedgeWon()
-	h.emitFallbackUsed(errors.New("err"))
+	require.NotPanics(t, func() {
+		var empty Hooks // pointer to a value with all-nil fields
+		emitAll(&empty)
+	})
+	require.NotPanics(t, func() {
+		var nilHooks *Hooks // nil receiver
+		emitAll(nilHooks)
+	})
 }
 
 // ---------------------------------------------------------------------------

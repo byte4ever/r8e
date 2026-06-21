@@ -231,12 +231,13 @@ func TestDoHedgeContextAlreadyCancelled(t *testing.T) {
 func TestDoHedgeNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
+	// Nil Hooks and nil Clock must both default to no-op / RealClock.
 	result, err := r8e.DoHedge[string](
 		context.Background(),
 		func(_ context.Context) (string, error) {
 			return "ok", nil
 		},
-		r8e.HedgeParams{Delay: time.Hour, Hooks: &r8e.Hooks{}, Clock: r8e.RealClock{}},
+		r8e.HedgeParams{Delay: time.Hour},
 	)
 	require.NoError(t, err)
 	require.Equal(t, "ok", result)

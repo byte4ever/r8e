@@ -739,7 +739,6 @@ func TestDoRetryBackoffStrategyReceivesCorrectAttempts(t *testing.T) {
 func TestDoRetryNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 	clk := newImmediateTestClock()
-	hooks := &Hooks{} // all nil
 
 	_, _ = DoRetry[string](
 		context.Background(),
@@ -749,7 +748,7 @@ func TestDoRetryNilHooksDoNotPanic(t *testing.T) {
 		RetryParams{
 			MaxAttempts: 3,
 			Strategy:    ConstantBackoff(1 * time.Millisecond),
-			Hooks:       hooks,
+			Hooks:       nil, // nil *Hooks must be a no-op
 			Clock:       clk,
 		},
 	)

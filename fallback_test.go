@@ -241,7 +241,7 @@ func TestDoFallbackFuncHookNotFiredOnSuccess(t *testing.T) {
 func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	hooks := &r8e.Hooks{} // all fields nil
+	var hooks *r8e.Hooks // nil *Hooks must be a no-op
 
 	// Success path with nil hooks.
 	_, _ = r8e.DoFallback[string](
@@ -272,7 +272,7 @@ func TestDoFallbackNilHooksDoNotPanic(t *testing.T) {
 func TestDoFallbackFuncNilHooksDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	hooks := &r8e.Hooks{} // all fields nil
+	var hooks *r8e.Hooks // nil *Hooks must be a no-op
 
 	// Success path with nil hooks.
 	_, _ = r8e.DoFallbackFunc[string](

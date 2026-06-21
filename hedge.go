@@ -17,7 +17,9 @@ type (
 		isPrimary bool
 	}
 
-	// HedgeParams holds the configuration for a hedged request.
+	// HedgeParams holds the configuration for a hedged request. A nil Clock
+	// defaults to [RealClock] and a nil Hooks is treated as a no-op, so the
+	// zero value beyond Delay is usable.
 	HedgeParams struct {
 		Clock Clock
 		Hooks *Hooks
@@ -26,7 +28,8 @@ type (
 )
 
 // DoHedge executes fn and, if it hasn't completed after delay, fires a second
-// concurrent attempt. The first response wins; the other is cancelled.
+// concurrent attempt. The first response wins; the other is cancelled. A nil
+// params.Clock defaults to [RealClock]; a nil params.Hooks is a no-op.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func DoHedge[T any](
@@ -35,6 +38,10 @@ func DoHedge[T any](
 	params HedgeParams,
 ) (T, error) {
 	var zero T
+
+	if params.Clock == nil {
+		params.Clock = RealClock{}
+	}
 
 	// If the parent context is already done, return its error immediately.
 	if ctx.Err() != nil {
