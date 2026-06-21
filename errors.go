@@ -32,6 +32,9 @@ var (
 	// ErrConcurrencyLimited is returned when the adaptive concurrency limiter is
 	// at its current limit and rejects a call.
 	ErrConcurrencyLimited error = resilienceError("concurrency limited")
+	// ErrThrottled is returned when the adaptive throttler sheds a call locally
+	// to protect a struggling backend (see [WithAdaptiveThrottle]).
+	ErrThrottled error = resilienceError("adaptively throttled")
 	// ErrTimeout is returned when an operation exceeds its deadline.
 	ErrTimeout error = resilienceError("timeout")
 	// ErrTimeBudgetExceeded is returned (wrapping the last downstream error) when

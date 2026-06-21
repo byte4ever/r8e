@@ -26,7 +26,7 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Cache > Coalesce > Timeout > TimeBudget > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
+Fallback > Cache > Coalesce > Timeout > TimeBudget > AdaptiveThrottle > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
 The retry budget is not a stage; it gates retries from within Retry. The time
 budget stamps a ctx deadline that retry/hedge read. Bulkhead and
 AdaptiveConcurrency share the concurrency slot and are mutually exclusive.
@@ -148,6 +148,31 @@ the bulkhead slot → **mutually exclusive with `WithBulkhead`**: both panics
 it). Grows only while loaded (in-flight ≥ half the limit). Standalone:
 `r8e.NewAdaptiveLimiter(clock, hooks, opts...)` + `Acquire()`/`Record(start)`.
 
+### Adaptive Throttle
+
+```go
+r8e.WithAdaptiveThrottle(opts ...ThrottleOption)
+```
+
+Google-SRE **client-side adaptive throttling**: a probabilistic load shedder.
+Keeps a sliding window of requests vs. backend-accepted requests and, once
+requests exceed K·accepts, sheds calls locally with `max(0, (requests −
+K·accepts)/(requests+1))`, returning `r8e.ErrThrottled` (a shed call still counts
+as a request, never an accept, so sustained rejection raises the probability).
+**Options**: `r8e.OverloadRatio(k)` (K, default 2.0), `r8e.MaxRejectionRate(r)`
+(cap, default 0.9 — keeps probing for recovery), `r8e.ThrottleWindow(d)` (default
+10s), `r8e.MinRequests(n)` (default 10), `r8e.ThrottleClassifier(func(error)
+bool)` (which errors are backend rejections; default **all** errors). Sits just
+**outside the circuit breaker** (priority `priorityThrottle`) — proportional shed
+before the binary trip; a shed call never reaches the breaker. Numeric params are
+config-expressible (`AdaptiveThrottleConfig`) + reconfigurable; the classifier is
+code-only. Window is `Clock`-driven (deterministic). Observability: `OnThrottled`
+hook, `Throttled` counter, `ThrottleProbability` gauge, degraded `throttling`
+health condition (never gates readiness). Standalone:
+`r8e.NewThrottler(clock, hooks, opts...)` + `Allow() error` (returns
+`ErrThrottled` or nil) / `Record(err error)`; `RejectionProbability()` /
+`Throttling()` snapshots.
+
 ### Hedge
 
 ```go
@@ -228,7 +253,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrConcurrencyLimited`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`.
+`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`.
 
 ## Hooks
 
@@ -252,6 +277,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCoalesceFollower: func() {},     // call deduplicated into an in-flight one
     OnConcurrencyRejected:     func() {},     // adaptive limiter shed a call
     OnConcurrencyLimitChanged: func(limit int) {}, // adaptive limit retuned
+    OnThrottled:   func() {},  // adaptive throttler shed a call locally
     OnCacheHit:    func() {},  // served from cache (fresh value or negative entry)
     OnCacheMiss:   func() {},  // no fresh value; downstream executed
     OnCacheStored: func() {},  // successful result written to cache
@@ -275,11 +301,11 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
 `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
 `TimeBudgetExceeded`, `CoalesceLeaders`, `CoalesceFollowers`,
-`ConcurrencyRejected`, `CacheHits`, `CacheMisses`, `CacheStores`,
+`ConcurrencyRejected`, `Throttled`, `CacheHits`, `CacheMisses`, `CacheStores`,
 `CacheStaleServed`) and gauges
 (`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
-`CoalesceInFlight`, `ConcurrencyLimit`, `ConcurrencyInFlight`, `Saturated`,
-`Healthy`, `Criticality`).
+`CoalesceInFlight`, `ConcurrencyLimit`, `ConcurrencyInFlight`,
+`ThrottleProbability`, `Saturated`, `Healthy`, `Criticality`).
 
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
 `r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate
@@ -467,4 +493,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/23-retry-after`.
+Examples: `examples/01-quickstart` through `examples/25-adaptive-throttle`.

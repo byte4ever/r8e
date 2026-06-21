@@ -35,7 +35,7 @@ var (
 // Reconfigure applies cfg to the registered policy named name, retuning its
 // live patterns (see [Policy.Reconfigure]). It returns an error wrapping
 // [ErrPolicyNotRegistered] if no policy with that name is registered.
-func (r *Registry) Reconfigure(name string, cfg PolicyConfig) error {
+func (r *Registry) Reconfigure(name string, cfg PolicyConfig) error { //nolint:gocritic // value-passed Reconfigurer API
 	for _, reporter := range *r.reporters.Load() {
 		rc, ok := reporter.(Reconfigurer)
 		if ok && rc.Name() == name {
@@ -57,7 +57,7 @@ func (r *Registry) Reconfigure(name string, cfg PolicyConfig) error {
 // applied, so on error the policy is left exactly as it was. It returns an
 // error wrapping [ErrPatternAbsent] if cfg specifies a pattern the policy does
 // not have, or a parse error for an invalid duration or backoff strategy.
-func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
+func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // value-passed Reconfigurer API
 	// Phase 1 — validate everything into deferred apply actions; no mutation.
 	var actions []func()
 
@@ -130,6 +130,22 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 		actions = append(
 			actions,
 			func() { p.adaptive.Reconfigure(adaptiveOpts...) },
+		)
+	}
+
+	if cfg.AdaptiveThrottle != nil {
+		if p.throttler == nil {
+			return absentPatternError("adaptive_throttle")
+		}
+
+		throttleOpts, err := throttleOptionsFromConfig(cfg.AdaptiveThrottle)
+		if err != nil {
+			return fmt.Errorf("r8e: reconfigure: %w", err)
+		}
+
+		actions = append(
+			actions,
+			func() { p.throttler.Reconfigure(throttleOpts...) },
 		)
 	}
 

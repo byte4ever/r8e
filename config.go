@@ -36,6 +36,9 @@ type (
 		// Mutually exclusive with Bulkhead.
 		// Optional. Example: {"initial_limit": 20, "max_limit": 200}.
 		AdaptiveConcurrency *AdaptiveConfig `json:"adaptive_concurrency,omitempty" yaml:"adaptive_concurrency,omitempty"`
+		// AdaptiveThrottle configures the Google-SRE adaptive throttler.
+		// Optional. Example: {"overload_ratio": 2.0, "window": "10s"}.
+		AdaptiveThrottle *AdaptiveThrottleConfig `json:"adaptive_throttle,omitempty" yaml:"adaptive_throttle,omitempty"`
 		// RetryBudget configures the adaptive retry budget. Requires Retry.
 		// Optional. Example: {"max_tokens": 10, "token_ratio": 0.1}.
 		RetryBudget *RetryBudgetConfig `json:"retry_budget,omitempty" yaml:"retry_budget,omitempty"`
@@ -91,6 +94,25 @@ type (
 		// RTTTolerance is the tolerated RTT increase before reducing the limit.
 		// Optional. Example: 1.5.
 		RTTTolerance *float64 `json:"rtt_tolerance,omitempty" yaml:"rtt_tolerance,omitempty"`
+	}
+
+	// AdaptiveThrottleConfig holds adaptive-throttler configuration values.
+	// Embed it (via [PolicyConfig]) in your own config struct for JSON or YAML
+	// unmarshaling. The error classifier (see [ThrottleClassifier]) is code, so
+	// it is not configurable here.
+	AdaptiveThrottleConfig struct {
+		// OverloadRatio is K, the request/accept gap tolerated before shedding.
+		// Optional. Example: 2.0.
+		OverloadRatio *float64 `json:"overload_ratio,omitempty" yaml:"overload_ratio,omitempty"`
+		// MaxRejectionRate caps the local rejection probability in (0, 1].
+		// Optional. Example: 0.9.
+		MaxRejectionRate *float64 `json:"max_rejection_rate,omitempty" yaml:"max_rejection_rate,omitempty"`
+		// Window is the sliding window over which requests and accepts are summed.
+		// Optional. Parsed via time.ParseDuration. Example: "10s".
+		Window *string `json:"window,omitempty" yaml:"window,omitempty"`
+		// MinRequests is the minimum windowed requests before any call is shed.
+		// Optional. Example: 10.
+		MinRequests *int `json:"min_requests,omitempty" yaml:"min_requests,omitempty"`
 	}
 
 	// RetryBudgetConfig holds retry-budget configuration values. Embed it
@@ -183,6 +205,15 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		)
 	}
 
+	if pc.AdaptiveThrottle != nil {
+		throttleOpts, err := throttleOptionsFromConfig(pc.AdaptiveThrottle)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithAdaptiveThrottle(throttleOpts...))
+	}
+
 	if pc.Hedge != nil {
 		d, err := time.ParseDuration(*pc.Hedge)
 		if err != nil {
@@ -235,6 +266,38 @@ func adaptiveOptionsFromConfig(cfg *AdaptiveConfig) []AdaptiveOption {
 	}
 
 	return opts
+}
+
+// throttleOptionsFromConfig converts an [AdaptiveThrottleConfig] into
+// adaptive-throttler options. Shared by [BuildOptions] and [Policy.Reconfigure].
+// It returns an error only when the window string fails to parse.
+func throttleOptionsFromConfig(
+	cfg *AdaptiveThrottleConfig,
+) ([]ThrottleOption, error) {
+	var opts []ThrottleOption
+
+	if cfg.OverloadRatio != nil {
+		opts = append(opts, OverloadRatio(*cfg.OverloadRatio))
+	}
+
+	if cfg.MaxRejectionRate != nil {
+		opts = append(opts, MaxRejectionRate(*cfg.MaxRejectionRate))
+	}
+
+	if cfg.Window != nil {
+		window, err := time.ParseDuration(*cfg.Window)
+		if err != nil {
+			return nil, fmt.Errorf("adaptive_throttle.window: %w", err)
+		}
+
+		opts = append(opts, ThrottleWindow(window))
+	}
+
+	if cfg.MinRequests != nil {
+		opts = append(opts, MinRequests(*cfg.MinRequests))
+	}
+
+	return opts, nil
 }
 
 // retryBudgetOptionsFromConfig converts a [RetryBudgetConfig] into retry-budget
@@ -355,4 +418,3 @@ func parseBackoffStrategy(
 		)
 	}
 }
-

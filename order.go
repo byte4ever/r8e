@@ -26,11 +26,12 @@ const (
 	priorityCoalesce       = 2 // collapse duplicate concurrent calls before any work
 	priorityTimeout        = 3 // global timeout (hard cancel)
 	priorityTimeBudget     = 4 // total time budget shared across retry + hedge
-	priorityCircuitBreaker = 5
-	priorityRateLimiter    = 6
-	priorityBulkhead       = 7
-	priorityRetry          = 8
-	priorityHedge          = 9 // innermost — closest to user function
+	priorityThrottle       = 5 // proportional load shed before the breaker trips
+	priorityCircuitBreaker = 6
+	priorityRateLimiter    = 7
+	priorityBulkhead       = 8
+	priorityRetry          = 9
+	priorityHedge          = 10 // innermost — closest to user function
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

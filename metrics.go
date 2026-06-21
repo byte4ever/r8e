@@ -38,6 +38,9 @@ type (
 		// ConcurrencyRejected counts calls rejected by the adaptive concurrency
 		// limiter because in-flight was at its current limit.
 		ConcurrencyRejected int64 `json:"concurrency_rejected"`
+		// Throttled counts calls shed locally by the adaptive throttler to
+		// protect a struggling backend (see [WithAdaptiveThrottle]).
+		Throttled int64 `json:"throttled"`
 		// CacheHits counts calls served from the read-through cache without
 		// executing the downstream work (fresh values and negative entries).
 		CacheHits int64 `json:"cache_hits"`
@@ -72,6 +75,10 @@ type (
 		// ConcurrencyInFlight is the number of calls currently admitted by the
 		// adaptive limiter; 0 when the policy has no adaptive limiter.
 		ConcurrencyInFlight int64 `json:"concurrency_in_flight"`
+		// ThrottleProbability is the adaptive throttler's current probability of
+		// shedding a call, in [0, MaxRejectionRate]; 0 when the policy has no
+		// throttler or it is forwarding all traffic.
+		ThrottleProbability float64 `json:"throttle_probability"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -96,6 +103,7 @@ type (
 		coalesceLeaders     atomic.Int64
 		coalesceFollowers   atomic.Int64
 		concurrencyRejected atomic.Int64
+		throttled           atomic.Int64
 		timeBudgetExceeded  atomic.Int64
 		cacheHits           atomic.Int64
 		cacheMisses         atomic.Int64
@@ -224,6 +232,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 			}
 		},
 		OnConcurrencyLimitChanged: user.OnConcurrencyLimitChanged,
+		OnThrottled: func() {
+			m.throttled.Add(1)
+
+			if user.OnThrottled != nil {
+				user.OnThrottled()
+			}
+		},
 		OnCacheHit: func() {
 			m.cacheHits.Add(1)
 
@@ -283,6 +298,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CoalesceLeaders:     p.metrics.coalesceLeaders.Load(),
 		CoalesceFollowers:   p.metrics.coalesceFollowers.Load(),
 		ConcurrencyRejected: p.metrics.concurrencyRejected.Load(),
+		Throttled:           p.metrics.throttled.Load(),
 		TimeBudgetExceeded:  p.metrics.timeBudgetExceeded.Load(),
 		CacheHits:           p.metrics.cacheHits.Load(),
 		CacheMisses:         p.metrics.cacheMisses.Load(),
@@ -316,6 +332,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	if p.adaptive != nil {
 		metrics.ConcurrencyLimit = int64(p.adaptive.Limit())
 		metrics.ConcurrencyInFlight = int64(p.adaptive.InFlight())
+	}
+
+	if p.throttler != nil {
+		metrics.ThrottleProbability = p.throttler.RejectionProbability()
 	}
 
 	return metrics

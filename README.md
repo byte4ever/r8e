@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 22 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 23 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -61,6 +61,7 @@ health reporting, and configuration hot-reload.
 | **Rate Limiter** | Token-bucket throughput control (reject or blocking mode) |
 | **Bulkhead** | Semaphore-based concurrency limiting (fixed limit) |
 | **Adaptive Concurrency** | Self-tuning concurrency limit from observed latency (Netflix Gradient2) |
+| **Adaptive Throttle** | Probabilistic client-side load shedding by the live accept/request ratio (Google SRE), before the breaker trips |
 | **Hedged Requests** | Fire a second call after a delay to reduce tail latency |
 | **Request Coalescing** | Collapse concurrent identical calls into one shared execution (singleflight), killing cache stampede |
 | **Read-Through Cache** | Memoize successful results per key in the chain; fresh hits skip the chain, with stale-if-error and negative caching |
@@ -321,12 +322,13 @@ Request
       → Coalesce      (collapse duplicate concurrent calls)
         → Timeout         (global deadline — hard cancel)
           → Time Budget    (total cooperative budget for retry + hedge)
-            → Circuit Breaker  (fast-fail if open)
-              → Rate Limiter   (throttle throughput)
-                → Bulkhead     (limit concurrency — fixed, or adaptive)
-                  → Retry       (retry transient failures, gated by the retry budget)
-                    → Hedge     (innermost — races redundant calls)
-                      → fn()    (your function)
+            → Adaptive Throttle  (proportional load shed before the breaker trips)
+              → Circuit Breaker  (fast-fail if open)
+                → Rate Limiter   (throttle throughput)
+                  → Bulkhead     (limit concurrency — fixed, or adaptive)
+                    → Retry       (retry transient failures, gated by the retry budget)
+                      → Hedge     (innermost — races redundant calls)
+                        → fn()    (your function)
 ```
 
 The retry budget is not a separate stage: it lives inside Retry, throttling
@@ -545,6 +547,48 @@ hooks, the `ConcurrencyRejected` counter, and the `ConcurrencyLimit` /
 An `AdaptiveLimiter` can also be used standalone with `NewAdaptiveLimiter`,
 `Acquire`, and `Record`.
 
+## Adaptive Throttle
+
+`WithAdaptiveThrottle` adds Google-SRE **client-side adaptive throttling**: a
+probabilistic load shedder that rejects calls locally — before they reach a
+struggling backend — in proportion to how heavily that backend is already
+rejecting them. It keeps a sliding window of requests attempted versus requests
+the backend accepted and, once requests exceed `OverloadRatio` (K) times accepts,
+sheds new calls with the SRE probability `max(0, (requests − K·accepts) /
+(requests + 1))`. A shed call returns `ErrThrottled` without running any inner
+stage.
+
+```go
+policy := r8e.NewPolicy[Response]("downstream",
+    r8e.WithAdaptiveThrottle(
+        r8e.OverloadRatio(2),               // K: tolerate a 2x request/accept gap
+        r8e.MaxRejectionRate(0.9),          // always let ≥10% through to probe
+        r8e.ThrottleWindow(10*time.Second), // sliding window length
+        r8e.MinRequests(10),                // need some traffic before shedding
+    ),
+)
+```
+
+Unlike the binary [Circuit Breaker](#circuit-breaker), the throttler dampens load
+**gradually and proportionally**, and it sits just outside the breaker in the
+chain — ideally easing a recovering backend back to health before the breaker
+ever opens. The probability is capped by `MaxRejectionRate` (default `0.9`) so a
+fraction of traffic always probes for recovery, and it recovers on its own as the
+failures age out of the window. A locally shed call never reaches the breaker, so
+it does not count against it.
+
+By default every error from the inner chain counts as a backend rejection; narrow
+that with `ThrottleClassifier(func(error) bool)` so only genuine overload errors
+do (a 404 or validation error is then treated as an accept). The numeric
+parameters are configurable via JSON (`AdaptiveThrottleConfig`) and hot-reloadable;
+the classifier is code-only.
+
+Observability: the `OnThrottled` hook, the `Throttled` counter, and the
+`ThrottleProbability` gauge. Shedding surfaces as a degraded `throttling` health
+condition (it never gates readiness). A `Throttler` can also be used standalone
+with `NewThrottler`, `Allow`, and `Record`. See
+[`examples/25-adaptive-throttle`](examples/25-adaptive-throttle).
+
 ## Error Classification
 
 Classify errors to control retry behavior:
@@ -580,7 +624,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (22): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
+Available hooks on `Hooks` (23): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -855,6 +899,7 @@ go run ./examples/21-adaptive-concurrency/
 go run ./examples/22-time-budget/
 go run ./examples/23-retry-after/
 go run ./examples/24-read-through-cache/
+go run ./examples/25-adaptive-throttle/
 ```
 
 ## License

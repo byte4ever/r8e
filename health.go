@@ -74,6 +74,9 @@ const (
 	// ConditionConcurrencyLimited means the adaptive concurrency limiter is at
 	// its current limit (degraded); it is shedding excess concurrency.
 	ConditionConcurrencyLimited Condition = "concurrency_limited"
+	// ConditionThrottling means the adaptive throttler is shedding load
+	// (degraded); it is rejecting a fraction of calls to protect the backend.
+	ConditionThrottling Condition = "throttling"
 )
 
 // conditionSeverity is the single source of truth for the degradation model: it
@@ -92,6 +95,7 @@ var conditionSeverity = []struct {
 	{ConditionRateLimited, CriticalityDegraded},
 	{ConditionBulkheadFull, CriticalityDegraded},
 	{ConditionConcurrencyLimited, CriticalityDegraded},
+	{ConditionThrottling, CriticalityDegraded},
 	{ConditionRetryBudgetExhausted, CriticalityDegraded},
 	{ConditionDependencyDegraded, CriticalityDegraded},
 	{ConditionCircuitHalfOpen, CriticalityNone},
@@ -165,6 +169,11 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// Adaptive concurrency limiter — degraded when saturated (shedding load).
 	if p.adaptive != nil && p.adaptive.Saturated() {
 		conditions = append(conditions, ConditionConcurrencyLimited)
+	}
+
+	// Adaptive throttler — degraded while it is shedding load.
+	if p.throttler != nil && p.throttler.Throttling() {
+		conditions = append(conditions, ConditionThrottling)
 	}
 
 	// Retry budget — degraded; retries are throttled but first attempts flow.

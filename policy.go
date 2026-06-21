@@ -26,6 +26,7 @@ type (
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
 		adaptive       *AdaptiveLimiter
+		throttler      *Throttler
 		retryBudget    *RetryBudget
 		coalescer      *Coalescer[T]
 		registry       *Registry
@@ -37,8 +38,8 @@ type (
 		timeBudget *atomic.Int64                 // total time budget in nanoseconds
 		hedge      *atomic.Int64                 // hedge delay in nanoseconds
 		retry      *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
-		name    string
-		deps    []HealthReporter
+		name       string
+		deps       []HealthReporter
 		// affectsReadiness gates Kubernetes readiness when this policy is
 		// critically unhealthy (see WithReadinessImpact). False by default.
 		affectsReadiness bool
@@ -75,6 +76,7 @@ type (
 		rateLimit      *rateLimitDesc
 		bulkhead       *int
 		adaptive       *adaptiveDesc
+		throttle       *throttleDesc
 		hedge          *time.Duration
 		fallbackValue  *staticFallback
 		fallbackFunc   *funcFallback
@@ -114,6 +116,11 @@ type (
 	// adaptiveDesc holds deferred adaptive-concurrency configuration.
 	adaptiveDesc struct {
 		opts []AdaptiveOption
+	}
+
+	// throttleDesc holds deferred adaptive-throttler configuration.
+	throttleDesc struct {
+		opts []ThrottleOption
 	}
 
 	// cacheDesc holds deferred read-through-cache configuration. The cache is
@@ -298,6 +305,43 @@ func WithBulkhead(maxConcurrent int) Option {
 func WithAdaptiveConcurrency(opts ...AdaptiveOption) Option {
 	return optionFunc(func(s *policySetup) {
 		s.adaptive = &adaptiveDesc{opts: opts}
+	})
+}
+
+// WithAdaptiveThrottle adds a Google-SRE client-side adaptive throttler: a
+// probabilistic load shedder that rejects calls locally, with [ErrThrottled],
+// in proportion to how heavily the backend is already rejecting them (see
+// [Throttler]). It keeps a sliding window of requests vs. backend-accepted
+// requests and, once requests exceed [OverloadRatio] times accepts, sheds new
+// calls with a probability capped by [MaxRejectionRate]. See also [MinRequests],
+// [ThrottleWindow], and [ThrottleClassifier].
+//
+// It sits just outside the circuit breaker in the chain, so it dampens load
+// gradually and proportionally before the breaker's binary trip — ideally
+// easing a recovering backend back to health without the breaker opening at all.
+// A shed call never reaches the inner patterns, so it does not count against the
+// circuit breaker.
+//
+// By default every error returned by the inner chain counts as a backend
+// rejection — including the resilience stack's OWN admission errors
+// ([ErrCircuitOpen], [ErrRateLimited], [ErrBulkheadFull], [ErrConcurrencyLimited]),
+// since the throttler sits outside those stages and only sees their returned
+// error. Two consequences to be aware of when combining the throttler with a
+// breaker or limiter: a saturated rate limiter or bulkhead inflates the apparent
+// backend-distress signal even when the backend is healthy, and after a breaker
+// opens the window holds those rejections, so the throttler can keep shedding
+// briefly into the breaker's half-open recovery. Both are self-correcting — the
+// window decays within one [ThrottleWindow] (default 10s) and [MaxRejectionRate]
+// keeps a fraction of traffic probing — but to react only to genuine backend
+// outcomes, pass a [ThrottleClassifier] that excludes those sentinels (and any
+// non-overload application error such as a 404).
+//
+// The shedding probability is observable via the OnThrottled hook, the Throttled
+// counter, and the ThrottleProbability gauge, and surfaces as the degraded
+// health condition [ConditionThrottling] while it sheds.
+func WithAdaptiveThrottle(opts ...ThrottleOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.throttle = &throttleDesc{opts: opts}
 	})
 }
 
@@ -491,6 +535,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
 		adaptive       *AdaptiveLimiter
+		throttler      *Throttler
 		coalescer      *Coalescer[T]
 		timeoutCell    *atomic.Int64
 		timeBudgetCell *atomic.Int64
@@ -543,6 +588,11 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		entries = append(entries, newAdaptiveEntry[T](adaptive))
 	}
 
+	if setup.throttle != nil {
+		throttler = NewThrottler(clock, &hooks, setup.throttle.opts...)
+		entries = append(entries, newThrottleEntry[T](throttler))
+	}
+
 	if setup.hedge != nil {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
@@ -586,6 +636,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		rateLimiter:      rateLimiter,
 		bulkhead:         bulkhead,
 		adaptive:         adaptive,
+		throttler:        throttler,
 		retryBudget:      setup.retryBudget,
 		coalescer:        coalescer,
 		metrics:          metrics,
@@ -740,6 +791,27 @@ func newAdaptiveEntry[T any](limiter *AdaptiveLimiter) PatternEntry[T] {
 				defer done()
 
 				return next(ctx)
+			}
+		},
+	}
+}
+
+func newThrottleEntry[T any](throttler *Throttler) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityThrottle,
+		Name:     "adaptive_throttle",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				if err := throttler.Allow(); err != nil {
+					var zero T
+
+					return zero, err //nolint:wrapcheck // throttler error returned as-is
+				}
+
+				val, err := next(ctx)
+				throttler.Record(err)
+
+				return val, err //nolint:wrapcheck // caller's error returned as-is
 			}
 		},
 	}

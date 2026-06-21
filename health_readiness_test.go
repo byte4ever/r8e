@@ -266,6 +266,7 @@ func TestConditionSeverityComplete(t *testing.T) {
 		ConditionRateLimited,
 		ConditionBulkheadFull,
 		ConditionConcurrencyLimited,
+		ConditionThrottling,
 		ConditionRetryBudgetExhausted,
 		ConditionDependencyDegraded,
 		ConditionCircuitHalfOpen,

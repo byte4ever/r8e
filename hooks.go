@@ -56,6 +56,10 @@ type Hooks struct {
 	// OnConcurrencyLimitChanged fires when the adaptive concurrency limiter
 	// retunes its integer limit, with the new value.
 	OnConcurrencyLimitChanged func(limit int)
+
+	// OnThrottled fires when the adaptive throttler sheds a call locally instead
+	// of forwarding it to a struggling backend (see [WithAdaptiveThrottle]).
+	OnThrottled func()
 }
 
 func (h *Hooks) emitRetry(attempt int, err error) {
@@ -187,5 +191,11 @@ func (h *Hooks) emitConcurrencyRejected() {
 func (h *Hooks) emitConcurrencyLimitChanged(limit int) {
 	if h.OnConcurrencyLimitChanged != nil {
 		h.OnConcurrencyLimitChanged(limit)
+	}
+}
+
+func (h *Hooks) emitThrottled() {
+	if h.OnThrottled != nil {
+		h.OnThrottled()
 	}
 }
