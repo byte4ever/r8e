@@ -287,6 +287,19 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		)
 	}
 
+	// Safety net: apply the assembled options to a probe setup and run the same
+	// cross-pattern checks NewPolicy enforces, so the config path returns an
+	// error where the options path would panic — including any future invariant
+	// added to checkSetupInvariants but not mirrored by an explicit check above.
+	var probe policySetup
+	for _, opt := range opts {
+		opt.apply(&probe)
+	}
+
+	if err := checkSetupInvariants(&probe); err != nil {
+		return nil, err
+	}
+
 	return opts, nil
 }
 

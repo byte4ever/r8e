@@ -135,19 +135,9 @@ func DoRetry[T any](
 			return zero, lastErr //nolint:wrapcheck // real downstream error
 		}
 
-		// Compute backoff delay.
-		delay := params.Strategy.Delay(attempt)
-
-		// Honor a server-supplied Retry-After hint (e.g. an HTTP 429/503 header)
-		// over the computed backoff, with ±10% jitter to avoid a thundering herd.
-		if after, ok := retryAfterFromError(err); ok {
-			delay = jitteredRetryAfter(after)
-		}
-
-		// Apply MaxDelay cap (also bounds an over-large Retry-After).
-		if cfg.maxDelay > 0 && delay > cfg.maxDelay {
-			delay = cfg.maxDelay
-		}
+		// Compute the wait before the next attempt: strategy backoff, a
+		// Retry-After override, then the MaxDelay cap.
+		delay := nextBackoffDelay(attempt, err, params.Strategy, cfg.maxDelay)
 
 		// Honor a total time budget: stop early rather than sleep a backoff that
 		// would exhaust the remaining budget and launch an attempt that cannot
@@ -180,4 +170,28 @@ func DoRetry[T any](
 
 	// All attempts exhausted: wrap last error with ErrRetriesExhausted.
 	return zero, fmt.Errorf("%w: %w", ErrRetriesExhausted, lastErr)
+}
+
+// nextBackoffDelay computes the wait before the next retry attempt: the
+// strategy's backoff for this attempt, overridden by a server-supplied
+// Retry-After hint (with ±10% jitter to avoid a thundering herd) when the error
+// carries one, then capped by maxDelay (which also bounds an over-large
+// Retry-After). A non-positive maxDelay disables the cap.
+func nextBackoffDelay(
+	attempt int,
+	err error,
+	strategy BackoffStrategy,
+	maxDelay time.Duration,
+) time.Duration {
+	delay := strategy.Delay(attempt)
+
+	if after, ok := retryAfterFromError(err); ok {
+		delay = jitteredRetryAfter(after)
+	}
+
+	if maxDelay > 0 && delay > maxDelay {
+		delay = maxDelay
+	}
+
+	return delay
 }

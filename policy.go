@@ -644,20 +644,32 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 // misconfigurations [BuildOptions] rejects with an error for the config-driven
 // path. It runs once before any pattern is constructed.
 func validateSetup(setup *policySetup) {
+	if err := checkSetupInvariants(setup); err != nil {
+		panic(err)
+	}
+}
+
+// checkSetupInvariants returns the first cross-pattern misconfiguration in
+// setup, or nil if it is self-consistent. It is the single source of truth for
+// these rules: [validateSetup] panics with it (the options path) and
+// [BuildOptions] returns it (the config path), so an invariant added here is
+// enforced by both paths and the config path can never panic on one the options
+// path catches.
+func checkSetupInvariants(setup *policySetup) error {
 	// A retry budget gates retries; without a retry pattern it has nothing to do.
 	if setup.retryBudget != nil && setup.retry == nil {
-		panic(ErrRetryBudgetWithoutRetry)
+		return ErrRetryBudgetWithoutRetry
 	}
 
 	if setup.coalesce != nil {
 		// Coalescing cannot group calls without a key function, and its detached
 		// shared call needs a timeout to bound it (see WithCoalesce).
 		if setup.coalesce.keyFn == nil {
-			panic(ErrCoalesceNilKeyFunc)
+			return ErrCoalesceNilKeyFunc
 		}
 
 		if setup.timeout == nil {
-			panic(ErrCoalesceWithoutTimeout)
+			return ErrCoalesceWithoutTimeout
 		}
 	}
 
@@ -665,28 +677,30 @@ func validateSetup(setup *policySetup) {
 		// The cache cannot key calls without a key function, has nothing to back
 		// it without a cache, and could never serve a hit with a non-positive TTL.
 		if setup.cache.keyFn == nil {
-			panic(ErrCacheNilKeyFunc)
+			return ErrCacheNilKeyFunc
 		}
 
 		if setup.cache.cache == nil {
-			panic(ErrCacheNilCache)
+			return ErrCacheNilCache
 		}
 
 		if setup.cache.ttl <= 0 {
-			panic(ErrCacheNonPositiveTTL)
+			return ErrCacheNonPositiveTTL
 		}
 	}
 
 	// The bulkhead and the adaptive limiter both drive the concurrency slot;
 	// configuring both is contradictory.
 	if setup.bulkhead != nil && setup.adaptive != nil {
-		panic(ErrConcurrencyLimiterConflict)
+		return ErrConcurrencyLimiterConflict
 	}
 
 	// A time budget only gates retry and hedge; with neither it would do nothing.
 	if setup.timeBudget != nil && setup.retry == nil && setup.hedge == nil {
-		panic(ErrTimeBudgetWithoutConsumer)
+		return ErrTimeBudgetWithoutConsumer
 	}
+
+	return nil
 }
 
 // ---------------------------------------------------------------------------
