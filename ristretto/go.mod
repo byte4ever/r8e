@@ -1,6 +1,6 @@
 module github.com/byte4ever/r8e/ristretto
 
-go 1.25.5
+go 1.25.11
 
 require (
 	github.com/byte4ever/r8e v0.6.0

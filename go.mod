@@ -1,6 +1,6 @@
 module github.com/byte4ever/r8e
 
-go 1.25.5
+go 1.25.11
 
 require github.com/stretchr/testify v1.11.1
 
