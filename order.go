@@ -3,6 +3,13 @@ package r8e
 import "sort"
 
 // PatternEntry holds a middleware with its priority for auto-ordering.
+//
+// Priority only establishes RELATIVE order: [SortPatterns] sorts ascending, so a
+// lower value runs further out. The absolute integers are an internal ordering
+// convention (the unexported priority* constants below) and are NOT a stable API
+// — they are renumbered whenever a pattern is inserted. Do not hard-code a
+// literal Priority expecting it to keep a fixed position relative to the built-in
+// patterns; their values can shift between releases.
 type PatternEntry[T any] struct {
 	MW       Middleware[T]
 	Name     string
@@ -10,17 +17,20 @@ type PatternEntry[T any] struct {
 }
 
 // Priority constants define the execution order for resilience patterns.
-// Lower priority = outermost middleware (executed first).
+// Lower priority = outermost middleware (executed first). These values are an
+// internal convention (see [PatternEntry]): only their relative order is
+// meaningful, and they are renumbered when a pattern is inserted.
 const (
 	priorityFallback       = 0 // outermost — last resort
-	priorityCoalesce       = 1 // collapse duplicate concurrent calls before any work
-	priorityTimeout        = 2 // global timeout (hard cancel)
-	priorityTimeBudget     = 3 // total time budget shared across retry + hedge
-	priorityCircuitBreaker = 4
-	priorityRateLimiter    = 5
-	priorityBulkhead       = 6
-	priorityRetry          = 7
-	priorityHedge          = 8 // innermost — closest to user function
+	priorityCache          = 1 // read-through hit short-circuits the whole chain
+	priorityCoalesce       = 2 // collapse duplicate concurrent calls before any work
+	priorityTimeout        = 3 // global timeout (hard cancel)
+	priorityTimeBudget     = 4 // total time budget shared across retry + hedge
+	priorityCircuitBreaker = 5
+	priorityRateLimiter    = 6
+	priorityBulkhead       = 7
+	priorityRetry          = 8
+	priorityHedge          = 9 // innermost — closest to user function
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

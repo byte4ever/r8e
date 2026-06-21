@@ -1,5 +1,7 @@
 // Package ristretto provides an adapter for the Ristretto cache library,
-// implementing the r8e.Cache interface for use with r8e.StaleCache.
+// implementing the r8e.Cache interface. Use it to back r8e's read-through cache
+// policy — instantiate it as ristretto.MustNew[K, r8e.CacheEntry[V]](cfg) for
+// r8e.WithCache / r8e.ReadThroughCache — or the standalone r8e.StaleCache.
 package ristretto
 
 import (

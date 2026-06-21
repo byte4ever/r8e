@@ -38,6 +38,19 @@ type (
 		// ConcurrencyRejected counts calls rejected by the adaptive concurrency
 		// limiter because in-flight was at its current limit.
 		ConcurrencyRejected int64 `json:"concurrency_rejected"`
+		// CacheHits counts calls served from the read-through cache without
+		// executing the downstream work (fresh values and negative entries).
+		CacheHits int64 `json:"cache_hits"`
+		// CacheMisses counts calls for which the read-through cache had no fresh
+		// value and the downstream work was executed; with CacheHits it gives the
+		// hit ratio hits/(hits+misses).
+		CacheMisses int64 `json:"cache_misses"`
+		// CacheStores counts successful results written to the read-through cache.
+		CacheStores int64 `json:"cache_stores"`
+		// CacheStaleServed counts calls served a stale value after a downstream
+		// failure (see [StaleIfError]) — a signal the downstream is failing while
+		// the cache masks it.
+		CacheStaleServed int64 `json:"cache_stale_served"`
 
 		// Live gauges at snapshot time.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
@@ -84,6 +97,10 @@ type (
 		coalesceFollowers   atomic.Int64
 		concurrencyRejected atomic.Int64
 		timeBudgetExceeded  atomic.Int64
+		cacheHits           atomic.Int64
+		cacheMisses         atomic.Int64
+		cacheStores         atomic.Int64
+		cacheStaleServed    atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -207,6 +224,34 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 			}
 		},
 		OnConcurrencyLimitChanged: user.OnConcurrencyLimitChanged,
+		OnCacheHit: func() {
+			m.cacheHits.Add(1)
+
+			if user.OnCacheHit != nil {
+				user.OnCacheHit()
+			}
+		},
+		OnCacheMiss: func() {
+			m.cacheMisses.Add(1)
+
+			if user.OnCacheMiss != nil {
+				user.OnCacheMiss()
+			}
+		},
+		OnCacheStored: func() {
+			m.cacheStores.Add(1)
+
+			if user.OnCacheStored != nil {
+				user.OnCacheStored()
+			}
+		},
+		OnStaleServed: func() {
+			m.cacheStaleServed.Add(1)
+
+			if user.OnStaleServed != nil {
+				user.OnStaleServed()
+			}
+		},
 		OnTimeBudgetExceeded: func() {
 			m.timeBudgetExceeded.Add(1)
 
@@ -239,6 +284,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CoalesceFollowers:   p.metrics.coalesceFollowers.Load(),
 		ConcurrencyRejected: p.metrics.concurrencyRejected.Load(),
 		TimeBudgetExceeded:  p.metrics.timeBudgetExceeded.Load(),
+		CacheHits:           p.metrics.cacheHits.Load(),
+		CacheMisses:         p.metrics.cacheMisses.Load(),
+		CacheStores:         p.metrics.cacheStores.Load(),
+		CacheStaleServed:    p.metrics.cacheStaleServed.Load(),
 		Criticality:         health.Criticality,
 		Healthy:             health.Healthy,
 	}

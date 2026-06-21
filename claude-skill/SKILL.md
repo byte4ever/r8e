@@ -26,7 +26,7 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Coalesce > Timeout > TimeBudget > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
+Fallback > Cache > Coalesce > Timeout > TimeBudget > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
 The retry budget is not a stage; it gates retries from within Retry. The time
 budget stamps a ctx deadline that retry/hedge read. Bulkhead and
 AdaptiveConcurrency share the concurrency slot and are mutually exclusive.
@@ -179,6 +179,35 @@ Not a cache (only dedups time-overlapping calls). Usable standalone via
 policy timeout). Code-only — not expressible in `PolicyConfig` (the key function
 is code), so absent from `BuildOptions`/`Reconfigure`.
 
+### Read-Through Cache
+
+```go
+r8e.WithCache[T](cache Cache[string, CacheEntry[T]], keyFn func(context.Context) string,
+    ttl time.Duration, opts ...CacheOption)   // opts: StaleIfError(d), NegativeCache(d)
+```
+
+Memoizes successful results. A **fresh hit short-circuits the whole chain**; a miss
+executes and caches a success for `ttl`. `keyFn` derives the key from `ctx` (same
+idiom as `WithCoalesce`, so one keyFn drives both); an **empty** key opts out. Sits
+just inside Fallback and outside everything else, so a hit skips coalesce/timeout/…
+and a **fallback value is never cached** (only a genuine downstream success). Pair
+with `WithCoalesce` to collapse the miss stampede.
+
+The backing `Cache` is parameterised by **`CacheEntry[T]`** (wrapper carrying age +
+recorded error), e.g. `otter.MustNew[string, r8e.CacheEntry[T]](cfg)`. Freshness
+uses the policy **`Clock`** (deterministic under a fake clock), not the cache's own
+expiry. Three behaviours: **read-through** (fresh hit), **stale-if-error**
+(`StaleIfError(d)` — past `ttl`, a value lingers `d` as a fallback; a stale call
+revalidates but serves the stale value + fires `OnStaleServed` if that fails; RFC
+5861), **negative caching** (`NegativeCache(d)` — a failure with no stale fallback
+is cached `d` so repeats fast-fail with the recorded error). `r8e.ForceRefresh(ctx)`
+bypasses the cached read for one call. Three `NewPolicy` panics: nil keyFn →
+`ErrCacheNilKeyFunc`, nil cache → `ErrCacheNilCache`, ttl ≤ 0 →
+`ErrCacheNonPositiveTTL`. Code-only (absent from `PolicyConfig`/`BuildOptions`/
+`Reconfigure`). No health condition (healthy optimisation). Standalone via
+`r8e.NewReadThroughCache[T](cache, ttl, opts...)` (set clock/hooks with
+`CacheClock`/`CacheHooks`). Supersedes the standalone `StaleCache` for in-chain use.
+
 ### Fallback
 
 ```go
@@ -223,6 +252,10 @@ r8e.WithHooks(&r8e.Hooks{
     OnCoalesceFollower: func() {},     // call deduplicated into an in-flight one
     OnConcurrencyRejected:     func() {},     // adaptive limiter shed a call
     OnConcurrencyLimitChanged: func(limit int) {}, // adaptive limit retuned
+    OnCacheHit:    func() {},  // served from cache (fresh value or negative entry)
+    OnCacheMiss:   func() {},  // no fresh value; downstream executed
+    OnCacheStored: func() {},  // successful result written to cache
+    OnStaleServed: func() {},  // stale value served after a downstream failure
 })
 ```
 
@@ -242,7 +275,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
 `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
 `TimeBudgetExceeded`, `CoalesceLeaders`, `CoalesceFollowers`,
-`ConcurrencyRejected`) and gauges
+`ConcurrencyRejected`, `CacheHits`, `CacheMisses`, `CacheStores`,
+`CacheStaleServed`) and gauges
 (`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
 `CoalesceInFlight`, `ConcurrencyLimit`, `ConcurrencyInFlight`, `Saturated`,
 `Healthy`, `Criticality`).
@@ -299,7 +333,10 @@ report := reg.Health() // r8e.HealthReport{Status: "healthy"|"degraded"|"unhealt
 
 ## StaleCache (Standalone, Not Part of Policy)
 
-Compose by wrapping `policy.Do()` inside `staleCache.Do()`.
+For caching **inside** a policy chain prefer **`WithCache`** (Read-Through Cache
+above) — it adds read-through hits + negative caching on top of this same
+stale-on-error behaviour as a composable pattern. `StaleCache` remains for
+standalone, non-policy use. Compose by wrapping `policy.Do()` inside `staleCache.Do()`.
 
 ```go
 cache := otter.MustNew[string, *Data](r8e.CacheConfig{MaxSize: 10_000})

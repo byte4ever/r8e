@@ -13,6 +13,11 @@ type (
 	// StaleCache is a standalone wrapper — it is not part of [Policy].
 	// Compose it with a Policy by calling Policy.Do inside the function
 	// passed to StaleCache.Do.
+	//
+	// For caching inside a policy chain prefer [WithCache] / [ReadThroughCache],
+	// which add read-through hits and negative caching on top of this same
+	// stale-on-error behaviour as a composable pattern; StaleCache remains for
+	// standalone, non-policy use and for arbitrary comparable key types.
 	StaleCache[K comparable, V any] struct {
 		cache            Cache[K, V]
 		onStaleServed    func(K)

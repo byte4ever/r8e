@@ -36,6 +36,20 @@ type Hooks struct {
 	// flight (its work was deduplicated away).
 	OnCoalesceFollower func()
 
+	// OnCacheHit fires when a call is served from the read-through cache without
+	// executing the downstream work — a fresh value, or a cached error from a
+	// negative entry.
+	OnCacheHit func()
+	// OnCacheMiss fires when the read-through cache has no fresh value and the
+	// downstream work is executed (a hard miss or a stale-window revalidation).
+	OnCacheMiss func()
+	// OnCacheStored fires when a successful result is written to the read-through
+	// cache.
+	OnCacheStored func()
+	// OnStaleServed fires when a downstream execution fails and the read-through
+	// cache serves a stale value instead of the error (see [StaleIfError]).
+	OnStaleServed func()
+
 	// OnConcurrencyRejected fires when the adaptive concurrency limiter rejects a
 	// call because in-flight is at its current limit.
 	OnConcurrencyRejected func()
@@ -137,6 +151,30 @@ func (h *Hooks) emitCoalesceLeader() {
 func (h *Hooks) emitCoalesceFollower() {
 	if h.OnCoalesceFollower != nil {
 		h.OnCoalesceFollower()
+	}
+}
+
+func (h *Hooks) emitCacheHit() {
+	if h.OnCacheHit != nil {
+		h.OnCacheHit()
+	}
+}
+
+func (h *Hooks) emitCacheMiss() {
+	if h.OnCacheMiss != nil {
+		h.OnCacheMiss()
+	}
+}
+
+func (h *Hooks) emitCacheStored() {
+	if h.OnCacheStored != nil {
+		h.OnCacheStored()
+	}
+}
+
+func (h *Hooks) emitStaleServed() {
+	if h.OnStaleServed != nil {
+		h.OnStaleServed()
 	}
 }
 

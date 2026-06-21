@@ -1,5 +1,7 @@
-// Package otter provides an adapter for the Otter cache library,
-// implementing the r8e.Cache interface for use with r8e.StaleCache.
+// Package otter provides an adapter for the Otter cache library, implementing
+// the r8e.Cache interface. Use it to back r8e's read-through cache policy —
+// instantiate it as otter.MustNew[K, r8e.CacheEntry[V]](cfg) for r8e.WithCache /
+// r8e.ReadThroughCache — or the standalone r8e.StaleCache.
 package otter
 
 import (

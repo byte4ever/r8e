@@ -83,6 +83,14 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceFollowers })
 	builder.counter("r8e.policy.concurrency_rejected", "Calls rejected by the adaptive concurrency limiter",
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyRejected })
+	builder.counter("r8e.policy.cache_hits", "Calls served from the read-through cache",
+		func(m *r8e.PolicyMetrics) int64 { return m.CacheHits })
+	builder.counter("r8e.policy.cache_misses", "Calls that missed the read-through cache and executed",
+		func(m *r8e.PolicyMetrics) int64 { return m.CacheMisses })
+	builder.counter("r8e.policy.cache_stores", "Successful results written to the read-through cache",
+		func(m *r8e.PolicyMetrics) int64 { return m.CacheStores })
+	builder.counter("r8e.policy.cache_stale_served", "Stale values served after a downstream failure",
+		func(m *r8e.PolicyMetrics) int64 { return m.CacheStaleServed })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })

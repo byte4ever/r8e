@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 18 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 22 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -63,7 +63,8 @@ health reporting, and configuration hot-reload.
 | **Adaptive Concurrency** | Self-tuning concurrency limit from observed latency (Netflix Gradient2) |
 | **Hedged Requests** | Fire a second call after a delay to reduce tail latency |
 | **Request Coalescing** | Collapse concurrent identical calls into one shared execution (singleflight), killing cache stampede |
-| **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper with pluggable cache backends) |
+| **Read-Through Cache** | Memoize successful results per key in the chain; fresh hits skip the chain, with stale-if-error and negative caching |
+| **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper; superseded by Read-Through Cache for chain use) |
 | **Fallback** | Static value or function fallback as last resort |
 
 Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, `Clock` for deterministic tests.
@@ -207,6 +208,8 @@ policy := r8e.NewPolicy[string]("hedge-example",
 
 `StaleCache[K, V]` is a standalone, keyed stale-on-error wrapper. On success it stores the result in a pluggable `Cache[K, V]` backend. On failure it serves the last-known-good value for that key (if within TTL).
 
+> **Note:** for use *inside* a policy chain, [Read-Through Cache](#read-through-cache) (`WithCache`) now subsumes this — it adds read-through hits and negative caching on top of the same stale-on-error behaviour, as a first-class composable pattern. `StaleCache` remains for standalone, non-policy use.
+
 The `Cache[K, V]` interface that backends must implement:
 
 ```go
@@ -314,24 +317,28 @@ Patterns are auto-sorted by priority. The outermost middleware executes first:
 ```
 Request
   → Fallback          (outermost — catches final error)
-    → Coalesce        (collapse duplicate concurrent calls)
-      → Timeout         (global deadline — hard cancel)
-        → Time Budget    (total cooperative budget for retry + hedge)
-          → Circuit Breaker  (fast-fail if open)
-            → Rate Limiter   (throttle throughput)
-              → Bulkhead     (limit concurrency — fixed, or adaptive)
-                → Retry       (retry transient failures, gated by the retry budget)
-                  → Hedge     (innermost — races redundant calls)
-                    → fn()    (your function)
+    → Cache           (read-through — fresh hit short-circuits the chain)
+      → Coalesce      (collapse duplicate concurrent calls)
+        → Timeout         (global deadline — hard cancel)
+          → Time Budget    (total cooperative budget for retry + hedge)
+            → Circuit Breaker  (fast-fail if open)
+              → Rate Limiter   (throttle throughput)
+                → Bulkhead     (limit concurrency — fixed, or adaptive)
+                  → Retry       (retry transient failures, gated by the retry budget)
+                    → Hedge     (innermost — races redundant calls)
+                      → fn()    (your function)
 ```
 
 The retry budget is not a separate stage: it lives inside Retry, throttling
 retry attempts against the live success/failure ratio (see [Retry Budget](#retry-budget)).
 
-Coalescing sits just inside Fallback and outside everything else, so a burst of
-duplicate calls shares one trip through timeout, circuit breaker, rate limiter,
-bulkhead, retry, and hedge — while each caller still gets its own fallback (see
-[Request Coalescing](#request-coalescing)).
+The cache sits just inside Fallback and outside everything else, so a fresh hit
+returns without running coalesce, timeout, or any downstream stage, and a fallback
+value is never cached (only a genuine downstream success is). Coalescing sits just
+inside the cache, so a burst of misses for a hot key shares one trip through
+timeout, circuit breaker, rate limiter, bulkhead, retry, and hedge — while each
+caller still gets its own fallback (see [Read-Through Cache](#read-through-cache)
+and [Request Coalescing](#request-coalescing)).
 
 StaleCache is standalone and wraps the entire policy call from the outside (see [Stale Cache](#stale-cache)).
 
@@ -396,6 +403,59 @@ gates readiness — first attempts still flow). A *shared* budget reports the sa
 token level and exhausted condition under every sharing policy's name, so
 aggregate its gauge with `max`/`avg`, not `sum`. See
 [`examples/19-retry-budget`](examples/19-retry-budget).
+
+## Read-Through Cache
+
+`WithCache` memoizes successful results in the chain. A fresh hit returns the
+cached value and short-circuits the whole policy; a miss executes the chain and
+caches a successful result for the TTL. The key comes from the call context via a
+key function — the same idiom as [Request Coalescing](#request-coalescing), so one
+key function can drive both. Returning an empty key opts a call out of caching.
+
+```go
+cache := otter.MustNew[string, r8e.CacheEntry[string]](r8e.CacheConfig{MaxSize: 10_000})
+
+policy := r8e.NewPolicy[string]("catalog",
+    r8e.WithCache(cache, keyFromCtx, 30*time.Second,
+        r8e.StaleIfError(5*time.Minute),     // serve stale on error past the TTL
+        r8e.NegativeCache(2*time.Second),    // briefly cache failures too
+    ),
+    r8e.WithCoalesce(keyFromCtx),            // collapse the miss stampede
+    r8e.WithTimeout(time.Second),
+)
+```
+
+The underlying `Cache` is parameterised by `CacheEntry[T]` (the wrapper r8e stores
+to carry each entry's age and any recorded error), so build the adapter with
+`r8e.CacheEntry[T]` as the value type. Freshness is measured against the policy's
+`Clock`, not the backing cache's own expiry, so it stays deterministic under a
+fake clock.
+
+It unifies three behaviours behind one option:
+
+- **Read-through** — within the fresh TTL, a hit skips the downstream entirely.
+- **Stale-if-error** (`StaleIfError`) — past the fresh TTL a value lingers as a
+  stale fallback for the given duration. A call in the stale window re-executes to
+  refresh, but if that fails the stale value is served instead of the error
+  (RFC 5861 stale-if-error), firing `OnStaleServed`. This subsumes the standalone
+  [Stale Cache](#stale-cache) for in-chain use.
+- **Negative caching** (`NegativeCache`) — a failure with no stale value to fall
+  back on is itself cached for a short TTL, so repeated calls for a known-bad key
+  fast-fail with the recorded error instead of hammering the downstream.
+
+`ForceRefresh(ctx)` returns a child context that makes one call bypass the cached
+read and repopulate on success. Three misconfigurations panic in `NewPolicy`: a
+nil key function (`ErrCacheNilKeyFunc`), a nil cache (`ErrCacheNilCache`), and a
+non-positive TTL (`ErrCacheNonPositiveTTL`). Because the cache and key function
+are code, caching is code-only — it is deliberately absent from `PolicyConfig`,
+`BuildOptions`, and `Reconfigure`, exactly like coalescing.
+
+Observability: the `OnCacheHit` / `OnCacheMiss` / `OnCacheStored` / `OnStaleServed`
+hooks and the `CacheHits` / `CacheMisses` / `CacheStores` / `CacheStaleServed`
+counters (hits/(hits+misses) is the hit ratio). Caching is a healthy optimisation,
+so it has no health condition — only metrics. A `ReadThroughCache` can also be used
+standalone via `r8e.NewReadThroughCache` (configure clock and hooks with
+`CacheClock` / `CacheHooks`). See [`examples/24-read-through-cache`](examples/24-read-through-cache).
 
 ## Request Coalescing
 
@@ -520,7 +580,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (18): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`.
+Available hooks on `Hooks` (22): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -794,6 +854,7 @@ go run ./examples/20-coalesce/
 go run ./examples/21-adaptive-concurrency/
 go run ./examples/22-time-budget/
 go run ./examples/23-retry-after/
+go run ./examples/24-read-through-cache/
 ```
 
 ## License

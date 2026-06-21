@@ -80,6 +80,7 @@ type (
 		fallbackFunc   *funcFallback
 		retryBudget    *RetryBudget
 		coalesce       *coalesceDesc
+		cache          *cacheDesc
 		deps           []HealthReporter
 
 		affectsReadiness bool
@@ -113,6 +114,17 @@ type (
 	// adaptiveDesc holds deferred adaptive-concurrency configuration.
 	adaptiveDesc struct {
 		opts []AdaptiveOption
+	}
+
+	// cacheDesc holds deferred read-through-cache configuration. The cache is
+	// carried as any (a Cache[string, CacheEntry[T]] erased like WithFallback's
+	// value) and asserted back to the policy's T in NewPolicy[T]; keyFn nil, a nil
+	// cache, or a non-positive ttl are the misconfigurations NewPolicy rejects.
+	cacheDesc struct {
+		cache any
+		keyFn func(context.Context) string
+		opts  []CacheOption
+		ttl   time.Duration
 	}
 
 	// staticFallback carries a WithFallback value (typed T, erased to any).
@@ -321,6 +333,39 @@ func WithCoalesce(keyFn func(context.Context) string) Option {
 	})
 }
 
+// WithCache adds a read-through result cache (see [ReadThroughCache]): keyFn
+// derives a cache key from the call's context — stamp request identity into ctx
+// upstream and read it back here, exactly as [WithCoalesce] does, so one keyFn
+// can drive both. A fresh hit returns the cached value and skips the rest of the
+// chain entirely; a miss executes the chain and caches a successful result for
+// ttl. Returning an empty key opts a call out of caching.
+//
+// The cache sits just inside the fallback layer and outside every other pattern,
+// so a hit avoids even coalescing, and a fallback value is never cached (only a
+// genuine downstream success is). Pair it with [WithCoalesce] to collapse the
+// burst of concurrent misses on a hot key into one downstream call.
+//
+// The underlying [Cache] is parameterised by [CacheEntry], e.g.
+// otter.MustNew[string, r8e.CacheEntry[T]](cfg). Configure stale-if-error and
+// negative caching with [StaleIfError] and [NegativeCache], and bust a single
+// call's cache read with [ForceRefresh]. Because the cache and keyFn are code,
+// caching is code-only — it is deliberately absent from [PolicyConfig],
+// [BuildOptions], and [Policy.Reconfigure], like [WithCoalesce].
+//
+// A nil keyFn, a nil cache, or a non-positive ttl are misconfigurations:
+// [NewPolicy] panics with [ErrCacheNilKeyFunc], [ErrCacheNilCache], or
+// [ErrCacheNonPositiveTTL] respectively.
+func WithCache[T any](
+	cache Cache[string, CacheEntry[T]],
+	keyFn func(context.Context) string,
+	ttl time.Duration,
+	opts ...CacheOption,
+) Option {
+	return optionFunc(func(s *policySetup) {
+		s.cache = &cacheDesc{cache: cache, keyFn: keyFn, ttl: ttl, opts: opts}
+	})
+}
+
 // WithFallback adds a static fallback value returned when the call fails.
 // The value's type must match the Policy's type parameter T; a mismatch panics
 // in [NewPolicy].
@@ -396,6 +441,23 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 
 		if setup.timeout == nil {
 			panic(ErrCoalesceWithoutTimeout)
+		}
+	}
+
+	if setup.cache != nil {
+		// The cache cannot key calls without a key function, has nothing to back
+		// it without a cache, and could never serve a hit with a non-positive TTL
+		// (every entry would be stale on arrival). Reject all three loudly.
+		if setup.cache.keyFn == nil {
+			panic(ErrCacheNilKeyFunc)
+		}
+
+		if setup.cache.cache == nil {
+			panic(ErrCacheNilCache)
+		}
+
+		if setup.cache.ttl <= 0 {
+			panic(ErrCacheNonPositiveTTL)
 		}
 	}
 
@@ -485,6 +547,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
 		entries = append(entries, newHedgeEntry[T](hedgeCell, &hooks, clock))
+	}
+
+	if setup.cache != nil {
+		entries = append(entries, newCacheEntry[T](setup.cache, clock, &hooks))
 	}
 
 	if setup.coalesce != nil {
@@ -690,6 +756,40 @@ func newHedgeEntry[T any](cell *atomic.Int64, hooks *Hooks, clock Clock) Pattern
 					Hooks: hooks,
 					Clock: clock,
 				})
+			}
+		},
+	}
+}
+
+// newCacheEntry builds the read-through-cache middleware. It asserts the erased
+// cache back to the policy's concrete Cache[string, CacheEntry[T]]; a mismatch
+// is a programmer error (a cache typed for a different T than the policy), so it
+// panics with a clear message, mirroring the fallback entries.
+func newCacheEntry[T any](
+	desc *cacheDesc,
+	clock Clock,
+	hooks *Hooks,
+) PatternEntry[T] {
+	cache, ok := desc.cache.(Cache[string, CacheEntry[T]])
+	if !ok {
+		var zero T
+
+		panic(fmt.Sprintf(
+			"r8e: WithCache value has type %T, which does not match policy "+
+				"result type Cache[string, CacheEntry[%T]]",
+			desc.cache, zero,
+		))
+	}
+
+	opts := append([]CacheOption{CacheClock(clock), CacheHooks(hooks)}, desc.opts...)
+	rc := NewReadThroughCache[T](cache, desc.ttl, opts...)
+
+	return PatternEntry[T]{
+		Priority: priorityCache,
+		Name:     "cache",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				return rc.Do(ctx, desc.keyFn(ctx), next)
 			}
 		},
 	}

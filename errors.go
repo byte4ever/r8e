@@ -61,6 +61,25 @@ var (
 	ErrCoalesceWithoutTimeout error = resilienceError(
 		"coalesce requires a timeout to bound the detached shared call",
 	)
+	// ErrCacheNilKeyFunc indicates [WithCache] was given a nil key function;
+	// the cache has no way to derive a key per call without one. It is the value
+	// [NewPolicy] panics with for that misconfiguration.
+	ErrCacheNilKeyFunc error = resilienceError(
+		"cache requires a non-nil key function",
+	)
+	// ErrCacheNilCache indicates [WithCache] was given a nil [Cache]; there is
+	// nothing to read from or write to. It is the value [NewPolicy] panics with
+	// for that misconfiguration.
+	ErrCacheNilCache error = resilienceError(
+		"cache requires a non-nil cache",
+	)
+	// ErrCacheNonPositiveTTL indicates [WithCache] was given a non-positive fresh
+	// TTL; a zero or negative TTL would make every entry stale on arrival, so the
+	// cache could never serve a hit. It is the value [NewPolicy] panics with for
+	// that misconfiguration.
+	ErrCacheNonPositiveTTL error = resilienceError(
+		"cache requires a positive TTL",
+	)
 	// ErrConcurrencyLimiterConflict indicates a policy was configured with both
 	// [WithBulkhead] and [WithAdaptiveConcurrency]. Both drive the same
 	// concurrency-limiting slot, so they are mutually exclusive. It is the value

@@ -180,6 +180,7 @@ func TestPriorityConstantsAreDistinct(t *testing.T) {
 
 	priorities := map[string]int{
 		"fallback":        priorityFallback,
+		"cache":           priorityCache,
 		"coalesce":        priorityCoalesce,
 		"timeout":         priorityTimeout,
 		"time_budget":     priorityTimeBudget,
@@ -210,6 +211,7 @@ func TestPriorityConstantsOrdering(t *testing.T) {
 		priority int
 	}{
 		{"fallback", priorityFallback},
+		{"cache", priorityCache},
 		{"coalesce", priorityCoalesce},
 		{"timeout", priorityTimeout},
 		{"time_budget", priorityTimeBudget},
