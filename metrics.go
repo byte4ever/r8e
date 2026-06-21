@@ -41,6 +41,10 @@ type (
 		// Throttled counts calls shed locally by the adaptive throttler to
 		// protect a struggling backend (see [WithAdaptiveThrottle]).
 		Throttled int64 `json:"throttled"`
+		// SlowCallRateExceeded counts circuit-breaker opens caused by the
+		// slow-call rate reaching its threshold (see [SlowCallRate]), as opposed
+		// to the consecutive-failure trip. It is a subset of CircuitOpens.
+		SlowCallRateExceeded int64 `json:"slow_call_rate_exceeded"`
 		// CacheHits counts calls served from the read-through cache without
 		// executing the downstream work (fresh values and negative entries).
 		CacheHits int64 `json:"cache_hits"`
@@ -79,6 +83,10 @@ type (
 		// shedding a call, in [0, MaxRejectionRate]; 0 when the policy has no
 		// throttler or it is forwarding all traffic.
 		ThrottleProbability float64 `json:"throttle_probability"`
+		// SlowCallRate is the current fraction of slow calls in the circuit
+		// breaker's window, in [0, 1]; 0 when the policy has no breaker, slow-call
+		// detection is off, or no calls have been observed (see [SlowCallRate]).
+		SlowCallRate float64 `json:"slow_call_rate"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -89,26 +97,27 @@ type (
 	// wired in via instrumented [Hooks], so every emitted lifecycle event
 	// increments its counter regardless of whether the caller set that hook.
 	policyMetrics struct {
-		retries             atomic.Int64
-		timeouts            atomic.Int64
-		circuitOpens        atomic.Int64
-		circuitCloses       atomic.Int64
-		circuitHalfOpens    atomic.Int64
-		rateLimited         atomic.Int64
-		bulkheadRejected    atomic.Int64
-		hedgesTriggered     atomic.Int64
-		hedgesWon           atomic.Int64
-		fallbacksUsed       atomic.Int64
-		retryBudgetExceeded atomic.Int64
-		coalesceLeaders     atomic.Int64
-		coalesceFollowers   atomic.Int64
-		concurrencyRejected atomic.Int64
-		throttled           atomic.Int64
-		timeBudgetExceeded  atomic.Int64
-		cacheHits           atomic.Int64
-		cacheMisses         atomic.Int64
-		cacheStores         atomic.Int64
-		cacheStaleServed    atomic.Int64
+		retries              atomic.Int64
+		timeouts             atomic.Int64
+		circuitOpens         atomic.Int64
+		circuitCloses        atomic.Int64
+		circuitHalfOpens     atomic.Int64
+		rateLimited          atomic.Int64
+		bulkheadRejected     atomic.Int64
+		hedgesTriggered      atomic.Int64
+		hedgesWon            atomic.Int64
+		fallbacksUsed        atomic.Int64
+		retryBudgetExceeded  atomic.Int64
+		coalesceLeaders      atomic.Int64
+		coalesceFollowers    atomic.Int64
+		concurrencyRejected  atomic.Int64
+		throttled            atomic.Int64
+		slowCallRateExceeded atomic.Int64
+		timeBudgetExceeded   atomic.Int64
+		cacheHits            atomic.Int64
+		cacheMisses          atomic.Int64
+		cacheStores          atomic.Int64
+		cacheStaleServed     atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -239,6 +248,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnThrottled()
 			}
 		},
+		OnSlowCallRateExceeded: func() {
+			m.slowCallRateExceeded.Add(1)
+
+			if user.OnSlowCallRateExceeded != nil {
+				user.OnSlowCallRateExceeded()
+			}
+		},
 		OnCacheHit: func() {
 			m.cacheHits.Add(1)
 
@@ -283,33 +299,35 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	health := p.HealthStatus()
 
 	metrics := PolicyMetrics{
-		Name:                p.name,
-		Retries:             p.metrics.retries.Load(),
-		Timeouts:            p.metrics.timeouts.Load(),
-		CircuitOpens:        p.metrics.circuitOpens.Load(),
-		CircuitCloses:       p.metrics.circuitCloses.Load(),
-		CircuitHalfOpens:    p.metrics.circuitHalfOpens.Load(),
-		RateLimited:         p.metrics.rateLimited.Load(),
-		BulkheadRejected:    p.metrics.bulkheadRejected.Load(),
-		HedgesTriggered:     p.metrics.hedgesTriggered.Load(),
-		HedgesWon:           p.metrics.hedgesWon.Load(),
-		FallbacksUsed:       p.metrics.fallbacksUsed.Load(),
-		RetryBudgetExceeded: p.metrics.retryBudgetExceeded.Load(),
-		CoalesceLeaders:     p.metrics.coalesceLeaders.Load(),
-		CoalesceFollowers:   p.metrics.coalesceFollowers.Load(),
-		ConcurrencyRejected: p.metrics.concurrencyRejected.Load(),
-		Throttled:           p.metrics.throttled.Load(),
-		TimeBudgetExceeded:  p.metrics.timeBudgetExceeded.Load(),
-		CacheHits:           p.metrics.cacheHits.Load(),
-		CacheMisses:         p.metrics.cacheMisses.Load(),
-		CacheStores:         p.metrics.cacheStores.Load(),
-		CacheStaleServed:    p.metrics.cacheStaleServed.Load(),
-		Criticality:         health.Criticality,
-		Healthy:             health.Healthy,
+		Name:                 p.name,
+		Retries:              p.metrics.retries.Load(),
+		Timeouts:             p.metrics.timeouts.Load(),
+		CircuitOpens:         p.metrics.circuitOpens.Load(),
+		CircuitCloses:        p.metrics.circuitCloses.Load(),
+		CircuitHalfOpens:     p.metrics.circuitHalfOpens.Load(),
+		RateLimited:          p.metrics.rateLimited.Load(),
+		BulkheadRejected:     p.metrics.bulkheadRejected.Load(),
+		HedgesTriggered:      p.metrics.hedgesTriggered.Load(),
+		HedgesWon:            p.metrics.hedgesWon.Load(),
+		FallbacksUsed:        p.metrics.fallbacksUsed.Load(),
+		RetryBudgetExceeded:  p.metrics.retryBudgetExceeded.Load(),
+		CoalesceLeaders:      p.metrics.coalesceLeaders.Load(),
+		CoalesceFollowers:    p.metrics.coalesceFollowers.Load(),
+		ConcurrencyRejected:  p.metrics.concurrencyRejected.Load(),
+		Throttled:            p.metrics.throttled.Load(),
+		SlowCallRateExceeded: p.metrics.slowCallRateExceeded.Load(),
+		TimeBudgetExceeded:   p.metrics.timeBudgetExceeded.Load(),
+		CacheHits:            p.metrics.cacheHits.Load(),
+		CacheMisses:          p.metrics.cacheMisses.Load(),
+		CacheStores:          p.metrics.cacheStores.Load(),
+		CacheStaleServed:     p.metrics.cacheStaleServed.Load(),
+		Criticality:          health.Criticality,
+		Healthy:              health.Healthy,
 	}
 
 	if p.circuitBreaker != nil {
 		metrics.CircuitState = string(p.circuitBreaker.State())
+		metrics.SlowCallRate = p.circuitBreaker.SlowCallFraction()
 	}
 
 	if p.rateLimiter != nil {

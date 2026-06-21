@@ -115,6 +115,19 @@ States: closed -> open (fast-fail `r8e.ErrCircuitOpen`) -> half-open -> closed.
 State transitions are mutex-guarded (linearizable); half-open admits at most
 `HalfOpenMaxAttempts` concurrent probes.
 
+**Slow-call rate** (opt-in, off by default): `r8e.SlowCallRate(duration, rate)`
+trips the breaker when the fraction of calls slower than `duration` reaches
+`rate` (in (0,1]) over a count-based window — catches brownouts the failure trip
+misses. Independent of and additive to the failure trip (opens on whichever
+fires first); a slow-but-successful call counts, and in half-open a slow probe
+re-opens. Tune with `r8e.SlowCallWindow(n)` (default 100) and
+`r8e.SlowCallMinCalls(n)` (default 10). Config-expressible (`SlowCallDuration` +
+`SlowCallRateThreshold` must be set together, else `ErrSlowCallConfigIncomplete`;
+`SlowCallWindow`, `SlowCallMinCalls`). Observability: `OnSlowCallRateExceeded`
+hook, `SlowCallRateExceeded` counter, `SlowCallRate` gauge. Standalone:
+`cb.Record(elapsed, err)` (latency-aware; `RecordSuccess`/`RecordFailure` treat
+the call as fast).
+
 ### Rate Limiter
 
 ```go
@@ -263,6 +276,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCircuitOpen:      func() {},
     OnCircuitClose:     func() {},
     OnCircuitHalfOpen:  func() {},
+    OnSlowCallRateExceeded: func() {}, // breaker opened by the slow-call rate
     OnRateLimited:      func() {},
     OnBulkheadFull:     func() {},
     OnBulkheadAcquired: func() {},
@@ -301,11 +315,12 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
 `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
 `TimeBudgetExceeded`, `CoalesceLeaders`, `CoalesceFollowers`,
-`ConcurrencyRejected`, `Throttled`, `CacheHits`, `CacheMisses`, `CacheStores`,
-`CacheStaleServed`) and gauges
-(`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
-`CoalesceInFlight`, `ConcurrencyLimit`, `ConcurrencyInFlight`,
-`ThrottleProbability`, `Saturated`, `Healthy`, `Criticality`).
+`ConcurrencyRejected`, `Throttled`, `SlowCallRateExceeded`, `CacheHits`,
+`CacheMisses`, `CacheStores`, `CacheStaleServed`) and gauges
+(`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
+`RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
+`ConcurrencyInFlight`, `ThrottleProbability`, `Saturated`, `Healthy`,
+`Criticality`).
 
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
 `r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate

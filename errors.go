@@ -99,6 +99,15 @@ var (
 	ErrTimeBudgetWithoutConsumer error = resilienceError(
 		"time budget requires a retry or hedge pattern to gate",
 	)
+	// ErrSlowCallConfigIncomplete indicates a [CircuitBreakerConfig] set only one
+	// of slow_call_duration / slow_call_rate_threshold. Both are required to
+	// enable slow-call-rate tripping (see [SlowCallRate]); supplying one alone is
+	// ambiguous. It is the error [BuildOptions] and [Policy.Reconfigure] return
+	// for that misconfiguration.
+	ErrSlowCallConfigIncomplete error = resilienceError(
+		"circuit breaker slow_call_duration and slow_call_rate_threshold " +
+			"must be set together",
+	)
 )
 
 func (e *transientError) Error() string { return "transient: " + e.err.Error() }

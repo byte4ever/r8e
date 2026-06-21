@@ -60,6 +60,12 @@ type Hooks struct {
 	// OnThrottled fires when the adaptive throttler sheds a call locally instead
 	// of forwarding it to a struggling backend (see [WithAdaptiveThrottle]).
 	OnThrottled func()
+
+	// OnSlowCallRateExceeded fires when the circuit breaker opens because the
+	// slow-call rate reached its threshold (see [SlowCallRate]), as opposed to
+	// the consecutive-failure trip. OnCircuitOpen also fires for the same
+	// transition; this hook identifies the slow-call cause specifically.
+	OnSlowCallRateExceeded func()
 }
 
 func (h *Hooks) emitRetry(attempt int, err error) {
@@ -197,5 +203,11 @@ func (h *Hooks) emitConcurrencyLimitChanged(limit int) {
 func (h *Hooks) emitThrottled() {
 	if h.OnThrottled != nil {
 		h.OnThrottled()
+	}
+}
+
+func (h *Hooks) emitSlowCallRateExceeded() {
+	if h.OnSlowCallRateExceeded != nil {
+		h.OnSlowCallRateExceeded()
 	}
 }

@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 23 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 24 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -167,6 +167,15 @@ _, err := policy.Do(ctx, callDownstream)
 if errors.Is(err, r8e.ErrCircuitOpen) {
     // downstream is down, fail fast
 }
+```
+
+**Slow-call rate (brownouts).** Beyond consecutive failures, the breaker can trip on the rate of *slow* calls — a downstream that answers but answers slowly. Enable it with `SlowCallRate(duration, rate)`: a call whose latency exceeds `duration` is "slow", and the breaker opens once that fraction over the recent window reaches `rate`. It is independent of and additive to the failure trip (the breaker opens on whichever fires first), and uses a count-based window tuned with `SlowCallWindow` (default 100) and `SlowCallMinCalls` (default 10). A successful-but-slow call counts; in half-open, a slow probe re-opens just like a failed one. The dedicated `OnSlowCallRateExceeded` hook and the `SlowCallRate` gauge surface the cause. See [`examples/26-slow-call-breaker`](examples/26-slow-call-breaker).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.FailureThreshold(5),                  // still trips on failures
+    r8e.SlowCallRate(2*time.Second, 0.5),     // …and on >=50% slow calls
+)
 ```
 
 ### Rate Limiter
@@ -624,7 +633,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (23): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
+Available hooks on `Hooks` (24): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -900,6 +909,7 @@ go run ./examples/22-time-budget/
 go run ./examples/23-retry-after/
 go run ./examples/24-read-through-cache/
 go run ./examples/25-adaptive-throttle/
+go run ./examples/26-slow-call-breaker/
 ```
 
 ## License

@@ -57,6 +57,20 @@ type (
 		// HalfOpenMaxAttempts is the max probes in half-open state.
 		// Optional. Example: 2.
 		HalfOpenMaxAttempts *int `json:"half_open_max_attempts,omitempty" yaml:"half_open_max_attempts,omitempty"`
+		// SlowCallDuration is the latency above which a call counts as slow,
+		// enabling slow-call-rate tripping. Optional, but must be paired with
+		// SlowCallRateThreshold. Parsed via time.ParseDuration. Example: "2s".
+		SlowCallDuration *string `json:"slow_call_duration,omitempty" yaml:"slow_call_duration,omitempty"`
+		// SlowCallRateThreshold is the fraction of slow calls (in [0,1]) that
+		// opens the breaker. Optional, but must be paired with SlowCallDuration.
+		// Example: 0.5.
+		SlowCallRateThreshold *float64 `json:"slow_call_rate_threshold,omitempty" yaml:"slow_call_rate_threshold,omitempty"`
+		// SlowCallWindow is the count-based slow-call window size.
+		// Optional. Default 100. Example: 200.
+		SlowCallWindow *int `json:"slow_call_window,omitempty" yaml:"slow_call_window,omitempty"`
+		// SlowCallMinCalls is the minimum observed calls before the slow-call
+		// rate is evaluated. Optional. Default 10. Example: 20.
+		SlowCallMinCalls *int `json:"slow_call_min_calls,omitempty" yaml:"slow_call_min_calls,omitempty"`
 	}
 
 	// RetryConfig holds retry configuration values. Embed it
@@ -336,6 +350,44 @@ func cbOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, err
 
 	if cfg.HalfOpenMaxAttempts != nil {
 		opts = append(opts, HalfOpenMaxAttempts(*cfg.HalfOpenMaxAttempts))
+	}
+
+	slowOpts, err := slowCallOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	opts = append(opts, slowOpts...)
+
+	return opts, nil
+}
+
+// slowCallOptionsFromConfig maps the slow-call fields of a [CircuitBreakerConfig]
+// to circuit-breaker options. SlowCallDuration and SlowCallRateThreshold enable
+// the detector and must be supplied together; the window tuners are independent.
+func slowCallOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, error) {
+	var opts []CircuitBreakerOption
+
+	switch {
+	case cfg.SlowCallDuration != nil && cfg.SlowCallRateThreshold != nil:
+		d, err := time.ParseDuration(*cfg.SlowCallDuration)
+		if err != nil {
+			return nil, fmt.Errorf("circuit_breaker.slow_call_duration: %w", err)
+		}
+
+		opts = append(opts, SlowCallRate(d, *cfg.SlowCallRateThreshold))
+	case cfg.SlowCallDuration != nil || cfg.SlowCallRateThreshold != nil:
+		return nil, ErrSlowCallConfigIncomplete
+	default:
+		// Neither paired field set: slow-call detection stays off.
+	}
+
+	if cfg.SlowCallWindow != nil {
+		opts = append(opts, SlowCallWindow(*cfg.SlowCallWindow))
+	}
+
+	if cfg.SlowCallMinCalls != nil {
+		opts = append(opts, SlowCallMinCalls(*cfg.SlowCallMinCalls))
 	}
 
 	return opts, nil

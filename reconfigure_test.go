@@ -63,6 +63,84 @@ func TestPolicyReconfigureAllPatterns(t *testing.T) {
 	assert.Equal(t, int64(99)*fixedPointScale, p.rateLimiter.capacity.Load())
 }
 
+// TestPolicyReconfigureSlowCall reloads the slow-call-rate parameters from
+// config and asserts they land on the breaker's config.
+func TestPolicyReconfigureSlowCall(t *testing.T) {
+	t.Parallel()
+
+	p := kitchenSinkPolicy(t)
+
+	err := p.Reconfigure(PolicyConfig{
+		CircuitBreaker: &CircuitBreakerConfig{
+			SlowCallDuration:      strPtr("2s"),
+			SlowCallRateThreshold: f64Ptr(0.6),
+			SlowCallWindow:        intPtr(50),
+			SlowCallMinCalls:      intPtr(20),
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 2*time.Second, p.circuitBreaker.cfg.slowCallDuration)
+	assert.InDelta(t, 0.6, p.circuitBreaker.cfg.slowCallRateThreshold, 1e-9)
+	assert.Equal(t, 50, p.circuitBreaker.cfg.slowCallWindow)
+	assert.Equal(t, 20, p.circuitBreaker.cfg.slowCallMinCalls)
+}
+
+// TestSlowCallConfigIncomplete checks that supplying only one of the paired
+// slow-call fields is rejected with ErrSlowCallConfigIncomplete.
+func TestSlowCallConfigIncomplete(t *testing.T) {
+	t.Parallel()
+
+	_, err := BuildOptions(&PolicyConfig{
+		CircuitBreaker: &CircuitBreakerConfig{SlowCallDuration: strPtr("2s")},
+	})
+	require.ErrorIs(t, err, ErrSlowCallConfigIncomplete)
+
+	_, err = BuildOptions(&PolicyConfig{
+		CircuitBreaker: &CircuitBreakerConfig{SlowCallRateThreshold: f64Ptr(0.5)},
+	})
+	require.ErrorIs(t, err, ErrSlowCallConfigIncomplete)
+}
+
+// TestSlowCallConfigBadDuration checks the duration parse error is surfaced.
+func TestSlowCallConfigBadDuration(t *testing.T) {
+	t.Parallel()
+
+	_, err := BuildOptions(&PolicyConfig{
+		CircuitBreaker: &CircuitBreakerConfig{
+			SlowCallDuration:      strPtr("nope"),
+			SlowCallRateThreshold: f64Ptr(0.5),
+		},
+	})
+	require.Error(t, err)
+	// The error must name the offending field and preserve the parse cause so an
+	// operator can diagnose the bad config value.
+	assert.ErrorContains(t, err, "slow_call_duration")
+	assert.ErrorContains(t, err, "invalid duration")
+}
+
+// TestSlowCallConfigRoundTrip checks both paired fields plus tuners build a
+// working policy whose breaker has slow-call detection enabled.
+func TestSlowCallConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	opts, err := BuildOptions(&PolicyConfig{
+		CircuitBreaker: &CircuitBreakerConfig{
+			SlowCallDuration:      strPtr("150ms"),
+			SlowCallRateThreshold: f64Ptr(0.5),
+			SlowCallWindow:        intPtr(30),
+			SlowCallMinCalls:      intPtr(5),
+		},
+	})
+	require.NoError(t, err)
+
+	p := NewPolicy[string]("from-config", opts...)
+	assert.True(t, p.circuitBreaker.slowCallEnabled())
+	assert.Equal(t, 150*time.Millisecond, p.circuitBreaker.cfg.slowCallDuration)
+	assert.Equal(t, 30, p.circuitBreaker.cfg.slowCallWindow)
+	assert.Equal(t, 5, p.circuitBreaker.cfg.slowCallMinCalls)
+}
+
 func TestPolicyReconfigureNilFieldsLeaveUnchanged(t *testing.T) {
 	t.Parallel()
 

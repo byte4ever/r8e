@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 23 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 24 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -166,6 +166,15 @@ _, err := policy.Do(ctx, callDownstream)
 if errors.Is(err, r8e.ErrCircuitOpen) {
     // la dépendance est en panne, échec rapide
 }
+```
+
+**Taux d'appels lents (brownouts).** Au-delà des échecs consécutifs, le breaker peut s'ouvrir sur le taux d'appels *lents* — une dépendance qui répond, mais lentement. Activez-le avec `SlowCallRate(duration, rate)` : un appel dont la latence dépasse `duration` est « lent », et le breaker s'ouvre dès que cette fraction sur la fenêtre récente atteint `rate`. C'est indépendant et additif au trip sur échecs (le breaker s'ouvre sur le premier des deux qui se déclenche), avec une fenêtre count-based réglée via `SlowCallWindow` (défaut 100) et `SlowCallMinCalls` (défaut 10). Un appel réussi mais lent compte ; en half-open, une sonde lente rouvre comme une sonde échouée. Le hook dédié `OnSlowCallRateExceeded` et la gauge `SlowCallRate` exposent la cause. Voir [`examples/26-slow-call-breaker`](examples/26-slow-call-breaker).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.FailureThreshold(5),                  // trébuche toujours sur les échecs
+    r8e.SlowCallRate(2*time.Second, 0.5),     // …et sur >=50% d'appels lents
+)
 ```
 
 ### Rate Limiter
@@ -633,7 +642,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (23) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
+Hooks disponibles sur `Hooks` (24) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
@@ -909,6 +918,7 @@ go run ./examples/22-time-budget/
 go run ./examples/23-retry-after/
 go run ./examples/24-read-through-cache/
 go run ./examples/25-adaptive-throttle/
+go run ./examples/26-slow-call-breaker/
 ```
 
 ## Licence

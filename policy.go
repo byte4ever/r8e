@@ -724,12 +724,13 @@ func newCircuitBreakerEntry[T any](cb *CircuitBreaker) PatternEntry[T] {
 					return zero, err //nolint:wrapcheck // circuit breaker error returned as-is
 				}
 
+				// Measure latency so the breaker can evaluate its slow-call rate
+				// (a no-op cost when slow-call detection is off). The span covers
+				// the work the breaker wraps — including inner retry/hedge — the
+				// same granularity at which it records success and failure.
+				start := cb.clock.Now()
 				val, err := next(ctx)
-				if err != nil {
-					cb.RecordFailure()
-				} else {
-					cb.RecordSuccess()
-				}
+				cb.Record(cb.clock.Since(start), err)
 
 				return val, err //nolint:wrapcheck // caller's error returned as-is
 			}
