@@ -3,8 +3,11 @@ package httpx_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -221,6 +224,77 @@ func TestDoTransientWithRetryRecovers(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestDoRetryReplaysRequestBody verifies that a request body is resent in full
+// on every retry attempt rather than being consumed on the first try.
+func TestDoRetryReplaysRequestBody(t *testing.T) {
+	t.Parallel()
+
+	const payload = "payload-must-replay"
+
+	var (
+		mu     sync.Mutex
+		bodies []string
+	)
+
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+
+				mu.Lock()
+				bodies = append(bodies, string(b))
+				n := len(bodies)
+				mu.Unlock()
+
+				if n <= 2 {
+					w.WriteHeader(
+						http.StatusServiceUnavailable,
+					)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			},
+		),
+	)
+	defer srv.Close()
+
+	cl := httpx.NewClient(
+		"do-retry-body",
+		srv.Client(),
+		testClassifier,
+		r8e.WithRetry(
+			5,
+			r8e.ConstantBackoff(time.Millisecond),
+		),
+	)
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		srv.URL,
+		strings.NewReader(payload),
+	)
+	require.NoError(t, err)
+
+	resp, err := cl.Do(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, bodies, 3)
+
+	for i, b := range bodies {
+		assert.Equalf(
+			t, payload, b,
+			"attempt %d received a wrong/empty body", i+1,
+		)
+	}
 }
 
 func TestDoTransportError(t *testing.T) {

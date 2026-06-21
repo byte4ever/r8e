@@ -133,6 +133,12 @@ func NewClient(
 // non-nil response and a non-nil error. When the
 // Classifier returns Transient or Permanent, the response
 // is wrapped in a StatusError accessible via errors.As.
+//
+// Each attempt rewinds the request body via req.GetBody, so a retried
+// request with a body (POST/PUT) replays correctly. Requests built with
+// http.NewRequest/NewRequestWithContext from a bytes/strings reader get
+// GetBody automatically; a body without GetBody cannot be replayed and
+// later attempts would send it empty.
 func (c *Client) Do(
 	ctx context.Context,
 	req *http.Request,
@@ -141,9 +147,17 @@ func (c *Client) Do(
 	return c.p.Do(
 		ctx,
 		func(ctx context.Context) (*http.Response, error) {
-			resp, err := c.hc.Do(
-				req.WithContext(ctx),
-			)
+			attempt := req.Clone(ctx)
+			if req.GetBody != nil {
+				body, gbErr := req.GetBody()
+				if gbErr != nil {
+					return nil, gbErr
+				}
+
+				attempt.Body = body
+			}
+
+			resp, err := c.hc.Do(attempt)
 			if err != nil {
 				return nil, err
 			}
