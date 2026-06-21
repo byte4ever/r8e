@@ -84,7 +84,28 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 			return fmt.Errorf("r8e: reconfigure time_budget: %w", err)
 		}
 
-		actions = append(actions, func() { p.timeBudget.Store(int64(dur)) })
+		actions = append(actions, func() {
+			state := *p.timeBudget.Load()
+			state.budget = dur
+			p.timeBudget.Store(&state)
+		})
+	}
+
+	if cfg.PropagateDeadline != nil {
+		// The time-budget cell exists iff the policy has a time budget; without
+		// one there is no deadline to derive, so reject the same input
+		// BuildOptions rejects rather than silently dropping it.
+		if p.timeBudget == nil {
+			return ErrDeadlinePropagationWithoutBudget
+		}
+
+		propagate := *cfg.PropagateDeadline
+
+		actions = append(actions, func() {
+			state := *p.timeBudget.Load()
+			state.propagateDeadline = propagate
+			p.timeBudget.Store(&state)
+		})
 	}
 
 	if cfg.Hedge != nil {

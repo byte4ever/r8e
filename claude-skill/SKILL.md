@@ -60,6 +60,16 @@ patterns (stamps a clock-based deadline into ctx that retry/hedge read).
 `NewPolicy` with `r8e.ErrTimeBudgetWithoutConsumer`. Observability:
 `OnTimeBudgetExceeded` hook + `TimeBudgetExceeded` metric.
 
+Add `r8e.PropagateDeadline()` — `r8e.WithTimeBudget(d, r8e.PropagateDeadline())`
+— to also expose the budget as a **hard, clock-driven `ctx.Deadline()`** that
+downstream gRPC/HTTP callees observe and that **cancels an in-flight attempt** on
+expiry (surfacing the same `ErrTimeBudgetExceeded` wrapping
+`context.DeadlineExceeded`). The deadline is driven by the policy `Clock` (stays
+deterministic under a fake clock); a real ctx deadline is wall-clock, so the
+propagated value is only meaningful to real callees on `RealClock`.
+Config-expressible via `propagate_deadline` (requires `time_budget`, else
+`r8e.ErrDeadlinePropagationWithoutBudget`), hot-reloadable via `Reconfigure`.
+
 ### Retry
 
 ```go

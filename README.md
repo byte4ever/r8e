@@ -389,6 +389,31 @@ call. The budget gates only retry and hedge, so it **requires** `WithRetry` or
 `ErrTimeBudgetWithoutConsumer`. Observability: the `OnTimeBudgetExceeded` hook and
 the `TimeBudgetExceeded` metric. See [`examples/22-time-budget`](examples/22-time-budget).
 
+### Hard deadline propagation
+
+By default the budget leaves `context.Context.Deadline()` **unset**, so a
+downstream gRPC/HTTP callee can't see it and shed early. Pass `PropagateDeadline`
+to additionally expose the budget as a **hard, clock-driven deadline**:
+
+```go
+policy := r8e.NewPolicy[Response]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(100*time.Millisecond)),
+    r8e.WithTimeBudget(350*time.Millisecond, r8e.PropagateDeadline()),
+)
+```
+
+Each attempt now runs under a context whose `Deadline()` reports the budget
+instant (so a downstream client computes its own wire timeout from it) and whose
+cancellation **cancels an in-flight attempt** when the budget expires — surfacing
+the same `ErrTimeBudgetExceeded` (wrapping `context.DeadlineExceeded`) as the
+cooperative stop path. The deadline is driven by the policy's `Clock`, not the
+wall clock, so it stays deterministic under a fake test clock; because a real
+context deadline is intrinsically wall-clock, the *propagated value* is only
+meaningful to real callees on `RealClock` (production). Config-expressible via
+`propagate_deadline` (requires `time_budget`, else
+`ErrDeadlinePropagationWithoutBudget`) and hot-reloadable via `Reconfigure`. See
+[`examples/28-deadline-propagation`](examples/28-deadline-propagation).
+
 ## Retry Budget
 
 A retry budget caps how many retries fire relative to the failure rate, so a
@@ -922,6 +947,7 @@ go run ./examples/24-read-through-cache/
 go run ./examples/25-adaptive-throttle/
 go run ./examples/26-slow-call-breaker/
 go run ./examples/27-bulkhead-wait/
+go run ./examples/28-deadline-propagation/
 ```
 
 ## License

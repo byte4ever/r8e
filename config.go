@@ -23,6 +23,11 @@ type (
 		// TimeBudget is the total time budget shared across retry and hedge.
 		// Optional. Parsed via time.ParseDuration. Example: "5s".
 		TimeBudget *string `json:"time_budget,omitempty" yaml:"time_budget,omitempty"`
+		// PropagateDeadline, when true, exposes the time budget as a hard,
+		// clock-driven context deadline that downstream callees observe and that
+		// cancels an in-flight attempt once the budget expires (see
+		// [PropagateDeadline]). Optional; requires TimeBudget.
+		PropagateDeadline *bool `json:"propagate_deadline,omitempty" yaml:"propagate_deadline,omitempty"`
 		// Hedge is the delay before launching a hedged request.
 		// Optional. Parsed via time.ParseDuration. Example: "200ms".
 		Hedge *string `json:"hedge,omitempty" yaml:"hedge,omitempty"`
@@ -174,12 +179,24 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 			return nil, fmt.Errorf("time_budget: %w", ErrTimeBudgetWithoutConsumer)
 		}
 
-		d, err := time.ParseDuration(*pc.TimeBudget)
+		budget, err := time.ParseDuration(*pc.TimeBudget)
 		if err != nil {
 			return nil, fmt.Errorf("time_budget: %w", err)
 		}
 
-		opts = append(opts, WithTimeBudget(d))
+		var tbOpts []TimeBudgetOption
+		if pc.PropagateDeadline != nil && *pc.PropagateDeadline {
+			tbOpts = append(tbOpts, PropagateDeadline())
+		}
+
+		opts = append(opts, WithTimeBudget(budget, tbOpts...))
+	} else if pc.PropagateDeadline != nil && *pc.PropagateDeadline {
+		// Propagation has no budget to derive a deadline from — reject the same
+		// input cold and hot so BuildOptions and Reconfigure agree.
+		return nil, fmt.Errorf(
+			"propagate_deadline: %w",
+			ErrDeadlinePropagationWithoutBudget,
+		)
 	}
 
 	if pc.CircuitBreaker != nil {

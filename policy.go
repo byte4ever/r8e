@@ -34,8 +34,10 @@ type (
 		// Reloadable cells for the stateless patterns; nil when the pattern is
 		// absent. The middleware reads them per call so Reconfigure takes
 		// effect without rebuilding the chain.
-		timeout    *atomic.Int64                 // timeout in nanoseconds
-		timeBudget *atomic.Int64                 // total time budget in nanoseconds
+		timeout *atomic.Int64 // timeout in nanoseconds
+		// timeBudget carries the budget duration and the deadline-propagation
+		// flag as one atomically-swapped value (see timeBudgetState).
+		timeBudget *atomic.Pointer[timeBudgetState]
 		hedge      *atomic.Int64                 // hedge delay in nanoseconds
 		retry      *atomic.Pointer[retryRuntime] // retry attempts/strategy/opts
 		name       string
@@ -86,6 +88,9 @@ type (
 		deps           []HealthReporter
 
 		affectsReadiness bool
+		// propagateDeadline requests a hard clock-driven deadline derived from
+		// the time budget (see PropagateDeadline); ignored without timeBudget.
+		propagateDeadline bool
 	}
 
 	// retryDesc holds deferred retry configuration.
@@ -225,9 +230,19 @@ func WithTimeout(d time.Duration) Option {
 // The budget gates only retry and hedge, so it requires [WithRetry] or
 // [WithHedge]; configured with neither it would do nothing, and [NewPolicy]
 // panics with [ErrTimeBudgetWithoutConsumer] instead.
-func WithTimeBudget(d time.Duration) Option {
+//
+// Pass [PropagateDeadline] to additionally expose the budget as a hard,
+// clock-driven [context.Context] deadline that downstream callees observe and
+// that cancels an in-flight attempt when the budget expires.
+func WithTimeBudget(budget time.Duration, opts ...TimeBudgetOption) Option {
+	var cfg timeBudgetConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	return optionFunc(func(s *policySetup) {
-		s.timeBudget = &d
+		s.timeBudget = &budget
+		s.propagateDeadline = cfg.propagateDeadline
 	})
 }
 
@@ -496,7 +511,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		throttler      *Throttler
 		coalescer      *Coalescer[T]
 		timeoutCell    *atomic.Int64
-		timeBudgetCell *atomic.Int64
+		timeBudgetCell *atomic.Pointer[timeBudgetState]
 		hedgeCell      *atomic.Int64
 		retryCell      *atomic.Pointer[retryRuntime]
 	)
@@ -508,9 +523,15 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	}
 
 	if setup.timeBudget != nil {
-		timeBudgetCell = new(atomic.Int64)
-		timeBudgetCell.Store(int64(*setup.timeBudget))
-		entries = append(entries, newTimeBudgetEntry[T](timeBudgetCell, clock))
+		timeBudgetCell = new(atomic.Pointer[timeBudgetState])
+		timeBudgetCell.Store(&timeBudgetState{
+			budget:            *setup.timeBudget,
+			propagateDeadline: setup.propagateDeadline,
+		})
+		entries = append(
+			entries,
+			newTimeBudgetEntry[T](timeBudgetCell, clock, &hooks),
+		)
 	}
 
 	if setup.retry != nil {
@@ -679,15 +700,30 @@ func newTimeoutEntry[T any](cell *atomic.Int64, hooks *Hooks) PatternEntry[T] {
 	}
 }
 
-func newTimeBudgetEntry[T any](cell *atomic.Int64, clock Clock) PatternEntry[T] {
+func newTimeBudgetEntry[T any](
+	cell *atomic.Pointer[timeBudgetState],
+	clock Clock,
+	hooks *Hooks,
+) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityTimeBudget,
 		Name:     "time_budget",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				deadline := clock.Now().Add(time.Duration(cell.Load()))
+				state := cell.Load()
 
-				return next(attachTimeBudget(ctx, deadline))
+				// Cooperative-only: attach the budget value retry/hedge consult.
+				if !state.propagateDeadline {
+					return next(attachTimeBudget(ctx, clock.Now().Add(state.budget)))
+				}
+
+				// Hard mode: additionally derive a clock-driven context deadline
+				// that downstream callees observe (see PropagateDeadline).
+				return applyHardDeadline[T](ctx, next, hardDeadlineParams{
+					clock:  clock,
+					hooks:  hooks,
+					budget: state.budget,
+				})
 			}
 		},
 	}

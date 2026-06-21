@@ -388,6 +388,32 @@ ou `WithHedge` — configuré sans aucun des deux, `NewPolicy` panique avec
 `ErrTimeBudgetWithoutConsumer`. Observabilité : le hook `OnTimeBudgetExceeded` et
 la métrique `TimeBudgetExceeded`. Voir [`examples/22-time-budget`](examples/22-time-budget).
 
+### Propagation de deadline dure
+
+Par défaut le budget laisse `context.Context.Deadline()` **non défini** : un
+callee gRPC/HTTP en aval ne peut donc pas le voir ni shed early. Passez
+`PropagateDeadline` pour exposer en plus le budget comme une **deadline dure,
+pilotée par l'horloge** :
+
+```go
+policy := r8e.NewPolicy[Response]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(100*time.Millisecond)),
+    r8e.WithTimeBudget(350*time.Millisecond, r8e.PropagateDeadline()),
+)
+```
+
+Chaque tentative s'exécute alors sous un contexte dont `Deadline()` rapporte
+l'instant du budget (le client en aval en dérive son propre timeout réseau) et
+dont l'annulation **annule une tentative en cours** quand le budget expire — en
+remontant le même `ErrTimeBudgetExceeded` (enveloppant `context.DeadlineExceeded`)
+que le chemin coopératif. La deadline est pilotée par le `Clock` de la policy,
+pas par l'horloge murale, donc elle reste déterministe sous une fake clock en
+test ; comme une vraie deadline de contexte est intrinsèquement wall-clock, la
+*valeur propagée* n'a de sens pour de vrais callees que sur `RealClock`
+(production). Exprimable en config via `propagate_deadline` (exige `time_budget`,
+sinon `ErrDeadlinePropagationWithoutBudget`) et rechargeable à chaud via
+`Reconfigure`. Voir [`examples/28-deadline-propagation`](examples/28-deadline-propagation).
+
 ## Retry Budget
 
 Un retry budget plafonne le nombre de retries relativement au taux d'échec, pour
@@ -931,6 +957,7 @@ go run ./examples/24-read-through-cache/
 go run ./examples/25-adaptive-throttle/
 go run ./examples/26-slow-call-breaker/
 go run ./examples/27-bulkhead-wait/
+go run ./examples/28-deadline-propagation/
 ```
 
 ## Licence
