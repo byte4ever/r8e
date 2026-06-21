@@ -39,9 +39,9 @@ type (
 	// resilience policy by translating HTTP status codes
 	// into r8e error classification.
 	Client struct {
-		hc *http.Client
-		p  *r8e.Policy[*http.Response]
-		cl Classifier
+		httpClient *http.Client
+		policy     *r8e.Policy[*http.Response]
+		classifier Classifier
 	}
 )
 
@@ -122,9 +122,9 @@ func NewClient(
 	opts ...r8e.Option,
 ) *Client {
 	return &Client{
-		hc: hc,
-		p:  r8e.NewPolicy[*http.Response](name, opts...),
-		cl: cl,
+		httpClient: hc,
+		policy:     r8e.NewPolicy[*http.Response](name, opts...),
+		classifier: cl,
 	}
 }
 
@@ -144,7 +144,7 @@ func (c *Client) Do(
 	req *http.Request,
 ) (*http.Response, error) {
 	//nolint:wrapcheck // policy returns caller's error as-is
-	return c.p.Do(
+	return c.policy.Do(
 		ctx,
 		func(ctx context.Context) (*http.Response, error) {
 			attempt := req.Clone(ctx)
@@ -157,12 +157,14 @@ func (c *Client) Do(
 				attempt.Body = body
 			}
 
-			resp, err := c.hc.Do(attempt)
+			resp, err := c.httpClient.Do(attempt)
 			if err != nil {
 				return nil, err
 			}
 
-			switch c.cl(resp.StatusCode) {
+			switch c.classifier(resp.StatusCode) {
+			case Success:
+				return resp, nil
 			case Transient:
 				// Drain and close body so the underlying
 				// TCP connection can be reused on retry.
@@ -184,6 +186,9 @@ func (c *Client) Do(
 					},
 				)
 			default:
+				// An out-of-range ErrorClass from a custom
+				// classifier is passed through unchanged rather
+				// than silently retried.
 				return resp, nil
 			}
 		},
