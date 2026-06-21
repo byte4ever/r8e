@@ -31,6 +31,13 @@ type Hooks struct {
 	// OnCoalesceFollower fires when a call joins a shared execution already in
 	// flight (its work was deduplicated away).
 	OnCoalesceFollower func()
+
+	// OnConcurrencyRejected fires when the adaptive concurrency limiter rejects a
+	// call because in-flight is at its current limit.
+	OnConcurrencyRejected func()
+	// OnConcurrencyLimitChanged fires when the adaptive concurrency limiter
+	// retunes its integer limit, with the new value.
+	OnConcurrencyLimitChanged func(limit int)
 }
 
 func (h *Hooks) emitRetry(attempt int, err error) {
@@ -120,5 +127,17 @@ func (h *Hooks) emitCoalesceLeader() {
 func (h *Hooks) emitCoalesceFollower() {
 	if h.OnCoalesceFollower != nil {
 		h.OnCoalesceFollower()
+	}
+}
+
+func (h *Hooks) emitConcurrencyRejected() {
+	if h.OnConcurrencyRejected != nil {
+		h.OnConcurrencyRejected()
+	}
+}
+
+func (h *Hooks) emitConcurrencyLimitChanged(limit int) {
+	if h.OnConcurrencyLimitChanged != nil {
+		h.OnConcurrencyLimitChanged(limit)
 	}
 }

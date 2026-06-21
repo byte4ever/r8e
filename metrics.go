@@ -33,6 +33,9 @@ type (
 		// CoalesceFollowers counts calls deduplicated into an in-flight execution
 		// — the downstream calls coalescing saved.
 		CoalesceFollowers int64 `json:"coalesce_followers"`
+		// ConcurrencyRejected counts calls rejected by the adaptive concurrency
+		// limiter because in-flight was at its current limit.
+		ConcurrencyRejected int64 `json:"concurrency_rejected"`
 
 		// Live gauges at snapshot time.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
@@ -48,6 +51,12 @@ type (
 		// CoalesceInFlight is the number of distinct coalescing keys currently
 		// executing; 0 when the policy has no coalescer.
 		CoalesceInFlight int64 `json:"coalesce_in_flight"`
+		// ConcurrencyLimit is the adaptive limiter's current concurrency limit;
+		// 0 when the policy has no adaptive limiter.
+		ConcurrencyLimit int64 `json:"concurrency_limit"`
+		// ConcurrencyInFlight is the number of calls currently admitted by the
+		// adaptive limiter; 0 when the policy has no adaptive limiter.
+		ConcurrencyInFlight int64 `json:"concurrency_in_flight"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -71,6 +80,7 @@ type (
 		retryBudgetExceeded atomic.Int64
 		coalesceLeaders     atomic.Int64
 		coalesceFollowers   atomic.Int64
+		concurrencyRejected atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -186,6 +196,14 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnCoalesceFollower()
 			}
 		},
+		OnConcurrencyRejected: func() {
+			m.concurrencyRejected.Add(1)
+
+			if user.OnConcurrencyRejected != nil {
+				user.OnConcurrencyRejected()
+			}
+		},
+		OnConcurrencyLimitChanged: user.OnConcurrencyLimitChanged,
 	}
 }
 
@@ -209,6 +227,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		RetryBudgetExceeded: p.metrics.retryBudgetExceeded.Load(),
 		CoalesceLeaders:     p.metrics.coalesceLeaders.Load(),
 		CoalesceFollowers:   p.metrics.coalesceFollowers.Load(),
+		ConcurrencyRejected: p.metrics.concurrencyRejected.Load(),
 		Criticality:         health.Criticality,
 		Healthy:             health.Healthy,
 	}
@@ -232,6 +251,11 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 
 	if p.coalescer != nil {
 		metrics.CoalesceInFlight = int64(p.coalescer.InFlight())
+	}
+
+	if p.adaptive != nil {
+		metrics.ConcurrencyLimit = int64(p.adaptive.Limit())
+		metrics.ConcurrencyInFlight = int64(p.adaptive.InFlight())
 	}
 
 	return metrics

@@ -1,6 +1,6 @@
 ---
 name: r8e
-description: Guide for using the r8e Go resilience library. Use when writing, reviewing, or modifying code that uses github.com/byte4ever/r8e — including creating policies, composing resilience patterns (retry, circuit breaker, timeout, rate limiter, bulkhead, hedge, request coalescing/singleflight, fallback, stale cache), classifying errors, wiring health/readiness, using the httpx adapter, or loading configuration from JSON. Also use when the user asks about resilience, fault tolerance, or retry patterns in Go.
+description: Guide for using the r8e Go resilience library. Use when writing, reviewing, or modifying code that uses github.com/byte4ever/r8e — including creating policies, composing resilience patterns (retry, circuit breaker, timeout, rate limiter, bulkhead, adaptive concurrency, hedge, request coalescing/singleflight, fallback, stale cache), classifying errors, wiring health/readiness, using the httpx adapter, or loading configuration from JSON. Also use when the user asks about resilience, fault tolerance, or retry patterns in Go.
 ---
 
 # r8e — Go Resilience Library
@@ -26,8 +26,9 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Coalesce > Timeout > CircuitBreaker > RateLimiter > Bulkhead > Retry > Hedge.
-The retry budget is not a stage; it gates retries from within Retry.
+Fallback > Coalesce > Timeout > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
+The retry budget is not a stage; it gates retries from within Retry. Bulkhead and
+AdaptiveConcurrency share the concurrency slot and are mutually exclusive.
 
 ## Pattern Options
 
@@ -103,6 +104,22 @@ r8e.WithBulkhead(maxConcurrent int)
 
 Returns `r8e.ErrBulkheadFull` when all slots occupied.
 
+### Adaptive Concurrency
+
+```go
+r8e.WithAdaptiveConcurrency(opts ...AdaptiveOption)
+```
+
+Self-tuning concurrency limiter (Netflix **Gradient2**): samples each call's RTT,
+lowers the limit when the current RTT rises above a smoothed baseline (queueing),
+raises it when latency is steady. Returns `r8e.ErrConcurrencyLimited` when at the
+limit. **Options**: `r8e.InitialLimit(n)` (default 20), `r8e.MinLimit(n)` (default
+1), `r8e.MaxLimit(n)` (default 200), `r8e.RTTTolerance(f)` (default 1.5). Occupies
+the bulkhead slot → **mutually exclusive with `WithBulkhead`**: both panics
+`NewPolicy` with `r8e.ErrConcurrencyLimiterConflict` (or `BuildOptions` returns
+it). Grows only while loaded (in-flight ≥ half the limit). Standalone:
+`r8e.NewAdaptiveLimiter(clock, hooks, opts...)` + `Acquire()`/`Record(start)`.
+
 ### Hedge
 
 ```go
@@ -154,7 +171,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrTimeout`, `r8e.ErrRetriesExhausted`.
+`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrConcurrencyLimited`, `r8e.ErrTimeout`, `r8e.ErrRetriesExhausted`.
 
 ## Hooks
 
@@ -175,6 +192,8 @@ r8e.WithHooks(&r8e.Hooks{
     OnRetryBudgetExceeded: func() {},  // retry suppressed by the budget
     OnCoalesceLeader:   func() {},     // call ran a shared coalesced execution
     OnCoalesceFollower: func() {},     // call deduplicated into an in-flight one
+    OnConcurrencyRejected:     func() {},     // adaptive limiter shed a call
+    OnConcurrencyLimitChanged: func(limit int) {}, // adaptive limit retuned
 })
 ```
 
@@ -193,9 +212,10 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
 `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`, `RetryBudgetExceeded`,
-`CoalesceLeaders`, `CoalesceFollowers`) and gauges (`CircuitState`,
-`BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`, `CoalesceInFlight`,
-`Saturated`, `Healthy`, `Criticality`).
+`CoalesceLeaders`, `CoalesceFollowers`, `ConcurrencyRejected`) and gauges
+(`CircuitState`, `BulkheadInUse`, `BulkheadCap`, `RetryBudgetTokens`,
+`CoalesceInFlight`, `ConcurrencyLimit`, `ConcurrencyInFlight`, `Saturated`,
+`Healthy`, `Criticality`).
 
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
 `r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate
@@ -214,9 +234,11 @@ err := store.Reload("config.json")                                  // re-read f
 
 Cannot add/remove patterns (chain is fixed) → configuring an absent pattern
 returns `r8e.ErrPatternAbsent`; rebuild via GetPolicy/NewPolicy for structural
-changes. CircuitBreaker/RateLimiter/Bulkhead/RetryBudget also expose direct
-`Reconfigure`. The retry budget reconfigures via `PolicyConfig.RetryBudget`
-(`max_tokens`, `token_ratio`).
+changes. CircuitBreaker/RateLimiter/Bulkhead/RetryBudget/AdaptiveLimiter also
+expose direct `Reconfigure`. The retry budget reconfigures via
+`PolicyConfig.RetryBudget` (`max_tokens`, `token_ratio`); the adaptive limiter via
+`PolicyConfig.AdaptiveConcurrency` (`initial_limit`, `min_limit`, `max_limit`,
+`rtt_tolerance`).
 
 ## Health and Readiness
 
@@ -376,4 +398,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/20-coalesce`.
+Examples: `examples/01-quickstart` through `examples/21-adaptive-concurrency`.

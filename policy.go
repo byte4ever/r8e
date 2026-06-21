@@ -25,6 +25,7 @@ type (
 		circuitBreaker *CircuitBreaker
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
+		adaptive       *AdaptiveLimiter
 		retryBudget    *RetryBudget
 		coalescer      *Coalescer[T]
 		registry       *Registry
@@ -71,6 +72,7 @@ type (
 		circuitBreaker *circuitBreakerDesc
 		rateLimit      *rateLimitDesc
 		bulkhead       *int
+		adaptive       *adaptiveDesc
 		hedge          *time.Duration
 		fallbackValue  *staticFallback
 		fallbackFunc   *funcFallback
@@ -104,6 +106,11 @@ type (
 	// misconfiguration NewPolicy rejects with ErrCoalesceNilKeyFunc.
 	coalesceDesc struct {
 		keyFn func(context.Context) string
+	}
+
+	// adaptiveDesc holds deferred adaptive-concurrency configuration.
+	adaptiveDesc struct {
+		opts []AdaptiveOption
 	}
 
 	// staticFallback carries a WithFallback value (typed T, erased to any).
@@ -234,6 +241,29 @@ func WithBulkhead(maxConcurrent int) Option {
 	})
 }
 
+// WithAdaptiveConcurrency adds an adaptive concurrency limiter that tunes its
+// own limit from observed call latency (Netflix's Gradient2 algorithm), instead
+// of the fixed ceiling of [WithBulkhead]. Calls arriving while in-flight is at
+// the current limit are rejected with [ErrConcurrencyLimited]. See
+// [AdaptiveLimiter] and the [InitialLimit], [MinLimit], [MaxLimit], and
+// [RTTTolerance] options.
+//
+// It occupies the same chain slot as the bulkhead, so it is mutually exclusive
+// with [WithBulkhead]: configuring both panics [NewPolicy] with
+// [ErrConcurrencyLimiterConflict].
+//
+// The limiter sits outside retry and hedge in the chain, so the round-trip time
+// it samples spans those inner stages — a call that retries with backoff reports
+// the total elapsed time, not the raw downstream latency. That is intended: the
+// limiter bounds the total concurrent work admitted into the downstream
+// (retries included). Tune [RTTTolerance] up if retry backoff makes it react too
+// eagerly.
+func WithAdaptiveConcurrency(opts ...AdaptiveOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.adaptive = &adaptiveDesc{opts: opts}
+	})
+}
+
 // WithHedge adds a hedged request that fires a second concurrent call after
 // delay.
 func WithHedge(delay time.Duration) Option {
@@ -344,6 +374,13 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		}
 	}
 
+	// The bulkhead and the adaptive limiter both drive the concurrency slot;
+	// configuring both is contradictory. BuildOptions catches the same case for
+	// config-driven construction and returns ErrConcurrencyLimiterConflict.
+	if setup.bulkhead != nil && setup.adaptive != nil {
+		panic(ErrConcurrencyLimiterConflict)
+	}
+
 	if setup.clock == nil {
 		setup.clock = RealClock{}
 	}
@@ -359,6 +396,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker *CircuitBreaker
 		rateLimiter    *RateLimiter
 		bulkhead       *Bulkhead
+		adaptive       *AdaptiveLimiter
 		coalescer      *Coalescer[T]
 		timeoutCell    *atomic.Int64
 		hedgeCell      *atomic.Int64
@@ -399,6 +437,11 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		entries = append(entries, newBulkheadEntry[T](bulkhead))
 	}
 
+	if setup.adaptive != nil {
+		adaptive = NewAdaptiveLimiter(clock, &hooks, setup.adaptive.opts...)
+		entries = append(entries, newAdaptiveEntry[T](adaptive))
+	}
+
 	if setup.hedge != nil {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
@@ -437,6 +480,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker:   circuitBreaker,
 		rateLimiter:      rateLimiter,
 		bulkhead:         bulkhead,
+		adaptive:         adaptive,
 		retryBudget:      setup.retryBudget,
 		coalescer:        coalescer,
 		metrics:          metrics,
@@ -553,6 +597,27 @@ func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
 				}
 
 				defer bh.Release()
+
+				return next(ctx)
+			}
+		},
+	}
+}
+
+func newAdaptiveEntry[T any](limiter *AdaptiveLimiter) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityBulkhead,
+		Name:     "adaptive_concurrency",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				done, err := limiter.Acquire()
+				if err != nil {
+					var zero T
+
+					return zero, err //nolint:wrapcheck // limiter error returned as-is
+				}
+
+				defer done()
 
 				return next(ctx)
 			}

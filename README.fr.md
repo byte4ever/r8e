@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 15 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 17 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -57,7 +57,8 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Retry Budget** | Token bucket adaptatif qui throttle les retries quand les échecs dominent, évitant les retry storms |
 | **Circuit Breaker** | Échoue rapidement quand une dépendance est en panne, récupération automatique via sonde half-open |
 | **Rate Limiter** | Contrôle de débit par token bucket (mode rejet ou blocage) |
-| **Bulkhead** | Limitation de concurrence par sémaphore |
+| **Bulkhead** | Limitation de concurrence par sémaphore (limite fixe) |
+| **Concurrence adaptative** | Limite de concurrence auto-ajustée depuis la latence observée (Gradient2 de Netflix) |
 | **Requêtes spéculatives** | Lance un second appel après un délai pour réduire la latence de queue |
 | **Coalescing de requêtes** | Fusionne les appels identiques concurrents en une seule exécution partagée (singleflight), éliminant le cache stampede |
 | **Stale Cache** | Sert la dernière valeur connue par clé en cas d'erreur (wrapper autonome avec backends de cache interchangeables) |
@@ -306,7 +307,7 @@ Requête
       → Timeout         (deadline globale)
         → Circuit Breaker  (échec rapide si ouvert)
           → Rate Limiter   (contrôle du débit)
-            → Bulkhead     (limite la concurrence)
+            → Bulkhead     (limite la concurrence — fixe, ou adaptative)
               → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
                 → Hedge     (le plus interne — lance des appels redondants)
                   → fn()    (votre fonction)
@@ -412,6 +413,44 @@ c := r8e.NewCoalescer[string](&r8e.Hooks{})
 val, err := c.Do(ctx, "user:42", fetch)
 ```
 
+## Concurrence adaptative
+
+`WithAdaptiveConcurrency` remplace le plafond fixe d'un [Bulkhead](#bulkhead) par
+une limite que la policy **ajuste elle-même depuis la latence observée**, via
+l'algorithme Gradient2 de Netflix. Chaque appel terminé échantillonne sa RTT ;
+quand la RTT courante monte au-dessus d'une baseline long-terme lissée — la
+signature d'une file qui se forme en aval — la limite baisse, et quand la latence
+est stable la limite remonte. Les appels arrivant alors que l'in-flight est à la
+limite courante sont rejetés avec `ErrConcurrencyLimited`.
+
+```go
+policy := r8e.NewPolicy[Response]("downstream",
+    r8e.WithAdaptiveConcurrency(
+        r8e.InitialLimit(20),   // point de départ avant toute mesure
+        r8e.MinLimit(1),        // jamais moins que ça
+        r8e.MaxLimit(200),      // jamais plus que ça
+        r8e.RTTTolerance(1.5),  // tolère une hausse de RTT de 1.5x avant de baisser
+    ),
+)
+```
+
+Elle occupe le même slot que le bulkhead : elle est donc **mutuellement
+exclusive** avec `WithBulkhead`. Configurer les deux panique `NewPolicy` avec
+`ErrConcurrencyLimiterConflict` (ou, en construction par config, `BuildOptions`
+le renvoie). La limite ne grandit que lorsque le limiter est réellement chargé
+(in-flight à au moins la moitié de la limite), donc un service au repos n'est
+jamais poussé à sonder plus haut.
+
+Observabilité : les hooks `OnConcurrencyRejected` et
+`OnConcurrencyLimitChanged(limit)`, le compteur `ConcurrencyRejected` et les
+jauges `ConcurrencyLimit` / `ConcurrencyInFlight`. La saturation s'expose comme
+une condition de santé dégradée `concurrency_limited` (elle ne bloque jamais la
+readiness). Voir
+[`examples/21-adaptive-concurrency`](examples/21-adaptive-concurrency).
+
+Un `AdaptiveLimiter` s'utilise aussi seul via `NewAdaptiveLimiter`, `Acquire` et
+`Record`.
+
 ## Classification des erreurs
 
 Classifiez les erreurs pour contrôler le comportement de retry :
@@ -447,7 +486,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (15) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`.
+Hooks disponibles sur `Hooks` (17) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
@@ -718,6 +757,7 @@ go run ./examples/17-httpx-basic/
 go run ./examples/18-httpx-retry/
 go run ./examples/19-retry-budget/
 go run ./examples/20-coalesce/
+go run ./examples/21-adaptive-concurrency/
 ```
 
 ## Licence

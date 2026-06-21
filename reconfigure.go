@@ -107,6 +107,19 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error {
 		actions = append(actions, func() { p.bulkhead.Reconfigure(slots) })
 	}
 
+	if cfg.AdaptiveConcurrency != nil {
+		if p.adaptive == nil {
+			return absentPatternError("adaptive_concurrency")
+		}
+
+		adaptiveOpts := adaptiveOptionsFromConfig(cfg.AdaptiveConcurrency)
+
+		actions = append(
+			actions,
+			func() { p.adaptive.Reconfigure(adaptiveOpts...) },
+		)
+	}
+
 	if cfg.CircuitBreaker != nil {
 		if p.circuitBreaker == nil {
 			return absentPatternError("circuit_breaker")

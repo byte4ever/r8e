@@ -71,6 +71,9 @@ const (
 	// ConditionRetryBudgetExhausted means the retry budget is throttling
 	// retries (degraded); first attempts still flow.
 	ConditionRetryBudgetExhausted Condition = "retry_budget_exhausted"
+	// ConditionConcurrencyLimited means the adaptive concurrency limiter is at
+	// its current limit (degraded); it is shedding excess concurrency.
+	ConditionConcurrencyLimited Condition = "concurrency_limited"
 )
 
 // conditionSeverity is the single source of truth for the degradation model: it
@@ -88,6 +91,7 @@ var conditionSeverity = []struct {
 	{ConditionCircuitOpen, CriticalityCritical},
 	{ConditionRateLimited, CriticalityDegraded},
 	{ConditionBulkheadFull, CriticalityDegraded},
+	{ConditionConcurrencyLimited, CriticalityDegraded},
 	{ConditionRetryBudgetExhausted, CriticalityDegraded},
 	{ConditionDependencyDegraded, CriticalityDegraded},
 	{ConditionCircuitHalfOpen, CriticalityNone},
@@ -156,6 +160,11 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// Bulkhead — degraded (not unhealthy on its own).
 	if p.bulkhead != nil && p.bulkhead.Full() {
 		conditions = append(conditions, ConditionBulkheadFull)
+	}
+
+	// Adaptive concurrency limiter — degraded when saturated (shedding load).
+	if p.adaptive != nil && p.adaptive.Saturated() {
+		conditions = append(conditions, ConditionConcurrencyLimited)
 	}
 
 	// Retry budget — degraded; retries are throttled but first attempts flow.

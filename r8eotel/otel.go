@@ -79,6 +79,8 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceLeaders })
 	builder.counter("r8e.policy.coalesce_followers", "Calls deduplicated by request coalescing",
 		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceFollowers })
+	builder.counter("r8e.policy.concurrency_rejected", "Calls rejected by the adaptive concurrency limiter",
+		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyRejected })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })
@@ -92,6 +94,10 @@ func Register(meter metric.Meter, reg *r8e.Registry) (metric.Registration, error
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Saturated }))
 	builder.gauge("r8e.policy.coalesce_in_flight", "Distinct coalescing keys currently executing",
 		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceInFlight })
+	builder.gauge("r8e.policy.concurrency_limit", "Adaptive concurrency limiter's current limit",
+		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyLimit })
+	builder.gauge("r8e.policy.concurrency_in_flight", "Calls currently admitted by the adaptive limiter",
+		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyInFlight })
 	builder.gaugeFloat64("r8e.policy.retry_budget_tokens", "Retry budget tokens currently available",
 		func(m *r8e.PolicyMetrics) float64 { return m.RetryBudgetTokens })
 

@@ -29,6 +29,10 @@ type (
 		// Bulkhead is the maximum concurrent requests.
 		// Optional. Example: 10.
 		Bulkhead *int `json:"bulkhead,omitempty" yaml:"bulkhead,omitempty"`
+		// AdaptiveConcurrency configures the adaptive concurrency limiter.
+		// Mutually exclusive with Bulkhead.
+		// Optional. Example: {"initial_limit": 20, "max_limit": 200}.
+		AdaptiveConcurrency *AdaptiveConfig `json:"adaptive_concurrency,omitempty" yaml:"adaptive_concurrency,omitempty"`
 		// RetryBudget configures the adaptive retry budget. Requires Retry.
 		// Optional. Example: {"max_tokens": 10, "token_ratio": 0.1}.
 		RetryBudget *RetryBudgetConfig `json:"retry_budget,omitempty" yaml:"retry_budget,omitempty"`
@@ -66,6 +70,24 @@ type (
 		// MaxAttempts is the maximum number of retry attempts.
 		// Required. Example: 3.
 		MaxAttempts *int `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+	}
+
+	// AdaptiveConfig holds adaptive-concurrency configuration values.
+	// Embed it (via [PolicyConfig]) in your own config struct for JSON or YAML
+	// unmarshaling.
+	AdaptiveConfig struct {
+		// InitialLimit is the concurrency limit to start from.
+		// Optional. Example: 20.
+		InitialLimit *int `json:"initial_limit,omitempty" yaml:"initial_limit,omitempty"`
+		// MinLimit is the floor the adaptive limit cannot drop below.
+		// Optional. Example: 1.
+		MinLimit *int `json:"min_limit,omitempty" yaml:"min_limit,omitempty"`
+		// MaxLimit is the ceiling the adaptive limit cannot rise above.
+		// Optional. Example: 200.
+		MaxLimit *int `json:"max_limit,omitempty" yaml:"max_limit,omitempty"`
+		// RTTTolerance is the tolerated RTT increase before reducing the limit.
+		// Optional. Example: 1.5.
+		RTTTolerance *float64 `json:"rtt_tolerance,omitempty" yaml:"rtt_tolerance,omitempty"`
 	}
 
 	// RetryBudgetConfig holds retry-budget configuration values. Embed it
@@ -122,8 +144,25 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		opts = append(opts, WithRateLimit(*pc.RateLimit))
 	}
 
+	if pc.Bulkhead != nil && pc.AdaptiveConcurrency != nil {
+		// Both drive the concurrency slot; configuring both would panic in
+		// NewPolicy. Reject it here so config-driven misconfiguration surfaces as
+		// an error, not a panic.
+		return nil, fmt.Errorf(
+			"adaptive_concurrency: %w",
+			ErrConcurrencyLimiterConflict,
+		)
+	}
+
 	if pc.Bulkhead != nil {
 		opts = append(opts, WithBulkhead(*pc.Bulkhead))
+	}
+
+	if pc.AdaptiveConcurrency != nil {
+		opts = append(
+			opts,
+			WithAdaptiveConcurrency(adaptiveOptionsFromConfig(pc.AdaptiveConcurrency)...),
+		)
 	}
 
 	if pc.Hedge != nil {
@@ -153,6 +192,31 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	return opts, nil
+}
+
+// adaptiveOptionsFromConfig converts an [AdaptiveConfig] into
+// adaptive-concurrency options. Shared by [BuildOptions] and
+// [Policy.Reconfigure].
+func adaptiveOptionsFromConfig(cfg *AdaptiveConfig) []AdaptiveOption {
+	var opts []AdaptiveOption
+
+	if cfg.InitialLimit != nil {
+		opts = append(opts, InitialLimit(*cfg.InitialLimit))
+	}
+
+	if cfg.MinLimit != nil {
+		opts = append(opts, MinLimit(*cfg.MinLimit))
+	}
+
+	if cfg.MaxLimit != nil {
+		opts = append(opts, MaxLimit(*cfg.MaxLimit))
+	}
+
+	if cfg.RTTTolerance != nil {
+		opts = append(opts, RTTTolerance(*cfg.RTTTolerance))
+	}
+
+	return opts
 }
 
 // retryBudgetOptionsFromConfig converts a [RetryBudgetConfig] into retry-budget

@@ -29,6 +29,9 @@ var (
 	ErrRateLimited error = resilienceError("rate limited")
 	// ErrBulkheadFull is returned when the bulkhead has no available capacity.
 	ErrBulkheadFull error = resilienceError("bulkhead full")
+	// ErrConcurrencyLimited is returned when the adaptive concurrency limiter is
+	// at its current limit and rejects a call.
+	ErrConcurrencyLimited error = resilienceError("concurrency limited")
 	// ErrTimeout is returned when an operation exceeds its deadline.
 	ErrTimeout error = resilienceError("timeout")
 	// ErrRetriesExhausted is returned when all retry attempts have been used.
@@ -53,6 +56,14 @@ var (
 	// is the value [NewPolicy] panics with for that misconfiguration.
 	ErrCoalesceWithoutTimeout error = resilienceError(
 		"coalesce requires a timeout to bound the detached shared call",
+	)
+	// ErrConcurrencyLimiterConflict indicates a policy was configured with both
+	// [WithBulkhead] and [WithAdaptiveConcurrency]. Both drive the same
+	// concurrency-limiting slot, so they are mutually exclusive. It is the value
+	// [NewPolicy] panics with, and the error [BuildOptions] returns, for that
+	// misconfiguration.
+	ErrConcurrencyLimiterConflict error = resilienceError(
+		"bulkhead and adaptive concurrency are mutually exclusive",
 	)
 )
 
