@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r \".tool_input.command\"); printf \"%s\" \"$cmd\" | grep -qE \"git[[:space:]]+commit\" && jq -n --arg m \"Impactful change? If this commit adds a feature or changes behavior/API, verify the user-facing docs reflect it before finalizing: README.md, README.fr.md (keep FR in sync with EN), doc.go (package godoc), and claude-skill/SKILL.md. Skip trivial commits (chore/refactor/test-only/docs).\" \"{hookSpecificOutput:{hookEventName:\\\"PreToolUse\\\",additionalContext:\\$m}}\" || true",
+            "statusMessage": "Checking docs for impactful commit"
+          }
+        ]
+      }
+    ]
+  }
+}
