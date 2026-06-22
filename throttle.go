@@ -1,6 +1,7 @@
 package r8e
 
 import (
+	"context"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -254,13 +255,18 @@ func (c *throttleConfig) clamp() {
 	}
 }
 
-// Allow decides whether to admit a call. It counts this attempt as a request and
-// draws against the current rejection probability; on a local shed it emits
-// OnThrottled (outside the lock, so a user callback never runs inside the
-// critical section) and returns [ErrThrottled], otherwise nil. Pair each admitted
-// call with a [Throttler.Record] so the outcome feeds the window.
-func (t *Throttler) Allow() error {
-	if t.admit() {
+// Allow decides whether to admit a call. It reads the [Sheddability] stamped on
+// ctx by [WithSheddability] and applies it to the current rejection probability:
+//
+//   - [SheddabilityNever]: the call is always admitted, even at maximum load.
+//   - [SheddabilityDefault]: the call is shed with the normal SRE probability.
+//   - [SheddabilityAlways]: the call is shed as soon as any shedding is active.
+//
+// On a local shed it emits OnThrottled (outside the lock, so no user callback
+// runs inside the critical section) and returns [ErrThrottled], otherwise nil.
+// Pair each admitted call with a [Throttler.Record] so the outcome feeds the window.
+func (t *Throttler) Allow(ctx context.Context) error {
+	if t.admit(SheddabilityFromCtx(ctx)) {
 		return nil
 	}
 
@@ -273,7 +279,18 @@ func (t *Throttler) Allow() error {
 // shed (false). It holds the lock only for the decision (via defer, so a panic in
 // the sampler cannot strand the mutex); the OnThrottled hook is emitted by Allow
 // after the lock is released, so no user callback runs under it.
-func (t *Throttler) admit() bool {
+//
+// Counting is unconditional: requests++ fires for every call regardless of
+// Sheddability, before the admission switch. This keeps the window's overload
+// signal accurate — bypassing counting for SheddabilityNever would cause the
+// window to undercount load, making the throttler less responsive to recovery.
+// The trade-off is that a burst of SheddabilityNever calls that fail at the
+// backend raises the rejection probability for SheddabilityDefault callers. When
+// combined with a circuit breaker, the circuit's ErrCircuitOpen responses are
+// recorded as rejections by the window; after the circuit closes the throttler
+// may continue shedding Default calls for up to one ThrottleWindow while the
+// window drains — SheddabilityNever callers are unaffected during this period.
+func (t *Throttler) admit(shed Sheddability) bool {
 	now := t.clock.Now()
 
 	t.mu.Lock()
@@ -282,9 +299,19 @@ func (t *Throttler) admit() bool {
 	prob := t.rejectProbabilityLocked(now)
 	t.bucketFor(now).requests++
 
-	// Forward unless a positive probability wins the draw (stated positively so
-	// the admit/shed polarity reads without a double negative).
-	return prob <= 0 || t.sampler() >= prob
+	switch shed {
+	case SheddabilityNever:
+		// Critical calls bypass shedding entirely; they still participate in the
+		// window (requests++ above) so the overload signal remains accurate.
+		return true
+	case SheddabilityAlways:
+		// Sheddable calls are dropped as soon as any load shedding is active.
+		return prob <= 0
+	default:
+		// Default: forward unless a positive probability wins the draw (stated
+		// positively so the admit/shed polarity reads without a double negative).
+		return prob <= 0 || t.sampler() >= prob
+	}
 }
 
 // Record folds a completed call's outcome into the window: an accepted result

@@ -865,7 +865,7 @@ func newThrottleEntry[T any](throttler *Throttler) PatternEntry[T] {
 		Name:     "adaptive_throttle",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				if err := throttler.Allow(); err != nil {
+				if err := throttler.Allow(ctx); err != nil {
 					var zero T
 
 					return zero, err //nolint:wrapcheck // throttler error returned as-is

@@ -634,6 +634,26 @@ condition (it never gates readiness). A `Throttler` can also be used standalone
 with `NewThrottler`, `Allow`, and `Record`. See
 [`examples/25-adaptive-throttle`](examples/25-adaptive-throttle).
 
+### Request sheddability
+
+Stamp a context to control how the throttler treats a specific call:
+
+```go
+// Critical call — always admitted, even at maximum load.
+ctx := r8e.WithSheddability(ctx, r8e.SheddabilityNever)
+result, err := policy.Do(ctx, fn)
+
+// Background job — shed first as soon as any load shedding is active.
+ctx := r8e.WithSheddability(ctx, r8e.SheddabilityAlways)
+result, err := policy.Do(ctx, fn)
+```
+
+The three levels are: `SheddabilityNever` (bypass — critical traffic),
+`SheddabilityDefault` (zero value — normal SRE probability), and
+`SheddabilityAlways` (shed first — background or speculative work). Only the
+adaptive throttler reads the stamp; other patterns are unaffected. See
+[`examples/29-sheddability`](examples/29-sheddability).
+
 ## Error Classification
 
 Classify errors to control retry behavior:

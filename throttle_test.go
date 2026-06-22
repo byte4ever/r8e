@@ -31,7 +31,7 @@ func forward(t *testing.T, th *Throttler, accepted bool) {
 	t.Helper()
 
 	th.sampler = neverShed
-	require.NoError(t, th.Allow(), "call should be admitted with shedding off")
+	require.NoError(t, th.Allow(context.Background()), "call should be admitted with shedding off")
 
 	if accepted {
 		th.Record(nil)
@@ -178,7 +178,7 @@ func TestAllowForwardsWhenHealthy(t *testing.T) {
 	th.sampler = alwaysShed // would shed if probability were positive
 
 	// No window history yet → probability 0 → always admitted.
-	assert.NoError(t, th.Allow())
+	assert.NoError(t, th.Allow(context.Background()))
 }
 
 func TestAllowShedsUnderOverload(t *testing.T) {
@@ -193,7 +193,7 @@ func TestAllowShedsUnderOverload(t *testing.T) {
 
 	th.sampler = alwaysShed
 
-	require.ErrorIs(t, th.Allow(), ErrThrottled, "call should be shed under overload")
+	require.ErrorIs(t, th.Allow(context.Background()), ErrThrottled, "call should be shed under overload")
 	assert.Equal(t, 1, shed, "OnThrottled should fire once")
 }
 
@@ -206,7 +206,7 @@ func TestAllowForwardsWhenDrawAboveProbability(t *testing.T) {
 
 	th.sampler = func() float64 { return 0.95 } // draw above the cap
 
-	assert.NoError(t, th.Allow(), "a draw above the probability forwards")
+	assert.NoError(t, th.Allow(context.Background()), "a draw above the probability forwards")
 }
 
 func TestShedCallStillCountsAsRequest(t *testing.T) {
@@ -218,7 +218,7 @@ func TestShedCallStillCountsAsRequest(t *testing.T) {
 	th.sampler = alwaysShed
 
 	before, _ := windowSnapshot(th)
-	require.ErrorIs(t, th.Allow(), ErrThrottled)
+	require.ErrorIs(t, th.Allow(context.Background()), ErrThrottled)
 	after, _ := windowSnapshot(th)
 
 	assert.Equal(t, before+1, after, "a shed call increments requests")
@@ -265,7 +265,7 @@ func TestClassifierExcludesErrorFromShedding(t *testing.T) {
 	// accept, so requests == accepts and nothing is shed.
 	th.sampler = neverShed
 	for range 10 {
-		require.NoError(t, th.Allow())
+		require.NoError(t, th.Allow(context.Background()))
 		th.Record(notFound)
 	}
 
@@ -472,7 +472,7 @@ func TestThrottlerConcurrentAccess(t *testing.T) {
 		go func(accept bool) {
 			defer wg.Done()
 
-			if th.Allow() == nil {
+			if th.Allow(context.Background()) == nil {
 				if accept {
 					th.Record(nil)
 					accepted.Add(1)
@@ -514,7 +514,7 @@ func TestThrottlerConcurrentReconfigure(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			if th.Allow() == nil {
+			if th.Allow(context.Background()) == nil {
 				th.Record(errBackend) // reads the classifier under contention
 			}
 		}()
@@ -701,6 +701,116 @@ func TestPolicyReconfigureThrottleBadWindow(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "adaptive_throttle.window")
 	assert.ErrorContains(t, err, "nope")
+}
+
+// ---------------------------------------------------------------------------
+// Sheddability — per-call load-shedding priority
+// ---------------------------------------------------------------------------
+
+func TestSheddabilityNeverBypassesShedding(t *testing.T) {
+	t.Parallel()
+
+	// Saturate the window: probability driven to the cap.
+	th := NewThrottler(&stubClock{now: epochBase()}, &Hooks{}, MinRequests(1))
+	feed(t, th, 10, 0)
+	th.sampler = alwaysShed // would shed a Default call
+
+	// SheddabilityNever: must be admitted even at maximum rejection rate.
+	ctx := WithSheddability(context.Background(), SheddabilityNever)
+	assert.NoError(t, th.Allow(ctx), "critical call must not be shed even at max probability")
+}
+
+func TestSheddabilityAlwaysShedsWhenProbabilityPositive(t *testing.T) {
+	t.Parallel()
+
+	// Low but positive probability: only 1 request, 0 accepts.
+	th := NewThrottler(&stubClock{now: epochBase()}, &Hooks{}, MinRequests(1))
+	feed(t, th, 1, 0) // prob = max(0, (1 - 2*0) / 2) = 0.5
+	// A draw of 0.99 would spare a Default call but not a SheddabilityAlways call.
+	th.sampler = func() float64 { return 0.99 }
+
+	ctx := WithSheddability(context.Background(), SheddabilityAlways)
+	require.ErrorIs(t, th.Allow(ctx), ErrThrottled, "sheddable call must be shed as soon as probability > 0")
+}
+
+func TestSheddabilityAlwaysPassesWhenProbabilityZero(t *testing.T) {
+	t.Parallel()
+
+	// No window history: probability is zero (below MinRequests).
+	th := NewThrottler(&stubClock{now: epochBase()}, &Hooks{})
+
+	ctx := WithSheddability(context.Background(), SheddabilityAlways)
+	assert.NoError(t, th.Allow(ctx), "sheddable call must pass when no load shedding is active")
+}
+
+func TestSheddabilityDefaultUnchanged(t *testing.T) {
+	t.Parallel()
+
+	// Default behaviour: a draw >= prob forwards, a draw < prob sheds.
+	th := NewThrottler(&stubClock{now: epochBase()}, &Hooks{}, MinRequests(1))
+	feed(t, th, 10, 0) // probability at 0.9 cap
+
+	ctxDef := WithSheddability(context.Background(), SheddabilityDefault)
+
+	th.sampler = func() float64 { return 0.95 } // above cap → forward
+	assert.NoError(t, th.Allow(ctxDef))
+
+	th.sampler = alwaysShed // below any positive prob → shed
+	require.ErrorIs(t, th.Allow(ctxDef), ErrThrottled)
+}
+
+// TestPolicySheddabilityNeverNotShed verifies the end-to-end path: a
+// SheddabilityNever call passes through WithAdaptiveThrottle even when the
+// throttler would shed a default call at the same load.
+func TestPolicySheddabilityNeverNotShed(t *testing.T) {
+	t.Parallel()
+
+	policy := NewPolicy[string]("shed-svc",
+		WithClock(newPolicyClock()),
+		WithAdaptiveThrottle(MinRequests(1)),
+	)
+
+	// Drive the throttler to the rejection cap and force a deterministic draw.
+	feed(t, policy.throttler, 10, 0)
+	policy.throttler.sampler = alwaysShed
+
+	// A default call under overload must be shed.
+	_, errDef := policy.Do(context.Background(), func(_ context.Context) (string, error) {
+		return "ok", nil
+	})
+	require.ErrorIs(t, errDef, ErrThrottled, "default call should be throttled under overload")
+
+	// A SheddabilityNever call must bypass the throttler and reach fn.
+	ctx := WithSheddability(context.Background(), SheddabilityNever)
+	result, errCrit := policy.Do(ctx, func(_ context.Context) (string, error) {
+		return "critical-ok", nil
+	})
+	require.NoError(t, errCrit, "critical call must not be shed")
+	assert.Equal(t, "critical-ok", result)
+}
+
+// TestPolicySheddabilityAlwaysFirstToBeShed verifies that a SheddabilityAlways
+// call is shed as soon as any shedding is active, even though a Default call with
+// the same sampler draw would pass.
+func TestPolicySheddabilityAlwaysFirstToBeShed(t *testing.T) {
+	t.Parallel()
+
+	policy := NewPolicy[string]("sheddable-svc",
+		WithClock(newPolicyClock()),
+		WithAdaptiveThrottle(MinRequests(1)),
+	)
+
+	// Create a low but positive probability (1 request, 0 accepts).
+	feed(t, policy.throttler, 1, 0)
+	// Set sampler above the low probability so a Default call would pass, but a
+	// SheddabilityAlways call (shed = prob > 0) is still shed.
+	policy.throttler.sampler = func() float64 { return 0.99 }
+
+	ctx := WithSheddability(context.Background(), SheddabilityAlways)
+	_, err := policy.Do(ctx, func(_ context.Context) (string, error) {
+		return "ok", nil
+	})
+	require.ErrorIs(t, err, ErrThrottled, "sheddable call must be shed when probability > 0")
 }
 
 // ---------------------------------------------------------------------------

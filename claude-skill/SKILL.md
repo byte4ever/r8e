@@ -207,9 +207,17 @@ config-expressible (`AdaptiveThrottleConfig`) + reconfigurable; the classifier i
 code-only. Window is `Clock`-driven (deterministic). Observability: `OnThrottled`
 hook, `Throttled` counter, `ThrottleProbability` gauge, degraded `throttling`
 health condition (never gates readiness). Standalone:
-`r8e.NewThrottler(clock, hooks, opts...)` + `Allow() error` (returns
-`ErrThrottled` or nil) / `Record(err error)`; `RejectionProbability()` /
+`r8e.NewThrottler(clock, hooks, opts...)` + `Allow(ctx context.Context) error`
+(returns `ErrThrottled` or nil) / `Record(err error)`; `RejectionProbability()` /
 `Throttling()` snapshots.
+
+**Request sheddability** (`r8e.Sheddability` type, stamped on context):
+`r8e.WithSheddability(ctx, s)` / `r8e.SheddabilityFromCtx(ctx)`.
+Three levels: `SheddabilityNever` (bypass — critical, always admitted even at max
+load), `SheddabilityDefault` (zero value — normal SRE formula),
+`SheddabilityAlways` (shed first — as soon as probability > 0). Only the adaptive
+throttler reads the stamp; other patterns ignore it. Example:
+`examples/29-sheddability`.
 
 ### Hedge
 
@@ -541,4 +549,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/25-adaptive-throttle`.
+Examples: `examples/01-quickstart` through `examples/29-sheddability`.

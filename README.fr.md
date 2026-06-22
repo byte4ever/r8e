@@ -644,6 +644,27 @@ Observabilité : le hook `OnThrottled`, le compteur `Throttled` et la jauge
 seul via `NewThrottler`, `Allow` et `Record`. Voir
 [`examples/25-adaptive-throttle`](examples/25-adaptive-throttle).
 
+### Sheddabilité des requêtes
+
+Marquez un contexte pour contrôler comment le throttler traite un appel spécifique :
+
+```go
+// Appel critique — toujours admis, même à la charge maximale.
+ctx := r8e.WithSheddability(ctx, r8e.SheddabilityNever)
+result, err := policy.Do(ctx, fn)
+
+// Tâche de fond — délestée en premier dès qu'un délestage est actif.
+ctx := r8e.WithSheddability(ctx, r8e.SheddabilityAlways)
+result, err := policy.Do(ctx, fn)
+```
+
+Les trois niveaux sont : `SheddabilityNever` (bypass — trafic critique),
+`SheddabilityDefault` (valeur zéro — probabilité SRE normale) et
+`SheddabilityAlways` (délestage prioritaire — travail en arrière-plan ou
+spéculatif). Seul le throttler adaptatif lit l'annotation ; les autres patterns
+ne sont pas affectés. Voir
+[`examples/29-sheddability`](examples/29-sheddability).
+
 ## Classification des erreurs
 
 Classifiez les erreurs pour contrôler le comportement de retry :
