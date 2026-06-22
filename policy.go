@@ -116,6 +116,7 @@ type (
 		concurrencyBudget *ConcurrencyBudget
 		coalesce          *coalesceDesc
 		cache             *cacheDesc
+		chaos             *chaosDesc
 		deps              []HealthReporter
 
 		affectsReadiness bool
@@ -464,8 +465,10 @@ func WithHedge(delay time.Duration, opts ...HedgeOption) Option {
 // [Hooks.OnPanic] hook are all available to callers. Use errors.Is(err,
 // [ErrPanic]) to detect it and errors.As to inspect the full *[PanicError].
 //
-// Recovery sits innermost in the chain (priority > hedge), so each goroutine
-// spawned by hedge also gets its own recovery wrapper. When paired with
+// Recovery sits innermost among the durable patterns (priority > hedge; only
+// [WithChaos], a testing aid, sits further in, so a panic injected by a chaos
+// behavior is also caught), so each goroutine spawned by hedge also gets its own
+// recovery wrapper. When paired with
 // [WithRetry], a recovered panic becomes an error that retry can retry — useful
 // for intermittent panics caused by race conditions or nil-pointer bugs that a
 // retry might avoid. Pair it with [WithFallback] to return a safe default on
@@ -603,19 +606,19 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	clock := setup.clock
 
 	var (
-		entries        []PatternEntry[T]
-		circuitBreaker *CircuitBreaker
-		rateLimiter    *RateLimiter
-		bulkhead       *Bulkhead
-		adaptive       *AdaptiveLimiter
-		throttler      *Throttler
+		entries         []PatternEntry[T]
+		circuitBreaker  *CircuitBreaker
+		rateLimiter     *RateLimiter
+		bulkhead        *Bulkhead
+		adaptive        *AdaptiveLimiter
+		throttler       *Throttler
 		coalescer       *Coalescer[T]
 		timeoutCell     *atomic.Int64
 		adaptiveTimeout *adaptiveTimeout
 		timeBudgetCell  *atomic.Pointer[timeBudgetState]
-		hedgeCell      *atomic.Int64
-		adaptiveHedge  *adaptiveHedge
-		retryCell      *atomic.Pointer[retryRuntime]
+		hedgeCell       *atomic.Int64
+		adaptiveHedge   *adaptiveHedge
+		retryCell       *atomic.Pointer[retryRuntime]
 	)
 
 	if setup.timeout != nil {
@@ -713,6 +716,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 
 	if setup.panicRecover {
 		entries = append(entries, newRecoverEntry[T](&hooks))
+	}
+
+	if setup.chaos != nil && len(setup.chaos.strategies) > 0 {
+		entries = append(entries, newChaosEntry[T](setup.chaos, clock, &hooks))
 	}
 
 	if setup.cache != nil {

@@ -26,7 +26,7 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Cache > Coalesce > Timeout > TimeBudget > AdaptiveThrottle > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
+Fallback > Cache > Coalesce > Timeout > TimeBudget > AdaptiveThrottle > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge > Recover > Chaos.
 The retry budget is not a stage; it gates retries from within Retry. The
 concurrency budget is likewise not a visible stage; a thin tracker just outside
 Retry counts in-flight executions, and Retry/Hedge gate against it. The time
@@ -317,9 +317,9 @@ r8e.WithRecover()
 ```
 
 Catches any panic from the user function and converts it to a `*r8e.PanicError`
-instead of propagating the panic up the call stack. Sits **innermost** in the
-chain (priority 11, inside Hedge at 10) so each hedge goroutine recovers
-independently and Retry sees the recovered error.
+instead of propagating the panic up the call stack. Sits inside Hedge (only Chaos
+injection sits further in) so each hedge goroutine recovers independently and
+Retry sees the recovered error.
 
 `PanicError` implements `error` and carries:
 - `Value any` — the original panic value
@@ -329,6 +329,34 @@ Match with `errors.Is(err, r8e.ErrPanic)`; inspect via `errors.As(err, &pe)`.
 Hook: `OnPanic func(value any)`. Counter: `PanicsRecovered`.
 Standalone: `r8e.DoRecover[T](ctx, fn, hooks)`.
 Example: `examples/31-recover`.
+
+### Chaos Injection (Polly v8 / Simmy)
+
+```go
+r8e.WithChaos(strategies ...r8e.ChaosStrategy)
+```
+
+Probabilistically disturbs the call so the policy's **own** patterns get exercised
+(does my retry catch the injected fault? my timeout the injected latency?). Four
+strategies, each injecting independently on a fraction `prob ∈ [0,1]` (clamped):
+
+- `r8e.ChaosFault(prob, err, opts...)` — fail with `err` (nil → `ErrChaosInjected`); short-circuits.
+- `r8e.ChaosLatency(prob, d, opts...)` — delay `d` on the policy `Clock`, then proceed (ctx-cancellable).
+- `r8e.ChaosOutcome[T](prob, fn, opts...)` — short-circuit with a fabricated `(T, error)` (generic; erased to `any` and asserted back to the policy `T`, panicking on mismatch like `WithFallback`; nil fn is inert).
+- `r8e.ChaosBehavior(prob, fn, opts...)` — run a side effect, then proceed (nil fn is inert).
+
+Per-strategy option `r8e.ChaosEnabled(func(ctx) bool)` gates injection per call
+(canary kill-switch; nil = always eligible). Sits **innermost** (`priorityChaos`,
+inside Recover) — a simulated misbehaving downstream every pattern wraps: Retry
+re-rolls each strategy per attempt, Timeout bounds injected latency, Recover
+catches a chaos-behavior panic. Strategies run in the **order given**; fault/outcome
+short-circuit the rest, so list a fault **before** a latency to skip the wait
+(Polly's order). **Code-only** (outcome/behavior/enabled are functions): absent
+from `PolicyConfig`/`BuildOptions`/`Reconfigure`, like `WithCoalesce`/`WithCache`
+— switch off at runtime via a `ChaosEnabled` predicate. Hook: `OnChaosInjected
+func(kind string)` (kind ∈ fault/latency/outcome/behavior). Counter:
+`ChaosInjected`. OTel: `r8e.policy.chaos_injected`. Example:
+`examples/37-chaos-injection`.
 
 ### Request Coalescing (singleflight)
 
@@ -437,6 +465,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCacheStored: func() {},  // successful result written to cache
     OnStaleServed: func() {},  // stale value served after a downstream failure
     OnPanic:       func(value any) {},  // panic recovered by WithRecover
+    OnChaosInjected: func(kind string) {}, // chaos strategy injected (fault/latency/outcome/behavior)
 })
 ```
 
@@ -458,7 +487,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
 `CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `RateAdaptations`,
 `SlowCallRateExceeded`, `CacheHits`, `CacheMisses`, `CacheStores`,
-`CacheStaleServed`, `PanicsRecovered`) and gauges
+`CacheStaleServed`, `PanicsRecovered`, `ConcurrencyBudgetExceeded`,
+`ChaosInjected`) and gauges
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `AdaptiveTimeout`,

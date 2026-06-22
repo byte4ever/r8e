@@ -32,8 +32,9 @@ const (
 	priorityBulkhead          = 8
 	priorityConcurrencyBudget = 9 // tracks in-flight executions for the retry/hedge concurrency budget
 	priorityRetry             = 10
-	priorityHedge             = 11 // innermost — closest to user function
+	priorityHedge             = 11 // closest to user function among the durable patterns
 	priorityRecover           = 12 // inside hedge so each hedge goroutine also recovers panics
+	priorityChaos             = 13 // innermost — simulated downstream every pattern wraps and reacts to
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

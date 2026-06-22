@@ -187,6 +187,10 @@ var (
 	ErrConcurrencyBudgetExceeded error = resilienceError(
 		"concurrency budget exceeded",
 	)
+	// ErrChaosInjected is the default error a [ChaosFault] strategy injects when
+	// the caller passes a nil error (see [WithChaos]). Match it with errors.Is to
+	// tell a chaos-injected failure apart from a real downstream one.
+	ErrChaosInjected error = resilienceError("chaos fault injected")
 	// ErrConcurrencyBudgetWithoutConsumer indicates a concurrency budget was
 	// configured on a policy with neither [WithRetry] nor [WithHedge]. The budget
 	// only gates those two patterns, so without one it would silently do nothing.

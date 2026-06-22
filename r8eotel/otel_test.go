@@ -247,6 +247,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.cache_stores", "r8e.policy.cache_stale_served",
 		"r8e.policy.panics_recovered",
 		"r8e.policy.concurrency_budget_exceeded",
+		"r8e.policy.chaos_injected",
 		// Gauges.
 		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
 		"r8e.policy.bulkhead_queued", "r8e.policy.circuit_state",

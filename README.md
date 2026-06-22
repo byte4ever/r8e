@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 29 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 30 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -69,6 +69,7 @@ health reporting, and configuration hot-reload.
 | **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper; superseded by Read-Through Cache for chain use) |
 | **Fallback** | Static value or function fallback as last resort |
 | **Recover** | Catch panics from the user function and return them as `*PanicError`; lets retry, fallback, or circuit breaker handle them instead of crashing |
+| **Chaos Injection** | Probabilistically inject faults, latency, fake outcomes, or behaviors at the core of the chain to exercise your own resilience config (Polly-v8 / Simmy style), gated per call for safe canary chaos |
 
 Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, `Clock` for deterministic tests.
 
@@ -814,6 +815,52 @@ The `OnPanic` hook fires for each caught panic. The `PanicsRecovered` counter
 increments automatically. Standalone use: `r8e.DoRecover[T](ctx, fn, hooks)`.
 See [`examples/31-recover`](examples/31-recover).
 
+## Chaos Injection
+
+`WithChaos` deliberately disturbs the call so a policy's **own** resilience
+patterns get exercised — does my retry catch the injected fault? does my timeout
+catch the injected latency? It is r8e's take on Polly v8 / Simmy chaos
+engineering, with four strategies, each injecting independently on a fraction of
+calls:
+
+- **`ChaosFault(prob, err)`** — fail the call with `err` (defaults to `ErrChaosInjected`).
+- **`ChaosLatency(prob, d)`** — delay the call by `d` on the policy `Clock`, then proceed.
+- **`ChaosOutcome(prob, fn)`** — short-circuit with a fabricated typed result or error.
+- **`ChaosBehavior(prob, fn)`** — run a side effect before the call, then proceed.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithTimeout(100*time.Millisecond),
+    r8e.WithRetry(4, r8e.ConstantBackoff(time.Millisecond)),
+    r8e.WithFallback("default"),
+    r8e.WithChaos(
+        // 30% of canary calls fail — does the retry absorb it?
+        r8e.ChaosFault(0.3, errors.New("injected"), r8e.ChaosEnabled(isCanary)),
+        // 10% hang past the timeout — does the timeout catch it?
+        r8e.ChaosLatency(0.1, 250*time.Millisecond, r8e.ChaosEnabled(isCanary)),
+    ),
+)
+```
+
+Chaos sits **innermost** in the chain — a simulated misbehaving downstream — so
+every other pattern wraps and reacts to it: a retry re-rolls every strategy on
+each attempt, a timeout bounds injected latency, and a `WithRecover` catches a
+panic thrown by a chaos behavior. Strategies run in the order given, and a fault
+or outcome short-circuits the rest, so list a fault **before** a latency to skip
+the latency wait when the fault fires (Polly's recommended order).
+
+Gate any strategy per call with `ChaosEnabled(func(ctx) bool)` for safe
+canary-style chaos in production: read a feature flag or request header from the
+context and return whether this call is subject to chaos — switching chaos off at
+runtime without a redeploy. Because the outcome/behavior functions and the
+`ChaosEnabled` predicate are code, chaos is code-only: it is deliberately absent
+from `PolicyConfig`, `BuildOptions`, and `Reconfigure`, like `WithCoalesce` and
+`WithCache`. Latency is measured on the injected `Clock`, so chaos is
+deterministic in tests. Observability: the `OnChaosInjected` hook (with the
+strategy kind) and the `ChaosInjected` counter, exported as the
+`r8e.policy.chaos_injected` OpenTelemetry counter. See
+[`examples/37-chaos-injection`](examples/37-chaos-injection).
+
 ## Error Classification
 
 Classify errors to control retry behavior:
@@ -849,7 +896,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (28): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`.
+Available hooks on `Hooks` (30): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 

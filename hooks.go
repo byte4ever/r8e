@@ -90,6 +90,11 @@ type Hooks struct {
 	// ceiling and a retry is suppressed ([ErrConcurrencyBudgetExceeded] is
 	// returned) or a hedge is not launched (see [WithConcurrencyBudget]).
 	OnConcurrencyBudgetExceeded func()
+
+	// OnChaosInjected fires when a chaos strategy injects on a call, with the
+	// strategy kind ("fault", "latency", "outcome", or "behavior"). See
+	// [WithChaos].
+	OnChaosInjected func(kind string)
 }
 
 // Each emit method guards both a nil receiver and a nil field, so a nil *Hooks
@@ -266,5 +271,11 @@ func (h *Hooks) emitPanic(value any) {
 func (h *Hooks) emitConcurrencyBudgetExceeded() {
 	if h != nil && h.OnConcurrencyBudgetExceeded != nil {
 		h.OnConcurrencyBudgetExceeded()
+	}
+}
+
+func (h *Hooks) emitChaosInjected(kind string) {
+	if h != nil && h.OnChaosInjected != nil {
+		h.OnChaosInjected(kind)
 	}
 }

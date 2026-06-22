@@ -113,6 +113,11 @@ type (
 		// because the concurrency budget was at its ceiling (see
 		// [WithConcurrencyBudget]).
 		ConcurrencyBudgetExceeded int64 `json:"concurrency_budget_exceeded"`
+		// ChaosInjected counts injections by chaos strategies — faults, latencies,
+		// outcomes, and behaviors combined (see [WithChaos]). It is non-zero only
+		// when chaos injection is configured, so it stays at 0 in production unless
+		// chaos is deliberately enabled.
+		ChaosInjected int64 `json:"chaos_injected"`
 		// ConcurrencyBudgetInUse is the number of retries and hedges currently
 		// holding a concurrency-budget permit; 0 when the policy has no budget.
 		// When one budget is shared across policies (WithSharedConcurrencyBudget),
@@ -181,6 +186,7 @@ type (
 		cacheStaleServed     atomic.Int64
 		panicsRecovered      atomic.Int64
 		concBudgetExceeded   atomic.Int64
+		chaosInjected        atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -382,6 +388,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnConcurrencyBudgetExceeded()
 			}
 		},
+		OnChaosInjected: func(kind string) {
+			m.chaosInjected.Add(1)
+
+			if user.OnChaosInjected != nil {
+				user.OnChaosInjected(kind)
+			}
+		},
 	}
 }
 
@@ -417,6 +430,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CacheStaleServed:          p.metrics.cacheStaleServed.Load(),
 		PanicsRecovered:           p.metrics.panicsRecovered.Load(),
 		ConcurrencyBudgetExceeded: p.metrics.concBudgetExceeded.Load(),
+		ChaosInjected:             p.metrics.chaosInjected.Load(),
 		Criticality:               health.Criticality,
 		Healthy:                   health.Healthy,
 	}

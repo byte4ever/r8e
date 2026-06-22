@@ -121,6 +121,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.PanicsRecovered })
 	builder.counter("r8e.policy.concurrency_budget_exceeded", "Retries/hedges shed by the concurrency budget",
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyBudgetExceeded })
+	builder.counter("r8e.policy.chaos_injected", "Faults/latencies/outcomes/behaviors injected by chaos testing",
+		func(m *r8e.PolicyMetrics) int64 { return m.ChaosInjected })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })

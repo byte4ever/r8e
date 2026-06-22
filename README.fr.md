@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 29 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 30 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -68,6 +68,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Stale Cache** | Sert la dernière valeur connue par clé en cas d'erreur (wrapper autonome ; supplanté par le Cache read-through pour l'usage en chaîne) |
 | **Fallback** | Valeur statique ou fonction de repli en dernier recours |
 | **Recover** | Intercepte les panics de la fonction utilisateur et les retourne en tant que `*PanicError` ; retry, fallback ou circuit breaker peuvent alors les gérer au lieu de crasher |
+| **Injection de chaos** | Injecte de façon probabiliste des fautes, de la latence, de faux résultats ou des comportements au cœur de la chaîne pour éprouver votre propre config de résilience (façon Polly v8 / Simmy), gating par appel pour un chaos canary sûr |
 
 Plus : ordonnancement automatique des patterns, configuration JSON, presets, santé et readiness, hooks, `Clock` pour des tests déterministes.
 
@@ -830,6 +831,54 @@ pour chaque panic intercepté. Le compteur `PanicsRecovered` s'incrémente
 automatiquement. Usage autonome : `r8e.DoRecover[T](ctx, fn, hooks)`.
 Voir [`examples/31-recover`](examples/31-recover).
 
+## Injection de chaos
+
+`WithChaos` perturbe délibérément l'appel pour éprouver les patterns de résilience
+**de la policy elle-même** — est-ce que mon retry rattrape la faute injectée ?
+est-ce que mon timeout rattrape la latence injectée ? C'est la déclinaison r8e du
+chaos engineering de Polly v8 / Simmy, avec quatre stratégies injectant chacune
+indépendamment sur une fraction des appels :
+
+- **`ChaosFault(prob, err)`** — échoue l'appel avec `err` (défaut : `ErrChaosInjected`).
+- **`ChaosLatency(prob, d)`** — retarde l'appel de `d` sur le `Clock` de la policy, puis continue.
+- **`ChaosOutcome(prob, fn)`** — court-circuite avec un faux résultat typé ou une erreur.
+- **`ChaosBehavior(prob, fn)`** — exécute un effet de bord avant l'appel, puis continue.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithTimeout(100*time.Millisecond),
+    r8e.WithRetry(4, r8e.ConstantBackoff(time.Millisecond)),
+    r8e.WithFallback("default"),
+    r8e.WithChaos(
+        // 30% des appels canary échouent — le retry l'absorbe-t-il ?
+        r8e.ChaosFault(0.3, errors.New("injected"), r8e.ChaosEnabled(isCanary)),
+        // 10% traînent au-delà du timeout — le timeout le rattrape-t-il ?
+        r8e.ChaosLatency(0.1, 250*time.Millisecond, r8e.ChaosEnabled(isCanary)),
+    ),
+)
+```
+
+Le chaos se positionne **le plus à l'intérieur** de la chaîne — une dépendance
+défaillante simulée — de sorte que tous les autres patterns l'enveloppent et y
+réagissent : un retry re-tire chaque stratégie à chaque tentative, un timeout
+borne la latence injectée et un `WithRecover` rattrape un panic levé par un chaos
+behavior. Les stratégies s'exécutent dans l'ordre donné, et une faute ou un
+outcome court-circuite le reste : placez une faute **avant** une latence pour
+éviter l'attente de la latence quand la faute se déclenche (l'ordre recommandé
+par Polly).
+
+Gatez n'importe quelle stratégie par appel avec `ChaosEnabled(func(ctx) bool)`
+pour un chaos canary sûr en production : lisez un feature flag ou un en-tête de
+requête dans le contexte et renvoyez si cet appel est soumis au chaos — coupant
+le chaos à l'exécution sans redéploiement. Comme les fonctions outcome/behavior
+et le prédicat `ChaosEnabled` sont du code, le chaos est code-only : il est
+délibérément absent de `PolicyConfig`, `BuildOptions` et `Reconfigure`, comme
+`WithCoalesce` et `WithCache`. La latence est mesurée sur le `Clock` injecté,
+donc le chaos est déterministe en test. Observabilité : le hook `OnChaosInjected`
+(avec le type de stratégie) et le compteur `ChaosInjected`, exporté en compteur
+OpenTelemetry `r8e.policy.chaos_injected`. Voir
+[`examples/37-chaos-injection`](examples/37-chaos-injection).
+
 ## Classification des erreurs
 
 Classifiez les erreurs pour contrôler le comportement de retry :
@@ -865,7 +914,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (28) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`.
+Hooks disponibles sur `Hooks` (30) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
