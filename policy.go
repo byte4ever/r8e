@@ -33,6 +33,12 @@ type (
 		coalescer         *Coalescer[T]
 		registry          *Registry
 		metrics           *policyMetrics
+		// clock drives the latency window (and is the same clock injected into
+		// every pattern); held so Do can time each call deterministically.
+		clock Clock
+		// latency records each Do() duration into a sliding-window DDSketch for
+		// the p50/p95/p99 figures in Metrics. Always present (zero-config).
+		latency *latencyWindow
 		// Reloadable cells for the stateless patterns; nil when the pattern is
 		// absent. The middleware reads them per call so Reconfigure takes
 		// effect without rebuilding the chain.
@@ -189,10 +195,18 @@ func (p *Policy[T]) Do(
 	ctx context.Context,
 	fn func(context.Context) (T, error),
 ) (T, error) {
+	start := p.clock.Now()
 	wrapped := p.chain(fn)
 
+	result, err := wrapped(ctx)
+
+	// Record the end-to-end latency of every call — success or failure, including
+	// fast-fail rejections — so the percentiles describe the policy's real
+	// outward latency.
+	p.latency.observe(p.clock.Since(start))
+
 	//nolint:wrapcheck // middleware chain error returned as-is
-	return wrapped(ctx)
+	return result, err
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +711,8 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		concurrencyBudget: setup.concurrencyBudget,
 		coalescer:         coalescer,
 		metrics:           metrics,
+		clock:             clock,
+		latency:           newLatencyWindow(clock),
 		timeout:           timeoutCell,
 		timeBudget:        timeBudgetCell,
 		hedge:             hedgeCell,

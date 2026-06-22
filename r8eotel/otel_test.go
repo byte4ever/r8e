@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,6 +52,110 @@ func dataPoint(t *testing.T, points []metricdata.DataPoint[int64]) (int64, strin
 	require.True(t, ok, "data point missing policy attribute")
 
 	return points[0].Value, policy.AsString()
+}
+
+// collectFloat64 returns the value of the first data point of the named
+// Float64 gauge in rm.
+func collectFloat64(t *testing.T, rm metricdata.ResourceMetrics, name string) float64 {
+	t.Helper()
+
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != name {
+				continue
+			}
+
+			gauge, ok := metric.Data.(metricdata.Gauge[float64])
+			require.True(t, ok, "metric %q is not a Float64 gauge", name)
+			require.Len(t, gauge.DataPoints, 1)
+
+			return gauge.DataPoints[0].Value
+		}
+	}
+
+	t.Fatalf("metric %q not found", name)
+
+	return 0
+}
+
+// scriptedLatencyClock returns a pre-set elapsed per Do() call (Since is invoked
+// exactly once per Do), so a test can record a known latency DISTRIBUTION into
+// the window and assert that each percentile gauge reports its own distinct
+// value — pinning the p50/p95/p99 field mapping, not just the seconds conversion.
+type scriptedLatencyClock struct {
+	elapsed []time.Duration
+	idx     int
+}
+
+func (*scriptedLatencyClock) Now() time.Time { return time.Unix(1_700_000_000, 0) }
+
+func (c *scriptedLatencyClock) Since(time.Time) time.Duration {
+	d := c.elapsed[c.idx%len(c.elapsed)]
+	c.idx++
+
+	return d
+}
+
+func (*scriptedLatencyClock) NewTimer(time.Duration) r8e.Timer { return stoppedTimer{} }
+
+type stoppedTimer struct{}
+
+func (stoppedTimer) C() <-chan time.Time      { return nil }
+func (stoppedTimer) Stop() bool               { return true }
+func (stoppedTimer) Reset(time.Duration) bool { return false }
+
+// TestRegisterReportsLatencyPercentiles proves the latency gauges report the
+// window percentiles converted to seconds, with each gauge wired to its own
+// percentile (a distribution with distinct p50/p95/p99 catches a field swap).
+func TestRegisterReportsLatencyPercentiles(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	// 100 samples by nearest rank: p50=10ms, p95=100ms, p99=200ms — three
+	// distinct expected gauge values.
+	elapsed := make([]time.Duration, 0, 100)
+	for range 50 {
+		elapsed = append(elapsed, 10*time.Millisecond)
+	}
+
+	for range 45 {
+		elapsed = append(elapsed, 100*time.Millisecond)
+	}
+
+	for range 5 {
+		elapsed = append(elapsed, 200*time.Millisecond)
+	}
+
+	reg := r8e.NewRegistry()
+	policy := r8e.NewPolicy[string]("svc",
+		r8e.WithRegistry(reg),
+		r8e.WithClock(&scriptedLatencyClock{elapsed: elapsed}),
+	)
+
+	registration, err := r8eotel.Register(meter, reg)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, registration.Unregister()) }()
+
+	for range len(elapsed) {
+		_, err := policy.Do(context.Background(), func(context.Context) (string, error) {
+			return "ok", nil
+		})
+		require.NoError(t, err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	p50 := collectFloat64(t, rm, "r8e.policy.latency_p50")
+	p95 := collectFloat64(t, rm, "r8e.policy.latency_p95")
+	p99 := collectFloat64(t, rm, "r8e.policy.latency_p99")
+
+	// Distinct expected values (0.01s / 0.1s / 0.2s) within DDSketch's ~2%
+	// relative error: a gauge wired to the wrong field would fail its assertion.
+	assert.InEpsilon(t, 0.01, p50, 0.02)
+	assert.InEpsilon(t, 0.1, p95, 0.02)
+	assert.InEpsilon(t, 0.2, p99, 0.02)
 }
 
 func TestRegisterReportsPolicyMetrics(t *testing.T) {
@@ -151,6 +256,8 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.throttle_probability", "r8e.policy.rate_limit",
 		"r8e.policy.slow_call_rate",
 		"r8e.policy.concurrency_budget_in_use",
+		"r8e.policy.latency_p50", "r8e.policy.latency_p95",
+		"r8e.policy.latency_p99",
 	}
 	assert.ElementsMatch(t, want, gotNames,
 		"registered instruments drifted from the expected set")

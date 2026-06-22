@@ -431,6 +431,13 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `Saturated`, `Healthy`,
 `Criticality`).
 
+**Latency percentiles (always on, no option):** every `Do()` duration feeds a
+sliding-window DDSketch; `PolicyMetrics` exposes `LatencyP50`, `LatencyP95`,
+`LatencyP99` (`time.Duration`, recent ~10s window, ~2% relative error) and
+`LatencySamples` (`int64`; 0 ⇒ not yet meaningful). Clock-driven (deterministic
+in tests); every call counts, including fast-fail rejections. OTel publishes
+`r8e.policy.latency_p50/p95/p99` gauges (seconds). See `examples/34-latency-percentiles`.
+
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
 `r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate
 module — keeps core dependency-free).

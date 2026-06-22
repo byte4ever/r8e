@@ -828,6 +828,16 @@ fmt.Println(m.Retries, m.CircuitOpens, m.FallbacksUsed) // counters
 fmt.Println(m.CircuitState, m.BulkheadInUse, m.Saturated) // live gauges
 ```
 
+**Latency percentiles.** Every policy also records each `Do()` call's end-to-end duration into a sliding-window histogram and exposes the recent **p50/p95/p99** — no option to enable, the same always-on instrumentation resilience4j gives its timers. Percentiles surface a slow tail an average hides:
+
+```go
+m := policy.Metrics()
+fmt.Println(m.LatencyP50, m.LatencyP95, m.LatencyP99) // recent window (~10s)
+fmt.Println(m.LatencySamples)                          // 0 ⇒ percentiles not yet meaningful
+```
+
+The window is a [DDSketch](https://arxiv.org/abs/1908.10693): percentiles stay within ~2% relative error, old latency ages out, and it is measured on the policy's `Clock` so it is deterministic in tests. Every call counts — successes, failures, and fast-fail rejections — so during overload the lower percentiles drop as instant rejections enter the window. See [`examples/34-latency-percentiles`](examples/34-latency-percentiles). The OpenTelemetry bridge below publishes them as `r8e.policy.latency_p50/p95/p99` gauges (seconds).
+
 Two zero-config bridges expose them:
 
 ```go

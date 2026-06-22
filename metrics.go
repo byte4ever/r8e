@@ -1,6 +1,9 @@
 package r8e
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 type (
 	// PolicyMetrics is a point-in-time snapshot of a policy's runtime state and
@@ -116,6 +119,21 @@ type (
 		// every sharing policy reports the same value — aggregate with max/avg,
 		// not sum.
 		ConcurrencyBudgetInUse int64 `json:"concurrency_budget_in_use"`
+
+		// LatencyP50, LatencyP95 and LatencyP99 are the median, 95th and 99th
+		// percentile end-to-end Do() latencies over the recent sliding window
+		// (the last ~10s), estimated from a DDSketch within ~2% relative error.
+		// They cover every call — successes, failures, and fast-fail rejections —
+		// so during overload (many instant rejections) the lower percentiles drop.
+		// All three are 0 when no call has completed in the window (read
+		// LatencySamples to tell "no recent calls" from a genuinely fast policy).
+		LatencyP50 time.Duration `json:"latency_p50"`
+		LatencyP95 time.Duration `json:"latency_p95"`
+		LatencyP99 time.Duration `json:"latency_p99"`
+		// LatencySamples is the number of calls in the sliding window the latency
+		// percentiles were computed from; 0 means the percentiles are not yet
+		// meaningful.
+		LatencySamples int64 `json:"latency_samples"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -427,6 +445,12 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	if p.throttler != nil {
 		metrics.ThrottleProbability = p.throttler.RejectionProbability()
 	}
+
+	latency := p.latency.snapshot()
+	metrics.LatencyP50 = latency.p50
+	metrics.LatencyP95 = latency.p95
+	metrics.LatencyP99 = latency.p99
+	metrics.LatencySamples = latency.samples
 
 	return metrics
 }

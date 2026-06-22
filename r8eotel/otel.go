@@ -150,6 +150,12 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.RateLimit })
 	builder.gaugeFloat64("r8e.policy.slow_call_rate", "Current fraction of slow calls in the circuit-breaker window",
 		func(m *r8e.PolicyMetrics) float64 { return m.SlowCallRate })
+	builder.gaugeFloat64("r8e.policy.latency_p50", "Median Do() latency over the recent window, in seconds",
+		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP50.Seconds() })
+	builder.gaugeFloat64("r8e.policy.latency_p95", "95th-percentile Do() latency over the recent window, in seconds",
+		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP95.Seconds() })
+	builder.gaugeFloat64("r8e.policy.latency_p99", "99th-percentile Do() latency over the recent window, in seconds",
+		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP99.Seconds() })
 
 	if builder.err != nil {
 		return nil, builder.err
