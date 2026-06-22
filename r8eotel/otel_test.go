@@ -141,6 +141,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.cache_hits", "r8e.policy.cache_misses",
 		"r8e.policy.cache_stores", "r8e.policy.cache_stale_served",
 		"r8e.policy.panics_recovered",
+		"r8e.policy.concurrency_budget_exceeded",
 		// Gauges.
 		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
 		"r8e.policy.bulkhead_queued", "r8e.policy.circuit_state",
@@ -149,6 +150,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.concurrency_in_flight", "r8e.policy.retry_budget_tokens",
 		"r8e.policy.throttle_probability", "r8e.policy.rate_limit",
 		"r8e.policy.slow_call_rate",
+		"r8e.policy.concurrency_budget_in_use",
 	}
 	assert.ElementsMatch(t, want, gotNames,
 		"registered instruments drifted from the expected set")

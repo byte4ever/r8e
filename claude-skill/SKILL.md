@@ -27,7 +27,9 @@ Options are `any`-typed to support both generic (`WithFallback[T]`) and non-gene
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
 Fallback > Cache > Coalesce > Timeout > TimeBudget > AdaptiveThrottle > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge.
-The retry budget is not a stage; it gates retries from within Retry. The time
+The retry budget is not a stage; it gates retries from within Retry. The
+concurrency budget is likewise not a visible stage; a thin tracker just outside
+Retry counts in-flight executions, and Retry/Hedge gate against it. The time
 budget stamps a ctx deadline that retry/hedge read. Bulkhead and
 AdaptiveConcurrency share the concurrency slot and are mutually exclusive.
 
@@ -112,6 +114,30 @@ returns the **real downstream error** (not a sentinel); first attempts always
 proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,
 `RetryBudgetExceeded`/`RetryBudgetTokens` metrics, `retry_budget_exhausted`
 health condition (degraded).
+
+### Concurrency Budget
+
+```go
+r8e.WithConcurrencyBudget(opts ...ConcurrencyBudgetOption)   // per-policy
+r8e.WithSharedConcurrencyBudget(*ConcurrencyBudget)          // shared across policies
+r8e.NewConcurrencyBudget(opts ...ConcurrencyBudgetOption) *ConcurrencyBudget
+```
+
+Concurrency-dimension complement of the retry budget (failsafe-go execution
+budget): caps how many retries **and** hedges may be in flight at once. A
+retry/hedge is admitted only while `concurrent < max(MinConcurrency, MaxRatio ×
+in-flight executions)`. Gates from within Retry and Hedge (no separate priority);
+**requires `WithRetry` or `WithHedge`** — neither panics `NewPolicy` (or
+`BuildOptions` returns `r8e.ErrConcurrencyBudgetWithoutConsumer`). First attempts
+are never gated. When exhausted, a retry is suppressed and the call fails with
+**`r8e.ErrConcurrencyBudgetExceeded`** (wrapping the last downstream error); an
+over-budget hedge is silently not launched (primary still runs). Composes with the
+retry budget. **Options**: `r8e.MaxRatio(r)` (default 0.25, clamped to (0,1]),
+`r8e.MinConcurrency(n)` (default 5; 0 disables the floor). Observability:
+`OnConcurrencyBudgetExceeded` hook,
+`ConcurrencyBudgetExceeded`/`ConcurrencyBudgetInUse` metrics,
+`concurrency_budget_exhausted` health condition (degraded). Example:
+`examples/33-concurrency-budget`.
 
 ### Circuit Breaker
 
@@ -343,7 +369,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrPanic`.
+`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
 
 ## Hooks
 
@@ -365,7 +391,8 @@ r8e.WithHooks(&r8e.Hooks{
     OnHedgeTriggered:   func() {},
     OnHedgeWon:         func() {},
     OnFallbackUsed:     func(err error) {},
-    OnRetryBudgetExceeded: func() {},  // retry suppressed by the budget
+    OnRetryBudgetExceeded: func() {},  // retry suppressed by the retry budget
+    OnConcurrencyBudgetExceeded: func() {}, // retry/hedge shed by the concurrency budget
     OnTimeBudgetExceeded:  func() {},  // retry stopped early by the time budget
     OnCoalesceLeader:   func() {},     // call ran a shared coalesced execution
     OnCoalesceFollower: func() {},     // call deduplicated into an in-flight one

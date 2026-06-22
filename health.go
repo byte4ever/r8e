@@ -77,6 +77,9 @@ const (
 	// ConditionThrottling means the adaptive throttler is shedding load
 	// (degraded); it is rejecting a fraction of calls to protect the backend.
 	ConditionThrottling Condition = "throttling"
+	// ConditionConcurrencyBudgetExhausted means the concurrency budget is at its
+	// ceiling (degraded); retries/hedges are being shed but first attempts flow.
+	ConditionConcurrencyBudgetExhausted Condition = "concurrency_budget_exhausted"
 )
 
 // conditionSeverity is the single source of truth for the degradation model: it
@@ -97,6 +100,7 @@ var conditionSeverity = []struct {
 	{ConditionConcurrencyLimited, CriticalityDegraded},
 	{ConditionThrottling, CriticalityDegraded},
 	{ConditionRetryBudgetExhausted, CriticalityDegraded},
+	{ConditionConcurrencyBudgetExhausted, CriticalityDegraded},
 	{ConditionDependencyDegraded, CriticalityDegraded},
 	{ConditionCircuitHalfOpen, CriticalityNone},
 }
@@ -179,6 +183,12 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// Retry budget — degraded; retries are throttled but first attempts flow.
 	if p.retryBudget != nil && p.retryBudget.Exhausted() {
 		conditions = append(conditions, ConditionRetryBudgetExhausted)
+	}
+
+	// Concurrency budget — degraded; retries/hedges are shed but first attempts
+	// flow.
+	if p.concurrencyBudget != nil && p.concurrencyBudget.Exhausted() {
+		conditions = append(conditions, ConditionConcurrencyBudgetExhausted)
 	}
 
 	// Dependencies — a critically-down dependency degrades this policy.

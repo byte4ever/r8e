@@ -119,6 +119,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CacheStaleServed })
 	builder.counter("r8e.policy.panics_recovered", "Panics caught by WithRecover and returned as errors",
 		func(m *r8e.PolicyMetrics) int64 { return m.PanicsRecovered })
+	builder.counter("r8e.policy.concurrency_budget_exceeded", "Retries/hedges shed by the concurrency budget",
+		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyBudgetExceeded })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })
@@ -138,6 +140,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyLimit })
 	builder.gauge("r8e.policy.concurrency_in_flight", "Calls currently admitted by the adaptive limiter",
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyInFlight })
+	builder.gauge("r8e.policy.concurrency_budget_in_use", "Retries/hedges currently holding a concurrency-budget permit",
+		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyBudgetInUse })
 	builder.gaugeFloat64("r8e.policy.retry_budget_tokens", "Retry budget tokens currently available",
 		func(m *r8e.PolicyMetrics) float64 { return m.RetryBudgetTokens })
 	builder.gaugeFloat64("r8e.policy.throttle_probability", "Adaptive throttler's current local-rejection probability",

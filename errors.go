@@ -159,6 +159,22 @@ var (
 	// To inspect the original panic value and goroutine stack trace, use errors.As
 	// to obtain the underlying *[PanicError].
 	ErrPanic error = resilienceError("panic recovered")
+	// ErrConcurrencyBudgetExceeded is returned (wrapping the last downstream
+	// error) when a retry is suppressed because the concurrency budget is at its
+	// ceiling — too many retries/hedges are already in flight relative to live
+	// traffic (see [WithConcurrencyBudget]). An over-budget hedge is silently not
+	// launched instead of surfacing this error, since the primary still runs.
+	ErrConcurrencyBudgetExceeded error = resilienceError(
+		"concurrency budget exceeded",
+	)
+	// ErrConcurrencyBudgetWithoutConsumer indicates a concurrency budget was
+	// configured on a policy with neither [WithRetry] nor [WithHedge]. The budget
+	// only gates those two patterns, so without one it would silently do nothing.
+	// It is the value [NewPolicy] panics with, and the error [BuildOptions]
+	// returns, for that misconfiguration.
+	ErrConcurrencyBudgetWithoutConsumer error = resilienceError(
+		"concurrency budget requires a retry or hedge pattern to gate",
+	)
 )
 
 func (e *transientError) Error() string { return "transient: " + e.err.Error() }

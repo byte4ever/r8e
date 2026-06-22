@@ -85,6 +85,11 @@ type Hooks struct {
 	// with the value that was passed to panic(). Use errors.As with *[PanicError]
 	// to obtain the full context (value + stack trace) from the returned error.
 	OnPanic func(value any)
+
+	// OnConcurrencyBudgetExceeded fires when the concurrency budget is at its
+	// ceiling and a retry is suppressed ([ErrConcurrencyBudgetExceeded] is
+	// returned) or a hedge is not launched (see [WithConcurrencyBudget]).
+	OnConcurrencyBudgetExceeded func()
 }
 
 // Each emit method guards both a nil receiver and a nil field, so a nil *Hooks
@@ -255,5 +260,11 @@ func (h *Hooks) emitSlowCallRateExceeded() {
 func (h *Hooks) emitPanic(value any) {
 	if h != nil && h.OnPanic != nil {
 		h.OnPanic(value)
+	}
+}
+
+func (h *Hooks) emitConcurrencyBudgetExceeded() {
+	if h != nil && h.OnConcurrencyBudgetExceeded != nil {
+		h.OnConcurrencyBudgetExceeded()
 	}
 }

@@ -19,11 +19,13 @@ type (
 
 	// HedgeParams holds the configuration for a hedged request. A nil Clock
 	// defaults to [RealClock] and a nil Hooks is treated as a no-op, so the
-	// zero value beyond Delay is usable.
+	// zero value beyond Delay is usable. A nil Budget disables concurrency-budget
+	// gating (the hedge always fires).
 	HedgeParams struct {
-		Clock Clock
-		Hooks *Hooks
-		Delay time.Duration
+		Clock  Clock
+		Hooks  *Hooks
+		Budget *ConcurrencyBudget
+		Delay  time.Duration
 	}
 )
 
@@ -84,6 +86,18 @@ func DoHedge[T any](
 			return waitForPrimary(ctx, results)
 		}
 
+		// The hedge is a second concurrent attempt: gate it on the concurrency
+		// budget. If the budget is exhausted, skip the hedge and just wait for
+		// the primary — unlike a suppressed retry this is not an error, the
+		// primary still runs. The permit is released when the hedge goroutine's
+		// fn completes (even if it loses the race).
+		if !params.Budget.tryAcquire() {
+			params.Hooks.emitConcurrencyBudgetExceeded()
+
+			//nolint:wrapcheck // primary/context error returned as-is
+			return waitForPrimary(ctx, results)
+		}
+
 		// Fire hedge.
 		params.Hooks.emitHedgeTriggered()
 
@@ -91,6 +105,8 @@ func DoHedge[T any](
 		defer hedgeCancel()
 
 		go func() {
+			defer params.Budget.release()
+
 			v, err := fn(hedgeCtx)
 			results <- hedgeResult[T]{val: v, err: err, isPrimary: false}
 		}()
@@ -134,8 +150,9 @@ func waitForPrimary[T any](
 // after the hedge has been triggered. It returns the first successful result,
 // or an error if both fail.
 //
-//nolint:ireturn,revive // generic type parameter T; argument count justified
 // for internal use.
+//
+//nolint:ireturn,revive // generic type parameter T; argument count justified
 func waitForResults[T any](
 	ctx context.Context,
 	results chan hedgeResult[T],

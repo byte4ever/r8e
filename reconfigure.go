@@ -223,16 +223,21 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 	}
 
 	if cfg.RetryBudget != nil {
-		if p.retryBudget == nil {
-			return absentPatternError("retry_budget")
+		action, err := p.retryBudgetReconfigureAction(cfg.RetryBudget)
+		if err != nil {
+			return err
 		}
 
-		budgetOpts := retryBudgetOptionsFromConfig(cfg.RetryBudget)
+		actions = append(actions, action)
+	}
 
-		actions = append(
-			actions,
-			func() { p.retryBudget.Reconfigure(budgetOpts...) },
-		)
+	if cfg.ConcurrencyBudget != nil {
+		action, err := p.concurrencyBudgetReconfigureAction(cfg.ConcurrencyBudget)
+		if err != nil {
+			return err
+		}
+
+		actions = append(actions, action)
 	}
 
 	// Phase 2 — all validated; apply.
@@ -262,6 +267,36 @@ func (p *Policy[T]) aimdReconfigureAction(cfg *AIMDConfig) (func(), error) {
 	}
 
 	return func() { p.rateLimiter.aimd.reconfigure(aimdOpts...) }, nil
+}
+
+// retryBudgetReconfigureAction validates a retry-budget config overlay and
+// returns the action that applies it. It errors when the policy has no retry
+// budget.
+func (p *Policy[T]) retryBudgetReconfigureAction(
+	cfg *RetryBudgetConfig,
+) (func(), error) {
+	if p.retryBudget == nil {
+		return nil, absentPatternError("retry_budget")
+	}
+
+	budgetOpts := retryBudgetOptionsFromConfig(cfg)
+
+	return func() { p.retryBudget.Reconfigure(budgetOpts...) }, nil
+}
+
+// concurrencyBudgetReconfigureAction validates a concurrency-budget config
+// overlay and returns the action that applies it. It errors when the policy has
+// no concurrency budget.
+func (p *Policy[T]) concurrencyBudgetReconfigureAction(
+	cfg *ConcurrencyBudgetConfig,
+) (func(), error) {
+	if p.concurrencyBudget == nil {
+		return nil, absentPatternError("concurrency_budget")
+	}
+
+	budgetOpts := concurrencyBudgetOptionsFromConfig(cfg)
+
+	return func() { p.concurrencyBudget.Reconfigure(budgetOpts...) }, nil
 }
 
 func absentPatternError(pattern string) error {

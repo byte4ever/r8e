@@ -21,18 +21,19 @@ type PatternEntry[T any] struct {
 // internal convention (see [PatternEntry]): only their relative order is
 // meaningful, and they are renumbered when a pattern is inserted.
 const (
-	priorityFallback       = 0 // outermost — last resort
-	priorityCache          = 1 // read-through hit short-circuits the whole chain
-	priorityCoalesce       = 2 // collapse duplicate concurrent calls before any work
-	priorityTimeout        = 3 // global timeout (hard cancel)
-	priorityTimeBudget     = 4 // total time budget shared across retry + hedge
-	priorityThrottle       = 5 // proportional load shed before the breaker trips
-	priorityCircuitBreaker = 6
-	priorityRateLimiter    = 7
-	priorityBulkhead       = 8
-	priorityRetry          = 9
-	priorityHedge          = 10 // innermost — closest to user function
-	priorityRecover        = 11 // inside hedge so each hedge goroutine also recovers panics
+	priorityFallback          = 0 // outermost — last resort
+	priorityCache             = 1 // read-through hit short-circuits the whole chain
+	priorityCoalesce          = 2 // collapse duplicate concurrent calls before any work
+	priorityTimeout           = 3 // global timeout (hard cancel)
+	priorityTimeBudget        = 4 // total time budget shared across retry + hedge
+	priorityThrottle          = 5 // proportional load shed before the breaker trips
+	priorityCircuitBreaker    = 6
+	priorityRateLimiter       = 7
+	priorityBulkhead          = 8
+	priorityConcurrencyBudget = 9 // tracks in-flight executions for the retry/hedge concurrency budget
+	priorityRetry             = 10
+	priorityHedge             = 11 // innermost — closest to user function
+	priorityRecover           = 12 // inside hedge so each hedge goroutine also recovers panics
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

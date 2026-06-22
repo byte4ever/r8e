@@ -106,6 +106,16 @@ type (
 		// PanicsRecovered counts calls where the user function panicked and the
 		// panic was caught by [WithRecover] and returned as a *[PanicError].
 		PanicsRecovered int64 `json:"panics_recovered"`
+		// ConcurrencyBudgetExceeded counts retries suppressed and hedges skipped
+		// because the concurrency budget was at its ceiling (see
+		// [WithConcurrencyBudget]).
+		ConcurrencyBudgetExceeded int64 `json:"concurrency_budget_exceeded"`
+		// ConcurrencyBudgetInUse is the number of retries and hedges currently
+		// holding a concurrency-budget permit; 0 when the policy has no budget.
+		// When one budget is shared across policies (WithSharedConcurrencyBudget),
+		// every sharing policy reports the same value — aggregate with max/avg,
+		// not sum.
+		ConcurrencyBudgetInUse int64 `json:"concurrency_budget_in_use"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -140,6 +150,7 @@ type (
 		cacheStores          atomic.Int64
 		cacheStaleServed     atomic.Int64
 		panicsRecovered      atomic.Int64
+		concBudgetExceeded   atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -334,6 +345,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnPanic(value)
 			}
 		},
+		OnConcurrencyBudgetExceeded: func() {
+			m.concBudgetExceeded.Add(1)
+
+			if user.OnConcurrencyBudgetExceeded != nil {
+				user.OnConcurrencyBudgetExceeded()
+			}
+		},
 	}
 }
 
@@ -343,33 +361,34 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	health := p.HealthStatus()
 
 	metrics := PolicyMetrics{
-		Name:                 p.name,
-		Retries:              p.metrics.retries.Load(),
-		Timeouts:             p.metrics.timeouts.Load(),
-		CircuitOpens:         p.metrics.circuitOpens.Load(),
-		CircuitCloses:        p.metrics.circuitCloses.Load(),
-		CircuitHalfOpens:     p.metrics.circuitHalfOpens.Load(),
-		RateLimited:          p.metrics.rateLimited.Load(),
-		BulkheadRejected:     p.metrics.bulkheadRejected.Load(),
-		BulkheadTimeouts:     p.metrics.bulkheadTimeouts.Load(),
-		HedgesTriggered:      p.metrics.hedgesTriggered.Load(),
-		HedgesWon:            p.metrics.hedgesWon.Load(),
-		FallbacksUsed:        p.metrics.fallbacksUsed.Load(),
-		RetryBudgetExceeded:  p.metrics.retryBudgetExceeded.Load(),
-		CoalesceLeaders:      p.metrics.coalesceLeaders.Load(),
-		CoalesceFollowers:    p.metrics.coalesceFollowers.Load(),
-		ConcurrencyRejected:  p.metrics.concurrencyRejected.Load(),
-		Throttled:            p.metrics.throttled.Load(),
-		RateAdaptations:      p.metrics.rateAdaptations.Load(),
-		SlowCallRateExceeded: p.metrics.slowCallRateExceeded.Load(),
-		TimeBudgetExceeded:   p.metrics.timeBudgetExceeded.Load(),
-		CacheHits:            p.metrics.cacheHits.Load(),
-		CacheMisses:          p.metrics.cacheMisses.Load(),
-		CacheStores:          p.metrics.cacheStores.Load(),
-		CacheStaleServed:     p.metrics.cacheStaleServed.Load(),
-		PanicsRecovered:      p.metrics.panicsRecovered.Load(),
-		Criticality:          health.Criticality,
-		Healthy:              health.Healthy,
+		Name:                      p.name,
+		Retries:                   p.metrics.retries.Load(),
+		Timeouts:                  p.metrics.timeouts.Load(),
+		CircuitOpens:              p.metrics.circuitOpens.Load(),
+		CircuitCloses:             p.metrics.circuitCloses.Load(),
+		CircuitHalfOpens:          p.metrics.circuitHalfOpens.Load(),
+		RateLimited:               p.metrics.rateLimited.Load(),
+		BulkheadRejected:          p.metrics.bulkheadRejected.Load(),
+		BulkheadTimeouts:          p.metrics.bulkheadTimeouts.Load(),
+		HedgesTriggered:           p.metrics.hedgesTriggered.Load(),
+		HedgesWon:                 p.metrics.hedgesWon.Load(),
+		FallbacksUsed:             p.metrics.fallbacksUsed.Load(),
+		RetryBudgetExceeded:       p.metrics.retryBudgetExceeded.Load(),
+		CoalesceLeaders:           p.metrics.coalesceLeaders.Load(),
+		CoalesceFollowers:         p.metrics.coalesceFollowers.Load(),
+		ConcurrencyRejected:       p.metrics.concurrencyRejected.Load(),
+		Throttled:                 p.metrics.throttled.Load(),
+		RateAdaptations:           p.metrics.rateAdaptations.Load(),
+		SlowCallRateExceeded:      p.metrics.slowCallRateExceeded.Load(),
+		TimeBudgetExceeded:        p.metrics.timeBudgetExceeded.Load(),
+		CacheHits:                 p.metrics.cacheHits.Load(),
+		CacheMisses:               p.metrics.cacheMisses.Load(),
+		CacheStores:               p.metrics.cacheStores.Load(),
+		CacheStaleServed:          p.metrics.cacheStaleServed.Load(),
+		PanicsRecovered:           p.metrics.panicsRecovered.Load(),
+		ConcurrencyBudgetExceeded: p.metrics.concBudgetExceeded.Load(),
+		Criticality:               health.Criticality,
+		Healthy:                   health.Healthy,
 	}
 
 	if p.circuitBreaker != nil {
@@ -390,6 +409,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 
 	if p.retryBudget != nil {
 		metrics.RetryBudgetTokens = p.retryBudget.Tokens()
+	}
+
+	if p.concurrencyBudget != nil {
+		metrics.ConcurrencyBudgetInUse = int64(p.concurrencyBudget.InUse())
 	}
 
 	if p.coalescer != nil {

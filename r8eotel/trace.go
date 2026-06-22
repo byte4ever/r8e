@@ -142,6 +142,8 @@ func rejectionReason(err error) string {
 		return "timeout"
 	case errors.Is(err, r8e.ErrTimeBudgetExceeded):
 		return "time_budget_exceeded"
+	case errors.Is(err, r8e.ErrConcurrencyBudgetExceeded):
+		return "concurrency_budget_exceeded"
 	case errors.Is(err, r8e.ErrRetriesExhausted):
 		return "retries_exhausted"
 	case errors.Is(err, r8e.ErrPanic):

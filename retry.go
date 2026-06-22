@@ -27,6 +27,7 @@ type (
 		Hooks       *Hooks
 		Clock       Clock
 		Budget      *RetryBudget
+		Concurrency *ConcurrencyBudget
 		Opts        []RetryOption
 		MaxAttempts int
 	}
@@ -82,23 +83,28 @@ func DoRetry[T any](
 	)
 
 	for attempt := range maxAttempts {
-		// Execute fn, optionally with per-attempt timeout.
-		var (
-			result T
-			err    error
-		)
+		// A retry attempt (attempt > 0) must claim a concurrency-budget permit
+		// before it runs, so a burst of simultaneous retries cannot pile load
+		// onto a struggling downstream. The first attempt is the baseline and is
+		// never gated. The permit is checked at execution time — after any
+		// backoff — so it reflects the live concurrency, and is held only for the
+		// duration of the call so the budget measures concurrent in-flight
+		// retries, not backoff waits.
+		if attempt > 0 && !params.Concurrency.tryAcquire() {
+			params.Hooks.emitConcurrencyBudgetExceeded()
 
-		if cfg.perAttemptTimeout > 0 {
-			attemptCtx, attemptCancel := context.WithTimeout(
-				ctx,
-				cfg.perAttemptTimeout,
-			)
-			result, err = fn(attemptCtx)
-
-			attemptCancel()
-		} else {
-			result, err = fn(ctx)
+			return zero, fmt.Errorf("%w: %w", ErrConcurrencyBudgetExceeded, lastErr)
 		}
+
+		// A non-nil permit is released when the attempt returns — including on a
+		// panic unwind — so a panicking fn (with no WithRecover) cannot leak it.
+		// Only retries (attempt > 0) hold one; the first attempt acquired none.
+		var permit *ConcurrencyBudget
+		if attempt > 0 {
+			permit = params.Concurrency
+		}
+
+		result, err := runRetryAttempt(ctx, fn, cfg, permit)
 
 		// On success: credit the retry budget and return immediately.
 		if err == nil {
@@ -174,6 +180,35 @@ func DoRetry[T any](
 
 	// All attempts exhausted: wrap last error with ErrRetriesExhausted.
 	return zero, fmt.Errorf("%w: %w", ErrRetriesExhausted, lastErr)
+}
+
+// runRetryAttempt executes one attempt of fn, optionally under a per-attempt
+// timeout, and releases the concurrency-budget permit (when permit is non-nil)
+// as the attempt returns. The release is deferred so it runs even if fn panics,
+// keeping the permit accounting balanced without a WithRecover boundary.
+//
+//nolint:ireturn // generic type parameter T, not an interface
+func runRetryAttempt[T any](
+	ctx context.Context,
+	fn func(context.Context) (T, error),
+	cfg retryConfig,
+	permit *ConcurrencyBudget,
+) (T, error) {
+	if permit != nil {
+		defer permit.release()
+	}
+
+	if cfg.perAttemptTimeout > 0 {
+		attemptCtx, attemptCancel := context.WithTimeout(
+			ctx,
+			cfg.perAttemptTimeout,
+		)
+		defer attemptCancel()
+
+		return fn(attemptCtx)
+	}
+
+	return fn(ctx)
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the

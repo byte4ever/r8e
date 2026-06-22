@@ -22,16 +22,17 @@ type (
 	// non-option to [NewPolicy] is a compile error and a misconfigured policy
 	// cannot be built silently.
 	Policy[T any] struct {
-		chain          Middleware[T]
-		circuitBreaker *CircuitBreaker
-		rateLimiter    *RateLimiter
-		bulkhead       *Bulkhead
-		adaptive       *AdaptiveLimiter
-		throttler      *Throttler
-		retryBudget    *RetryBudget
-		coalescer      *Coalescer[T]
-		registry       *Registry
-		metrics        *policyMetrics
+		chain             Middleware[T]
+		circuitBreaker    *CircuitBreaker
+		rateLimiter       *RateLimiter
+		bulkhead          *Bulkhead
+		adaptive          *AdaptiveLimiter
+		throttler         *Throttler
+		retryBudget       *RetryBudget
+		concurrencyBudget *ConcurrencyBudget
+		coalescer         *Coalescer[T]
+		registry          *Registry
+		metrics           *policyMetrics
 		// Reloadable cells for the stateless patterns; nil when the pattern is
 		// absent. The middleware reads them per call so Reconfigure takes
 		// effect without rebuilding the chain.
@@ -59,6 +60,14 @@ type (
 		maxAttempts int
 	}
 
+	// retryBudgets bundles the optional storm-control budgets a retry consults —
+	// the rate-limiting [RetryBudget] and the concurrency-limiting
+	// [ConcurrencyBudget] — so newRetryEntry stays within the argument limit.
+	retryBudgets struct {
+		retry       *RetryBudget
+		concurrency *ConcurrencyBudget
+	}
+
 	// Option configures a [Policy] during [NewPolicy]. Construct options with
 	// the With* functions and [DependsOn]; the interface is closed to the
 	// package so the set of valid options is fixed and type-checked.
@@ -76,21 +85,22 @@ type (
 		hooks    Hooks
 		registry *Registry
 
-		timeout        *time.Duration
-		timeBudget     *time.Duration
-		retry          *retryDesc
-		circuitBreaker *circuitBreakerDesc
-		rateLimit      *rateLimitDesc
-		bulkhead       *bulkheadDesc
-		adaptive       *adaptiveDesc
-		throttle       *throttleDesc
-		hedge          *time.Duration
-		fallbackValue  *staticFallback
-		fallbackFunc   *funcFallback
-		retryBudget    *RetryBudget
-		coalesce       *coalesceDesc
-		cache          *cacheDesc
-		deps           []HealthReporter
+		timeout           *time.Duration
+		timeBudget        *time.Duration
+		retry             *retryDesc
+		circuitBreaker    *circuitBreakerDesc
+		rateLimit         *rateLimitDesc
+		bulkhead          *bulkheadDesc
+		adaptive          *adaptiveDesc
+		throttle          *throttleDesc
+		hedge             *time.Duration
+		fallbackValue     *staticFallback
+		fallbackFunc      *funcFallback
+		retryBudget       *RetryBudget
+		concurrencyBudget *ConcurrencyBudget
+		coalesce          *coalesceDesc
+		cache             *cacheDesc
+		deps              []HealthReporter
 
 		affectsReadiness bool
 		// propagateDeadline requests a hard clock-driven deadline derived from
@@ -287,6 +297,30 @@ func WithRetryBudget(opts ...RetryBudgetOption) Option {
 func WithSharedRetryBudget(budget *RetryBudget) Option {
 	return optionFunc(func(s *policySetup) {
 		s.retryBudget = budget
+	})
+}
+
+// WithConcurrencyBudget adds a concurrency budget that caps how many retries and
+// hedges may be in flight at once, as a fraction of live traffic with a floor
+// (see [ConcurrencyBudget] and the [MaxRate] and [MinConcurrency] options). It is
+// the concurrency-dimension complement of [WithRetryBudget] (which throttles the
+// retry RATE over time): the two compose. It requires [WithRetry] or [WithHedge];
+// a policy configured with a budget but neither panics in NewPolicy. To bound
+// retries across several policies, share one budget via [NewConcurrencyBudget]
+// and [WithSharedConcurrencyBudget] instead.
+func WithConcurrencyBudget(opts ...ConcurrencyBudgetOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.concurrencyBudget = NewConcurrencyBudget(opts...)
+	})
+}
+
+// WithSharedConcurrencyBudget attaches an existing ConcurrencyBudget, letting
+// several policies share one ceiling so their retries and hedges are bounded
+// process-wide. Like WithConcurrencyBudget it requires WithRetry or WithHedge. A
+// nil budget is ignored.
+func WithSharedConcurrencyBudget(budget *ConcurrencyBudget) Option {
+	return optionFunc(func(s *policySetup) {
+		s.concurrencyBudget = budget
 	})
 }
 
@@ -569,7 +603,17 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		})
 		entries = append(
 			entries,
-			newRetryEntry[T](retryCell, &hooks, clock, setup.retryBudget),
+			newRetryEntry[T](retryCell, &hooks, clock, retryBudgets{
+				retry:       setup.retryBudget,
+				concurrency: setup.concurrencyBudget,
+			}),
+		)
+	}
+
+	if setup.concurrencyBudget != nil {
+		entries = append(
+			entries,
+			newConcurrencyBudgetEntry[T](setup.concurrencyBudget),
 		)
 	}
 
@@ -601,7 +645,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	if setup.hedge != nil {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
-		entries = append(entries, newHedgeEntry[T](hedgeCell, &hooks, clock))
+		entries = append(
+			entries,
+			newHedgeEntry[T](hedgeCell, &hooks, clock, setup.concurrencyBudget),
+		)
 	}
 
 	if setup.panicRecover {
@@ -639,23 +686,24 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	}
 
 	policy := &Policy[T]{
-		name:             name,
-		chain:            chain,
-		circuitBreaker:   circuitBreaker,
-		rateLimiter:      rateLimiter,
-		bulkhead:         bulkhead,
-		adaptive:         adaptive,
-		throttler:        throttler,
-		retryBudget:      setup.retryBudget,
-		coalescer:        coalescer,
-		metrics:          metrics,
-		timeout:          timeoutCell,
-		timeBudget:       timeBudgetCell,
-		hedge:            hedgeCell,
-		retry:            retryCell,
-		deps:             setup.deps,
-		affectsReadiness: setup.affectsReadiness,
-		registry:         reg,
+		name:              name,
+		chain:             chain,
+		circuitBreaker:    circuitBreaker,
+		rateLimiter:       rateLimiter,
+		bulkhead:          bulkhead,
+		adaptive:          adaptive,
+		throttler:         throttler,
+		retryBudget:       setup.retryBudget,
+		concurrencyBudget: setup.concurrencyBudget,
+		coalescer:         coalescer,
+		metrics:           metrics,
+		timeout:           timeoutCell,
+		timeBudget:        timeBudgetCell,
+		hedge:             hedgeCell,
+		retry:             retryCell,
+		deps:              setup.deps,
+		affectsReadiness:  setup.affectsReadiness,
+		registry:          reg,
 	}
 
 	if reg != nil {
@@ -684,6 +732,13 @@ func checkSetupInvariants(setup *policySetup) error {
 	// A retry budget gates retries; without a retry pattern it has nothing to do.
 	if setup.retryBudget != nil && setup.retry == nil {
 		return ErrRetryBudgetWithoutRetry
+	}
+
+	// A concurrency budget gates retries and hedges; with neither it would do
+	// nothing.
+	if setup.concurrencyBudget != nil &&
+		setup.retry == nil && setup.hedge == nil {
+		return ErrConcurrencyBudgetWithoutConsumer
 	}
 
 	if setup.coalesce != nil {
@@ -777,7 +832,7 @@ func newRetryEntry[T any](
 	cell *atomic.Pointer[retryRuntime],
 	hooks *Hooks,
 	clock Clock,
-	budget *RetryBudget,
+	budgets retryBudgets,
 ) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityRetry,
@@ -791,9 +846,31 @@ func newRetryEntry[T any](
 					Strategy:    rt.strategy,
 					Hooks:       hooks,
 					Clock:       clock,
-					Budget:      budget,
+					Budget:      budgets.retry,
+					Concurrency: budgets.concurrency,
 					Opts:        rt.opts,
 				})
+			}
+		},
+	}
+}
+
+// newConcurrencyBudgetEntry builds the middleware that scopes the in-flight
+// execution count the concurrency budget uses as its denominator. It performs no
+// admission of its own — every call that reaches it is counted in, and out on
+// return — while the actual gating happens inside retry and hedge (see
+// [ConcurrencyBudget]). It sits just outside retry so its scope spans both retry
+// and hedge.
+func newConcurrencyBudgetEntry[T any](budget *ConcurrencyBudget) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityConcurrencyBudget,
+		Name:     "concurrency_budget",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				budget.enter()
+				defer budget.exit()
+
+				return next(ctx)
 			}
 		},
 	}
@@ -908,16 +985,22 @@ func newThrottleEntry[T any](throttler *Throttler) PatternEntry[T] {
 	)
 }
 
-func newHedgeEntry[T any](cell *atomic.Int64, hooks *Hooks, clock Clock) PatternEntry[T] {
+func newHedgeEntry[T any](
+	cell *atomic.Int64,
+	hooks *Hooks,
+	clock Clock,
+	budget *ConcurrencyBudget,
+) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityHedge,
 		Name:     "hedge",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
 				return DoHedge[T](ctx, next, HedgeParams{
-					Delay: time.Duration(cell.Load()),
-					Hooks: hooks,
-					Clock: clock,
+					Delay:  time.Duration(cell.Load()),
+					Hooks:  hooks,
+					Clock:  clock,
+					Budget: budget,
 				})
 			}
 		},

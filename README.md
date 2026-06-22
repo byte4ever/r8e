@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 28 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 29 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -57,6 +57,7 @@ health reporting, and configuration hot-reload.
 | **Time Budget** | One total time budget across the chain; retry/hedge stop early before overrunning it |
 | **Retry** | Retry transient failures with pluggable backoff (constant, exponential, linear, jitter) |
 | **Retry Budget** | Adaptive token bucket that throttles retries when failures dominate, preventing retry storms |
+| **Concurrency Budget** | Caps concurrent retries/hedges as a fraction of live traffic (with a floor), bounding storm parallelism |
 | **Circuit Breaker** | Fast-fail when a dependency is down, auto-recover via half-open probe |
 | **Rate Limiter** | Token-bucket throughput control (reject or blocking mode) |
 | **Bulkhead** | Semaphore-based concurrency limiting (fixed limit) |
@@ -494,6 +495,55 @@ gates readiness — first attempts still flow). A *shared* budget reports the sa
 token level and exhausted condition under every sharing policy's name, so
 aggregate its gauge with `max`/`avg`, not `sum`. See
 [`examples/19-retry-budget`](examples/19-retry-budget).
+
+## Concurrency Budget
+
+A concurrency budget is the *concurrency-dimension* complement of the retry
+budget: where that throttles the retry **rate** over time, this caps how many
+retries and hedges may be **in flight at once**. Under a burst of simultaneous
+failures many callers retry together, multiplying the load on a struggling
+dependency — the budget admits only a bounded share of them and sheds the rest.
+
+A retry or hedge is permitted only while
+
+```
+concurrent < max(MinConcurrency, MaxRatio × in-flight executions)
+```
+
+The `MaxRatio` term scales the ceiling with live traffic (a busy service tolerates
+more concurrent retries than an idle one) and the `MinConcurrency` floor keeps a
+low-traffic service from being unable to retry at all. This mirrors failsafe-go's
+execution budget; the defaults (`MaxRatio` 0.25, `MinConcurrency` 5) match it.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(50*time.Millisecond)),
+    r8e.WithConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5)),
+)
+```
+
+The first attempt of every call is the baseline and is never gated; only retries
+(second and later attempts) and the second concurrent hedge attempt claim a
+permit. When the budget is exhausted a retry is suppressed and the call fails
+with `ErrConcurrencyBudgetExceeded` (wrapping the last downstream error); an
+over-budget hedge is simply not launched (the primary still runs). It composes
+with the retry budget — use both to bound retries on *both* axes — and a single
+budget can be shared across policies for a process-wide ceiling:
+
+```go
+budget := r8e.NewConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5))
+
+a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedConcurrencyBudget(budget))
+b := r8e.NewPolicy[string]("b", r8e.WithHedge(20*time.Millisecond), r8e.WithSharedConcurrencyBudget(budget))
+```
+
+A budget requires `WithRetry` or `WithHedge` — configuring one with neither
+panics in `NewPolicy` (or `BuildOptions` returns
+`ErrConcurrencyBudgetWithoutConsumer`). Shedding is observable via the
+`OnConcurrencyBudgetExceeded` hook, the `ConcurrencyBudgetExceeded` /
+`ConcurrencyBudgetInUse` metrics, and a degraded `concurrency_budget_exhausted`
+health condition (it never gates readiness — first attempts still flow). See
+[`examples/33-concurrency-budget`](examples/33-concurrency-budget).
 
 ## Read-Through Cache
 
@@ -1051,6 +1101,7 @@ go run ./examples/29-sheddability/
 go run ./examples/30-recovery-backoff/
 go run ./examples/31-recover/
 go run ./examples/32-aimd-rate-limit/
+go run ./examples/33-concurrency-budget/
 ```
 
 ## License

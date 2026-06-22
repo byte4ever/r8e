@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 28 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 29 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -56,6 +56,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Budget de temps** | Un budget temps total sur toute la chaîne ; retry/hedge s'arrêtent avant de le dépasser |
 | **Retry** | Réessaie les erreurs transitoires avec backoff configurable (constant, exponentiel, linéaire, jitter) |
 | **Retry Budget** | Token bucket adaptatif qui throttle les retries quand les échecs dominent, évitant les retry storms |
+| **Budget de concurrence** | Plafonne les retries/hedges concurrents comme fraction du trafic courant (avec un plancher), bornant le parallélisme des storms |
 | **Circuit Breaker** | Échoue rapidement quand une dépendance est en panne, récupération automatique via sonde half-open |
 | **Rate Limiter** | Contrôle de débit par token bucket (mode rejet ou blocage) |
 | **Bulkhead** | Limitation de concurrence par sémaphore (limite fixe) |
@@ -494,6 +495,59 @@ Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
 Un budget *partagé* reporte le même niveau de tokens et la même condition sous le
 nom de chaque policy qui le partage : agrégez sa jauge avec `max`/`avg`, pas
 `sum`. Voir [`examples/19-retry-budget`](examples/19-retry-budget).
+
+## Budget de concurrence
+
+Un budget de concurrence est le complément *en dimension concurrence* du retry
+budget : là où celui-ci throttle le **débit** des retries dans le temps, celui-ci
+plafonne combien de retries et de hedges peuvent être **en vol simultanément**.
+Sous une rafale d'échecs, de nombreux appelants réessaient ensemble et multiplient
+la charge sur une dépendance en difficulté — le budget n'en admet qu'une part
+bornée et déleste le reste.
+
+Un retry ou un hedge n'est autorisé que tant que
+
+```
+concurrent < max(MinConcurrency, MaxRatio × exécutions en vol)
+```
+
+Le terme `MaxRatio` met le plafond à l'échelle du trafic courant (un service chargé
+tolère plus de retries concurrents qu'un service au repos) et le plancher
+`MinConcurrency` empêche un service à faible trafic de ne plus pouvoir réessayer du
+tout. Cela reproduit l'execution budget de failsafe-go ; les défauts (`MaxRatio`
+0.25, `MinConcurrency` 5) lui correspondent.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithRetry(5, r8e.ExponentialBackoff(50*time.Millisecond)),
+    r8e.WithConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5)),
+)
+```
+
+La première tentative de chaque appel est la baseline et n'est jamais filtrée ;
+seuls les retries (tentatives 2 et suivantes) et la seconde tentative concurrente
+du hedge prennent un permis. Quand le budget est épuisé, un retry est supprimé et
+l'appel échoue avec `ErrConcurrencyBudgetExceeded` (encapsulant la dernière erreur
+downstream) ; un hedge hors budget n'est simplement pas lancé (le primaire tourne
+toujours). Il se compose avec le retry budget — utilisez les deux pour borner les
+retries sur les *deux* axes — et un même budget peut être partagé entre policies
+pour un plafond à l'échelle du process :
+
+```go
+budget := r8e.NewConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5))
+
+a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedConcurrencyBudget(budget))
+b := r8e.NewPolicy[string]("b", r8e.WithHedge(20*time.Millisecond), r8e.WithSharedConcurrencyBudget(budget))
+```
+
+Un budget exige `WithRetry` ou `WithHedge` — en configurer un sans aucun des deux
+panique dans `NewPolicy` (ou `BuildOptions` renvoie
+`ErrConcurrencyBudgetWithoutConsumer`). Le délestage est observable via le hook
+`OnConcurrencyBudgetExceeded`, les métriques `ConcurrencyBudgetExceeded` /
+`ConcurrencyBudgetInUse`, et une condition de santé dégradée
+`concurrency_budget_exhausted` (elle ne bloque jamais la readiness — les tentatives
+initiales passent toujours). Voir
+[`examples/33-concurrency-budget`](examples/33-concurrency-budget).
 
 ## Cache read-through
 
@@ -1063,6 +1117,7 @@ go run ./examples/29-sheddability/
 go run ./examples/30-recovery-backoff/
 go run ./examples/31-recover/
 go run ./examples/32-aimd-rate-limit/
+go run ./examples/33-concurrency-budget/
 ```
 
 ## Licence

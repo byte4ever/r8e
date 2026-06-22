@@ -60,6 +60,10 @@ type (
 		// RetryBudget configures the adaptive retry budget. Requires Retry.
 		// Optional. Example: {"max_tokens": 10, "token_ratio": 0.1}.
 		RetryBudget *RetryBudgetConfig `json:"retry_budget,omitempty" yaml:"retry_budget,omitempty"`
+		// ConcurrencyBudget configures the retry/hedge concurrency budget.
+		// Requires Retry or Hedge. Optional. Example:
+		// {"max_rate": 0.25, "min_concurrency": 5}.
+		ConcurrencyBudget *ConcurrencyBudgetConfig `json:"concurrency_budget,omitempty" yaml:"concurrency_budget,omitempty"`
 	}
 
 	// CircuitBreakerConfig holds circuit breaker configuration
@@ -188,6 +192,18 @@ type (
 		// TokenRatio is the tokens returned per success.
 		// Optional. Example: 0.1.
 		TokenRatio *float64 `json:"token_ratio,omitempty" yaml:"token_ratio,omitempty"`
+	}
+
+	// ConcurrencyBudgetConfig holds retry/hedge concurrency-budget configuration
+	// values. Embed it (via [PolicyConfig]) in your own config struct for JSON or
+	// YAML unmarshaling.
+	ConcurrencyBudgetConfig struct {
+		// MaxRatio is the maximum fraction of in-flight executions that may be
+		// retries/hedges. Optional. Example: 0.25.
+		MaxRatio *float64 `json:"max_ratio,omitempty" yaml:"max_ratio,omitempty"`
+		// MinConcurrency is the floor on concurrent retries/hedges always
+		// permitted. Optional. Example: 5.
+		MinConcurrency *int `json:"min_concurrency,omitempty" yaml:"min_concurrency,omitempty"`
 	}
 )
 
@@ -329,6 +345,24 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		)
 	}
 
+	if pc.ConcurrencyBudget != nil {
+		// The budget gates only retry and hedge; without one it would panic in
+		// NewPolicy. Surface the misconfiguration as an error here instead.
+		if pc.Retry == nil && pc.Hedge == nil {
+			return nil, fmt.Errorf(
+				"concurrency_budget: %w",
+				ErrConcurrencyBudgetWithoutConsumer,
+			)
+		}
+
+		opts = append(
+			opts,
+			WithConcurrencyBudget(
+				concurrencyBudgetOptionsFromConfig(pc.ConcurrencyBudget)...,
+			),
+		)
+	}
+
 	// Safety net: apply the assembled options to a probe setup and run the same
 	// cross-pattern checks NewPolicy enforces, so the config path returns an
 	// error where the options path would panic — including any future invariant
@@ -464,6 +498,24 @@ func retryBudgetOptionsFromConfig(cfg *RetryBudgetConfig) []RetryBudgetOption {
 
 	if cfg.TokenRatio != nil {
 		opts = append(opts, TokenRatio(*cfg.TokenRatio))
+	}
+
+	return opts
+}
+
+// concurrencyBudgetOptionsFromConfig converts a [ConcurrencyBudgetConfig] into
+// concurrency-budget options. Shared by [BuildOptions] and [Policy.Reconfigure].
+func concurrencyBudgetOptionsFromConfig(
+	cfg *ConcurrencyBudgetConfig,
+) []ConcurrencyBudgetOption {
+	var opts []ConcurrencyBudgetOption
+
+	if cfg.MaxRatio != nil {
+		opts = append(opts, MaxRatio(*cfg.MaxRatio))
+	}
+
+	if cfg.MinConcurrency != nil {
+		opts = append(opts, MinConcurrency(*cfg.MinConcurrency))
 	}
 
 	return opts
