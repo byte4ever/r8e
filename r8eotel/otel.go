@@ -60,6 +60,7 @@ const (
 	circuitClosedGauge   int64 = 0
 	circuitHalfOpenGauge int64 = 1
 	circuitOpenGauge     int64 = 2
+	circuitRampingGauge  int64 = 3
 )
 
 // Register creates OpenTelemetry observable instruments on meter and a callback
@@ -81,6 +82,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CircuitCloses })
 	builder.counter("r8e.policy.circuit_half_opens", "Circuit-breaker half-open transitions",
 		func(m *r8e.PolicyMetrics) int64 { return m.CircuitHalfOpens })
+	builder.counter("r8e.policy.circuit_ramps", "Circuit-breaker slow-start ramp transitions",
+		func(m *r8e.PolicyMetrics) int64 { return m.CircuitRamps })
 	builder.counter("r8e.policy.rate_limited", "Calls rejected by the rate limiter",
 		func(m *r8e.PolicyMetrics) int64 { return m.RateLimited })
 	builder.counter("r8e.policy.bulkhead_rejected", "Calls rejected by the bulkhead",
@@ -132,7 +135,7 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadCap })
 	builder.gauge("r8e.policy.bulkhead_queued", "Callers currently waiting for a bulkhead slot",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadQueued })
-	builder.gauge("r8e.policy.circuit_state", "Circuit state (-1=unknown, 0=closed, 1=half-open, 2=open)",
+	builder.gauge("r8e.policy.circuit_state", "Circuit state (-1=unknown, 0=closed, 1=half-open, 2=open, 3=ramping)",
 		circuitStateGauge)
 	builder.gauge("r8e.policy.healthy", "1 if the policy is healthy, else 0",
 		boolGauge(func(m *r8e.PolicyMetrics) bool { return m.Healthy }))
@@ -154,6 +157,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.RateLimit })
 	builder.gaugeFloat64("r8e.policy.slow_call_rate", "Current fraction of slow calls in the circuit-breaker window",
 		func(m *r8e.PolicyMetrics) float64 { return m.SlowCallRate })
+	builder.gaugeFloat64("r8e.policy.ramp_recovery_fraction", "Traffic fraction admitted during slow-start ramp",
+		func(m *r8e.PolicyMetrics) float64 { return m.RampRecoveryFraction })
 	builder.gaugeFloat64("r8e.policy.latency_p50", "Median Do() latency over the recent window, in seconds",
 		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP50.Seconds() })
 	builder.gaugeFloat64("r8e.policy.latency_p95", "95th-percentile Do() latency over the recent window, in seconds",
@@ -274,6 +279,8 @@ func circuitStateGauge(m *r8e.PolicyMetrics) int64 {
 		return circuitHalfOpenGauge
 	case string(r8e.CircuitOpen):
 		return circuitOpenGauge
+	case string(r8e.CircuitRamping):
+		return circuitRampingGauge
 	default:
 		// An unrecognized state (e.g. a renamed constant) surfaces as -1 rather
 		// than masquerading as the healthy "closed" value.

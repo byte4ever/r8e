@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"math"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
@@ -33,6 +34,15 @@ type (
 		// recoveryMaxBackoff caps the computed duration; 0 means no cap.
 		recoveryBackoffMultiplier float64
 		recoveryMaxBackoff        time.Duration
+
+		// Slow-start ramp recovery (opt-in via RampRecovery). After the breaker
+		// recovers through half-open, admission grows from rampInitialFraction to
+		// full over rampRecoveryWindow following the Envoy slow-start curve
+		// max(rampInitialFraction, timeFactor^(1/rampAggression)). A window <= 0
+		// disables it (default): half-open closes straight to full traffic.
+		rampRecoveryWindow  time.Duration
+		rampAggression      float64
+		rampInitialFraction float64
 	}
 
 	// CircuitBreakerOption configures a circuit breaker.
@@ -57,9 +67,20 @@ type (
 	// unit — the cheap, linearizable choice the Go concurrency guidance
 	// prescribes for a multi-field state machine.
 	CircuitBreaker struct {
-		clock       Clock
-		hooks       *Hooks
+		clock Clock
+		hooks *Hooks
+
+		// sampler draws the [0, 1) value compared against the ramp admission
+		// fraction while ramping (see rampFractionAt); rand.Float64 in production,
+		// overridable in tests for determinism. Read without the lock — it is set
+		// once at construction and never mutated.
+		sampler func() float64
+
 		lastFailure time.Time
+
+		// rampStart is when the breaker entered the ramping state, the origin for
+		// the slow-start curve. Guarded by mu.
+		rampStart time.Time
 
 		// slowWin is the count-based slow-call window (see slowCallWindow),
 		// allocated lazily on first observation. Guarded by mu.
@@ -116,6 +137,7 @@ const (
 	stateClosed   uint32 = 0
 	stateOpen     uint32 = 1
 	stateHalfOpen uint32 = 2
+	stateRamping  uint32 = 3
 
 	// CircuitClosed is the state in which calls pass through normally.
 	CircuitClosed CircuitState = "closed"
@@ -125,6 +147,10 @@ const (
 	// CircuitHalfOpen is the state in which a bounded number of probe calls are
 	// admitted to test whether the dependency has recovered.
 	CircuitHalfOpen CircuitState = "half_open"
+	// CircuitRamping is the slow-start state entered after recovery: a growing
+	// fraction of traffic is admitted over the ramp window before the breaker
+	// fully closes (see [RampRecovery]).
+	CircuitRamping CircuitState = "ramping"
 )
 
 func defaultCircuitBreakerConfig() circuitBreakerConfig {
@@ -137,6 +163,11 @@ func defaultCircuitBreakerConfig() circuitBreakerConfig {
 		// SlowCallRate alone enables a usable detector without further tuning.
 		slowCallWindow:   100,
 		slowCallMinCalls: 10,
+		// Ramp recovery is disabled by default (rampRecoveryWindow is zero); the
+		// curve params are pre-seeded so RampRecovery alone yields a sensible
+		// linear ramp from 10% without further tuning.
+		rampAggression:      1.0,
+		rampInitialFraction: 0.1,
 	}
 }
 
@@ -234,6 +265,44 @@ func RecoveryMaxBackoff(d time.Duration) CircuitBreakerOption {
 	}
 }
 
+// RampRecovery enables slow-start ramp recovery (off by default). After the
+// breaker recovers through half-open it does not jump straight to full traffic
+// but enters the [CircuitRamping] state and admits a growing fraction over
+// window — easing a healing downstream back to load rather than slamming it.
+// During the ramp, shed calls are rejected with [ErrCircuitRamping], and a
+// failed or slow call reopens the breaker. A window <= 0 disables the feature.
+// Tune the curve with [RampAggression] and the starting fraction with
+// [RampInitialFraction].
+func RampRecovery(window time.Duration) CircuitBreakerOption {
+	return func(cfg *circuitBreakerConfig) {
+		cfg.rampRecoveryWindow = window
+	}
+}
+
+// RampAggression sets the curvature of the ramp admission curve,
+// max(initial, timeFactor^(1/aggression)). The default 1.0 ramps admission
+// linearly across the window; a value > 1 ramps up faster early (convex), a
+// value in (0, 1) slower. Values <= 0 are ignored. Has no effect unless ramp
+// recovery is enabled via [RampRecovery].
+func RampAggression(a float64) CircuitBreakerOption {
+	return func(cfg *circuitBreakerConfig) {
+		if a > 0 {
+			cfg.rampAggression = a
+		}
+	}
+}
+
+// RampInitialFraction sets the fraction of traffic admitted at the very start of
+// the ramp, in [0, 1] (clamped). It floors the admission curve so the breaker
+// never admits less than this share while ramping. Default 0.1 (10%, matching
+// Envoy's slow-start minimum weight). Has no effect unless ramp recovery is
+// enabled via [RampRecovery].
+func RampInitialFraction(f float64) CircuitBreakerOption {
+	return func(cfg *circuitBreakerConfig) {
+		cfg.rampInitialFraction = clampUnitInterval(f)
+	}
+}
+
 // clampUnitInterval clamps rate into [0, 1], the valid range for a fraction.
 func clampUnitInterval(rate float64) float64 {
 	if rate < 0 {
@@ -290,9 +359,10 @@ func NewCircuitBreaker(
 	}
 
 	return &CircuitBreaker{
-		clock: clock,
-		hooks: hooks,
-		cfg:   cfg,
+		clock:   clock,
+		hooks:   hooks,
+		sampler: rand.Float64,
+		cfg:     cfg,
 	}
 }
 
@@ -303,6 +373,9 @@ func NewCircuitBreaker(
 // accumulated history on the next recorded call. When [RecoveryBackoffMultiplier]
 // transitions from disabled (≤ 0) to enabled (> 0), the accumulated probe-failure
 // counter is reset so the first probe after reconfiguration uses the base timeout.
+// Ramp-recovery options (see [RampRecovery]) apply to subsequent admission
+// decisions; a breaker already in the [CircuitRamping] state keeps ramping
+// against the new window and curve (a shortened window simply completes sooner).
 func (cb *CircuitBreaker) Reconfigure(opts ...CircuitBreakerOption) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -360,6 +433,21 @@ func (cb *CircuitBreaker) Allow() error {
 		}
 
 		cb.halfOpenInFlight++
+
+	case stateRamping:
+		elapsed := cb.clock.Since(cb.rampStart)
+		if elapsed >= cb.cfg.rampRecoveryWindow {
+			// Ramp window elapsed: recovery is complete — close and admit.
+			emit = cb.closeLocked()
+
+			break
+		}
+
+		// Admit a growing fraction of traffic and shed the rest, so a still-
+		// fragile downstream sees load ramp up rather than spike to full.
+		if cb.sampler() >= cb.rampFractionAt(elapsed) {
+			err = ErrCircuitRamping
+		}
 
 	default:
 		// stateClosed: allow the call.
@@ -421,6 +509,8 @@ func (cb *CircuitBreaker) recordOutcome(in callInput) {
 		emit = cb.recordClosed(out)
 	case stateHalfOpen:
 		emit = cb.recordHalfOpen(out)
+	case stateRamping:
+		emit = cb.recordRamping(out)
 	default:
 		// stateOpen: a failure recorded while already open drives no transition
 		// but still advances the recovery baseline (the historical contract —
@@ -517,13 +607,65 @@ func (cb *CircuitBreaker) recordHalfOpen(out callOutcome) func() {
 		return nil
 	}
 
+	// Enough probes succeeded. With ramp recovery enabled, ease traffic back in
+	// gradually through the ramping state instead of jumping straight to full
+	// load.
+	if cb.rampEnabled() {
+		return cb.enterRampLocked()
+	}
+
+	return cb.closeLocked()
+}
+
+// closeLocked transitions the breaker to the closed state, clearing the failure
+// and probe counters and resetting the adaptive-recovery backoff so the next
+// trip starts from the base recoveryTimeout. It returns the close hook for the
+// caller to fire after unlock. Used both when half-open closes directly and when
+// the ramp window completes (see Allow). Caller must hold mu.
+func (cb *CircuitBreaker) closeLocked() func() {
 	cb.state = stateClosed
 	cb.failureCount = 0
 	cb.halfOpenSuccesses = 0
 	cb.halfOpenInFlight = 0
-	cb.recoveryAttempt = 0 // reset backoff — next trip starts from base recoveryTimeout
+	cb.recoveryAttempt = 0
 
 	return cb.hooks.emitCircuitClose
+}
+
+// enterRampLocked transitions a recovered half-open breaker into the ramping
+// state, where admission grows from rampInitialFraction to full over
+// rampRecoveryWindow. It stamps the ramp origin on the breaker's clock and
+// clears the half-open probe counters. recoveryAttempt is deliberately left
+// untouched: reaching the ramp is only partial recovery, so a failure during the
+// ramp keeps growing the adaptive backoff; only a full close (closeLocked)
+// resets it. Caller must hold mu.
+func (cb *CircuitBreaker) enterRampLocked() func() {
+	cb.state = stateRamping
+	cb.rampStart = cb.clock.Now()
+	cb.halfOpenSuccesses = 0
+	cb.halfOpenInFlight = 0
+
+	return cb.hooks.emitCircuitRamping
+}
+
+// recordRamping applies an outcome observed while ramping. A failed or slow call
+// proves the downstream is not yet healthy and reopens the breaker — bumping the
+// adaptive-recovery backoff, exactly like a failed half-open probe. A fast
+// success lets the ramp continue; its progression is purely time-driven, so the
+// ramping → closed transition happens lazily in Allow once the window elapses.
+// Caller must hold mu.
+func (cb *CircuitBreaker) recordRamping(out callOutcome) func() {
+	if out.failed {
+		cb.bumpRecoveryAttemptLocked()
+		return cb.openLocked(cb.hooks.emitCircuitOpen)
+	}
+
+	if out.slow {
+		cb.bumpRecoveryAttemptLocked()
+		return cb.openLocked(cb.emitOpenedBySlowCall)
+	}
+
+	return nil
 }
 
 // emitOpenedBySlowCall fires both the circuit-open transition and the
@@ -539,6 +681,47 @@ func (cb *CircuitBreaker) emitOpenedBySlowCall() {
 // duration and the rate threshold must be positive (see [SlowCallRate]).
 func (cb *CircuitBreaker) slowCallEnabled() bool {
 	return cb.cfg.slowCallDuration > 0 && cb.cfg.slowCallRateThreshold > 0
+}
+
+// rampEnabled reports whether slow-start ramp recovery is active (see
+// [RampRecovery]).
+func (cb *CircuitBreaker) rampEnabled() bool {
+	return cb.cfg.rampRecoveryWindow > 0
+}
+
+// rampFractionAt returns the fraction of traffic to admit, in [0, 1], for a call
+// arriving elapsed into the current ramp window, using the breaker's configured
+// curve. Caller ensures rampRecoveryWindow > 0.
+func (cb *CircuitBreaker) rampFractionAt(elapsed time.Duration) float64 {
+	return rampFraction(
+		elapsed,
+		cb.cfg.rampRecoveryWindow,
+		cb.cfg.rampAggression,
+		cb.cfg.rampInitialFraction,
+	)
+}
+
+// rampFraction computes the Envoy slow-start admission fraction in [initial, 1]:
+// max(initial, timeFactor^(1/aggression)) where timeFactor is elapsed/window
+// clamped to [0, 1]. It assumes window > 0; a non-positive aggression falls back
+// to linear (1.0), and an elapsed past the window admits everything. Kept as a
+// free function so the pure curve math is unit- and fuzz-testable in isolation.
+func rampFraction(elapsed, window time.Duration, aggression, initial float64) float64 {
+	if elapsed >= window {
+		return 1
+	}
+
+	timeFactor := float64(elapsed) / float64(window)
+	if timeFactor < 0 {
+		timeFactor = 0
+	}
+
+	exponent := 1.0
+	if aggression > 0 {
+		exponent = 1 / aggression
+	}
+
+	return math.Max(initial, math.Pow(timeFactor, exponent))
 }
 
 // observe appends one call outcome's slow/fast verdict, sizing the ring to size
@@ -615,6 +798,25 @@ func (cb *CircuitBreaker) SlowCallFraction() float64 {
 	return cb.slowWin.fraction()
 }
 
+// RampRecoveryFraction returns the fraction of traffic the breaker is currently
+// admitting while ramping back to full load after recovery, in [0, 1]. It is 0
+// when the breaker is not in the [CircuitRamping] state — closed, open or
+// half-open — or ramp recovery is disabled (see [RampRecovery]). Note that 0 is
+// also the live value at the very start of a ramp configured with
+// RampInitialFraction(0); use [CircuitBreaker.State] == [CircuitRamping] to tell
+// "ramping at 0%" from "not ramping". Useful as a gauge to watch a downstream
+// ease back to full traffic.
+func (cb *CircuitBreaker) RampRecoveryFraction() float64 {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state != stateRamping {
+		return 0
+	}
+
+	return cb.rampFractionAt(cb.clock.Since(cb.rampStart))
+}
+
 // releaseProbe decrements the in-flight half-open probe counter, flooring at
 // zero so RecordSuccess/RecordFailure calls without a matching Allow (or more
 // results than admitted probes) cannot drive it negative. Caller must hold mu.
@@ -624,8 +826,8 @@ func (cb *CircuitBreaker) releaseProbe() {
 	}
 }
 
-// State returns the current state: [CircuitClosed], [CircuitOpen], or
-// [CircuitHalfOpen].
+// State returns the current state: [CircuitClosed], [CircuitOpen],
+// [CircuitHalfOpen], or [CircuitRamping].
 func (cb *CircuitBreaker) State() CircuitState {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -637,6 +839,8 @@ func (cb *CircuitBreaker) State() CircuitState {
 		return CircuitOpen
 	case stateHalfOpen:
 		return CircuitHalfOpen
+	case stateRamping:
+		return CircuitRamping
 	default:
 		// An unrecognised internal state fails safe to open (not serving),
 		// matching circuitCondition's fail-direction — a future state added

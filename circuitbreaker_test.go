@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,24 @@ func (*stubTimer) Reset(time.Duration) bool { return false }
 // setElapsed sets the exact elapsed duration returned by Since.
 func (c *stubClock) setElapsed(d time.Duration) {
 	c.elapsed = d
+}
+
+// originClock is a deterministic clock whose Since HONOURS its argument
+// (now - t), unlike stubClock (which returns a fixed elapsed regardless of the
+// instant passed). It lets a test pin that a duration is measured from a
+// specific stamped instant — e.g. that the ramp is measured from rampStart, not
+// from a fixed elapsed or the wrong origin. Not safe for concurrent use.
+type originClock struct {
+	now time.Time
+}
+
+func (c *originClock) Now() time.Time                  { return c.now }
+func (c *originClock) Since(t time.Time) time.Duration { return c.now.Sub(t) }
+func (c *originClock) NewTimer(time.Duration) Timer    { return &stubTimer{} }
+
+// advance moves the clock forward by d.
+func (c *originClock) advance(d time.Duration) {
+	c.now = c.now.Add(d)
 }
 
 // ---------------------------------------------------------------------------
@@ -859,13 +878,13 @@ func TestRecoveryBackoffDisabledByDefault(t *testing.T) {
 	)
 
 	for range 3 {
-		cb.RecordFailure()                         // open (or already open)
-		clk.setElapsed(10*time.Second - 1)         // just below base timeout
+		cb.RecordFailure()                 // open (or already open)
+		clk.setElapsed(10*time.Second - 1) // just below base timeout
 		require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
 
-		clk.setElapsed(10*time.Second + 1)         // just above base timeout
-		require.NoError(t, cb.Allow())             // half-open
-		cb.RecordFailure()                         // re-open
+		clk.setElapsed(10*time.Second + 1) // just above base timeout
+		require.NoError(t, cb.Allow())     // half-open
+		cb.RecordFailure()                 // re-open
 	}
 }
 
@@ -908,16 +927,16 @@ func TestRecoveryBackoffGrowsExponentially(t *testing.T) {
 	// 1st trip (from closed): base timeout = 10s.
 	cb.RecordFailure()
 	clk.setElapsed(10*time.Second + 1)
-	require.NoError(t, cb.Allow())          // half-open
-	cb.RecordFailure()                      // 1st failed probe: recoveryAttempt=1
+	require.NoError(t, cb.Allow()) // half-open
+	cb.RecordFailure()             // 1st failed probe: recoveryAttempt=1
 
 	// 2nd open: timeout = 10s × 2^1 = 20s.
 	clk.setElapsed(15 * time.Second)
 	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // 15s < 20s
 
 	clk.setElapsed(20*time.Second + 1)
-	require.NoError(t, cb.Allow())          // half-open
-	cb.RecordFailure()                      // 2nd failed probe: recoveryAttempt=2
+	require.NoError(t, cb.Allow()) // half-open
+	cb.RecordFailure()             // 2nd failed probe: recoveryAttempt=2
 
 	// 3rd open: timeout = 10s × 2^2 = 40s.
 	clk.setElapsed(30 * time.Second)
@@ -1071,6 +1090,44 @@ func TestRecoveryMaxBackoffInvalidDuration(t *testing.T) {
 	require.ErrorContains(t, err, "circuit_breaker.recovery_max_backoff")
 }
 
+// TestRampRecoveryConfigRoundTrip verifies the config path maps RampRecovery,
+// RampAggression and RampInitialFraction to the circuit breaker options.
+func TestRampRecoveryConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	window := "100s"
+	aggression := 2.0
+	initial := 0.0
+	opts, err := cbOptionsFromConfig(&CircuitBreakerConfig{
+		RampRecovery:        &window,
+		RampAggression:      &aggression,
+		RampInitialFraction: &initial,
+	})
+	require.NoError(t, err)
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		append(opts, FailureThreshold(1), RecoveryTimeout(1*time.Second), HalfOpenMaxAttempts(1))...,
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(25 * time.Second) // tf=0.25; aggression 2 (sqrt) → 0.5
+
+	assert.InDelta(t, 0.5, cb.RampRecoveryFraction(), 1e-9)
+}
+
+// TestRampRecoveryInvalidDuration verifies an unparseable RampRecovery duration
+// string returns an error from cbOptionsFromConfig.
+func TestRampRecoveryInvalidDuration(t *testing.T) {
+	t.Parallel()
+
+	invalid := "not-a-duration"
+	_, err := cbOptionsFromConfig(&CircuitBreakerConfig{
+		RampRecovery: &invalid,
+	})
+	require.ErrorContains(t, err, "circuit_breaker.ramp_recovery")
+}
+
 // TestRecoveryBackoffReconfigureResetsAttempt verifies that enabling backoff via
 // Reconfigure (disabled → enabled) resets recoveryAttempt so the first probe
 // after reconfiguration uses the base timeout, not a stale accumulated count.
@@ -1127,6 +1184,488 @@ func TestRecoveryBackoffMultiplierOnlyConfig(t *testing.T) {
 	clk.setElapsed(30*time.Second + 1)
 	require.NoError(t, cb.Allow())
 	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// ---------------------------------------------------------------------------
+// Ramp recovery (slow-start)
+// ---------------------------------------------------------------------------
+
+// driveToRamp trips the breaker, waits out the recovery timeout into half-open,
+// then succeeds the single probe to enter the ramping state. It leaves the
+// clock's elapsed at 0 so the caller can position the ramp via clk.setElapsed.
+// The breaker must be configured FailureThreshold(1)/HalfOpenMaxAttempts(1) with
+// ramp recovery enabled (the recovery timeout may be anything below one hour).
+func driveToRamp(t *testing.T, clk *stubClock, cb *CircuitBreaker) {
+	t.Helper()
+
+	cb.RecordFailure()             // trip from closed
+	clk.setElapsed(1 * time.Hour)  // exceed any configured recovery timeout
+	require.NoError(t, cb.Allow()) // → half-open, first probe admitted
+	cb.RecordSuccess()             // probe succeeds → ramping
+	require.Equal(t, CircuitRamping, cb.State())
+
+	clk.setElapsed(0) // reset to the start of the ramp window
+}
+
+// TestRampFraction pins the Envoy slow-start admission curve in isolation.
+func TestRampFraction(t *testing.T) {
+	t.Parallel()
+
+	const window = 10 * time.Second
+
+	tests := []struct {
+		name       string
+		elapsed    time.Duration
+		aggression float64
+		initial    float64
+		want       float64
+	}{
+		{"start floored at initial", 0, 1.0, 0.1, 0.1},
+		{"linear midpoint", 5 * time.Second, 1.0, 0.1, 0.5},
+		{"linear three-quarters", 75 * time.Second / 10, 1.0, 0.1, 0.75},
+		{"at window admits all", window, 1.0, 0.1, 1.0},
+		{"past window admits all", 2 * window, 1.0, 0.1, 1.0},
+		{"negative elapsed floored to start", -5 * time.Second, 1.0, 0.2, 0.2},
+		{"aggression 2 ramps faster (sqrt)", 25 * time.Second / 10, 2.0, 0.0, 0.5},
+		{"aggression below initial uses floor", 1 * time.Second, 2.0, 0.5, 0.5},
+		{"non-positive aggression falls back to linear", 5 * time.Second, 0, 0.1, 0.5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := rampFraction(tt.elapsed, window, tt.aggression, tt.initial)
+			assert.InDelta(t, tt.want, got, 1e-9)
+		})
+	}
+}
+
+// TestRampEntersRampingAfterRecovery verifies a recovered half-open probe enters
+// the ramping state (instead of closing) and fires OnCircuitRamping once.
+func TestRampEntersRampingAfterRecovery(t *testing.T) {
+	t.Parallel()
+
+	var ramps, closes atomic.Int64
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{
+		OnCircuitRamping: func() { ramps.Add(1) },
+		OnCircuitClose:   func() { closes.Add(1) },
+	},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+	)
+
+	driveToRamp(t, clk, cb)
+
+	assert.Equal(t, int64(1), ramps.Load(), "OnCircuitRamping fires once on ramp entry")
+	assert.Equal(t, int64(0), closes.Load(), "breaker has not closed yet")
+}
+
+// TestRampAdmitsByFraction verifies the probabilistic gate: a draw below the
+// ramp fraction is admitted, a draw at or above it is shed with ErrCircuitRamping
+// (distinct from ErrCircuitOpen).
+func TestRampAdmitsByFraction(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second), // linear, initial 0.1
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(5 * time.Second) // fraction = 0.5
+
+	cb.sampler = func() float64 { return 0.4 }
+	require.NoError(t, cb.Allow(), "draw below fraction is admitted")
+	require.Equal(t, CircuitRamping, cb.State(), "admitting does not change state")
+
+	cb.sampler = func() float64 { return 0.5 }
+	err := cb.Allow()
+	require.ErrorIs(t, err, ErrCircuitRamping, "draw at the fraction sheds (>=)")
+	require.NotErrorIs(t, err, ErrCircuitOpen, "ramp shed is distinct from a full open")
+
+	cb.sampler = func() float64 { return 0.6 }
+	require.ErrorIs(t, cb.Allow(), ErrCircuitRamping, "draw above fraction sheds")
+}
+
+// TestRampInitialFractionFloorsAdmission verifies that at the very start of the
+// ramp the admitted fraction is floored at RampInitialFraction.
+func TestRampInitialFractionFloorsAdmission(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+		RampInitialFraction(0.3),
+	)
+
+	driveToRamp(t, clk, cb) // elapsed 0 → fraction = initial 0.3
+	assert.InDelta(t, 0.3, cb.RampRecoveryFraction(), 1e-9)
+
+	cb.sampler = func() float64 { return 0.29 }
+	require.NoError(t, cb.Allow(), "below the floor is admitted")
+
+	cb.sampler = func() float64 { return 0.3 }
+	require.ErrorIs(t, cb.Allow(), ErrCircuitRamping, "at the floor sheds")
+}
+
+// TestRampInitialFractionClamped verifies RampInitialFraction is clamped to
+// [0, 1] like other fractions.
+func TestRampInitialFractionClamped(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+		RampInitialFraction(5.0), // clamped to 1.0 → admit everything immediately
+	)
+
+	driveToRamp(t, clk, cb)
+	assert.InDelta(t, 1.0, cb.RampRecoveryFraction(), 1e-9)
+
+	cb.sampler = func() float64 { return 0.999 }
+	require.NoError(t, cb.Allow())
+}
+
+// TestRampAggressionAdmitsMoreEarly verifies a higher aggression admits a larger
+// fraction early in the window than the linear default.
+func TestRampAggressionAdmitsMoreEarly(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(100*time.Second),
+		RampAggression(2.0), // sqrt curve
+		RampInitialFraction(0),
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(25 * time.Second) // tf=0.25; sqrt → 0.5 (linear would be 0.25)
+	assert.InDelta(t, 0.5, cb.RampRecoveryFraction(), 1e-9)
+}
+
+// TestRampNonPositiveAggressionIgnored verifies RampAggression(≤0) keeps the
+// default linear curve.
+func TestRampNonPositiveAggressionIgnored(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+		RampAggression(-1.0), // ignored → linear default
+		RampInitialFraction(0),
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(5 * time.Second)
+	assert.InDelta(t, 0.5, cb.RampRecoveryFraction(), 1e-9, "stays linear")
+}
+
+// TestRampCompletesAndCloses verifies that once the ramp window elapses the next
+// Allow closes the breaker and fires OnCircuitClose.
+func TestRampCompletesAndCloses(t *testing.T) {
+	t.Parallel()
+
+	var closes atomic.Int64
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{
+		OnCircuitClose: func() { closes.Add(1) },
+	},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+	)
+
+	driveToRamp(t, clk, cb)
+
+	clk.setElapsed(10 * time.Second) // window fully elapsed (inclusive)
+	require.NoError(t, cb.Allow())
+	assert.Equal(t, CircuitClosed, cb.State())
+	assert.Equal(t, int64(1), closes.Load())
+}
+
+// TestRampFailureReopensAndCarriesBackoff verifies a failure during the ramp
+// reopens the breaker, and — because reaching the ramp is only partial recovery
+// — bumps the adaptive-recovery backoff (recoveryAttempt is not reset on ramp
+// entry).
+func TestRampFailureReopensAndCarriesBackoff(t *testing.T) {
+	t.Parallel()
+
+	var opens atomic.Int64
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{
+		OnCircuitOpen: func() { opens.Add(1) },
+	},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(60*time.Second),
+		RecoveryBackoffMultiplier(2.0),
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(5 * time.Second)
+
+	cb.RecordFailure() // failure during ramp → reopen, recoveryAttempt 0→1
+	require.Equal(t, CircuitOpen, cb.State())
+	require.Equal(t, int64(2), opens.Load(), "one open on the initial trip, one on the ramp failure")
+
+	// Backoff carried: next recovery wait = 10s × 2^1 = 20s, not the base 10s.
+	clk.setElapsed(15 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen, "15s < 20s backed-off wait")
+
+	clk.setElapsed(20*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRampSlowCallReopens verifies a slow (but successful) call during the ramp
+// reopens the breaker via the slow-call cause, when slow-call detection is on.
+func TestRampSlowCallReopens(t *testing.T) {
+	t.Parallel()
+
+	var slowTrips, opens atomic.Int64
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{
+		OnCircuitOpen:          func() { opens.Add(1) },
+		OnSlowCallRateExceeded: func() { slowTrips.Add(1) },
+	},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(60*time.Second),
+		SlowCallRate(100*time.Millisecond, 0.5),
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(5 * time.Second)
+
+	cb.Record(200*time.Millisecond, nil) // slow but successful → reopen
+	assert.Equal(t, CircuitOpen, cb.State())
+	assert.Equal(t, int64(2), opens.Load())
+	assert.Equal(t, int64(1), slowTrips.Load(), "reopen surfaced as a slow-call cause")
+}
+
+// TestRampSuccessKeepsRamping verifies a fast success during the ramp neither
+// closes nor reopens — progression is time-driven, handled lazily in Allow.
+func TestRampSuccessKeepsRamping(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(5 * time.Second)
+
+	cb.RecordSuccess()
+	assert.Equal(t, CircuitRamping, cb.State(), "success mid-ramp keeps ramping")
+}
+
+// TestRampDisabledClosesDirectly pins the backward-compatible default: with no
+// RampRecovery, a recovered probe closes straight to full traffic and never
+// reports ramping.
+func TestRampDisabledClosesDirectly(t *testing.T) {
+	t.Parallel()
+
+	var ramps atomic.Int64
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{
+		OnCircuitRamping: func() { ramps.Add(1) },
+	},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+	)
+
+	cb.RecordFailure()
+	clk.setElapsed(2 * time.Second)
+	require.NoError(t, cb.Allow())
+	cb.RecordSuccess()
+
+	assert.Equal(t, CircuitClosed, cb.State())
+	assert.Equal(t, int64(0), ramps.Load(), "OnCircuitRamping never fires when disabled")
+	assert.Zero(t, cb.RampRecoveryFraction())
+}
+
+// TestRampRecoveryFractionZeroWhenNotRamping verifies the gauge is 0 in every
+// non-ramping state.
+func TestRampRecoveryFractionZeroWhenNotRamping(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+	)
+
+	assert.Zero(t, cb.RampRecoveryFraction(), "closed → 0")
+
+	cb.RecordFailure()
+	assert.Zero(t, cb.RampRecoveryFraction(), "open → 0")
+
+	clk.setElapsed(2 * time.Second)
+	require.NoError(t, cb.Allow())
+	assert.Zero(t, cb.RampRecoveryFraction(), "half-open → 0")
+
+	cb.RecordSuccess()
+	clk.setElapsed(3 * time.Second)
+	assert.InDelta(t, 0.3, cb.RampRecoveryFraction(), 1e-9, "ramping → fraction")
+}
+
+// TestRampReconfigureEnables verifies ramp recovery can be turned on at runtime
+// via Reconfigure.
+func TestRampReconfigureEnables(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+	)
+
+	cb.Reconfigure(RampRecovery(10 * time.Second))
+	driveToRamp(t, clk, cb)
+
+	assert.Equal(t, CircuitRamping, cb.State())
+}
+
+// TestRampOriginMeasuredFromRampStart pins that the ramp is timed from the
+// instant the breaker ENTERS the ramp (rampStart, stamped in enterRampLocked),
+// not from a fixed elapsed, the trip time, or the epoch. It uses originClock,
+// whose Since honours its argument, so a regression that stamps rampStart from
+// the wrong source (or leaves it zero) yields a different fraction and fails.
+func TestRampOriginMeasuredFromRampStart(t *testing.T) {
+	t.Parallel()
+
+	clk := &originClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(100*time.Second),
+		RampInitialFraction(0), // so the curve is pure linear from 0
+	)
+
+	cb.RecordFailure()             // trip; lastFailure stamped at now
+	clk.advance(2 * time.Second)   // exceed the recovery timeout
+	require.NoError(t, cb.Allow()) // → half-open
+	cb.RecordSuccess()             // → ramping; rampStart stamped at the current now
+	require.Equal(t, CircuitRamping, cb.State())
+
+	// Right after entry, now-rampStart ≈ 0 → fraction == initial (0). A wrong
+	// origin (zero time → huge elapsed → 1.0; or lastFailure → 2s/100s = 0.02)
+	// would not read 0 here.
+	assert.InDelta(t, 0.0, cb.RampRecoveryFraction(), 1e-9)
+
+	// Half the window AFTER ramp entry → linear fraction 0.5, measured from
+	// rampStart (not the trip 2s earlier).
+	clk.advance(50 * time.Second)
+	assert.InDelta(t, 0.5, cb.RampRecoveryFraction(), 1e-9)
+
+	// Full window since rampStart → ramp complete; the next Allow closes.
+	clk.advance(50 * time.Second)
+	assert.InDelta(t, 1.0, cb.RampRecoveryFraction(), 1e-9)
+	require.NoError(t, cb.Allow())
+	assert.Equal(t, CircuitClosed, cb.State())
+}
+
+// TestRampConcurrentAccess exercises the ramping state under the race detector.
+func TestRampConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(1*time.Second),
+		HalfOpenMaxAttempts(1),
+		RampRecovery(10*time.Second),
+	)
+
+	driveToRamp(t, clk, cb)
+	clk.setElapsed(5 * time.Second)
+
+	const goroutines = 100
+
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+
+			_ = cb.Allow()
+			cb.RecordSuccess()
+			_ = cb.State()
+			_ = cb.RampRecoveryFraction()
+		}()
+	}
+
+	wg.Wait()
+
+	assert.Contains(t,
+		[]CircuitState{CircuitClosed, CircuitOpen, CircuitHalfOpen, CircuitRamping},
+		cb.State(),
+	)
+}
+
+// FuzzRampFraction asserts the curve never panics and stays in [initial, 1] and
+// finite for any clock position and tuning, mirroring the production clamps.
+func FuzzRampFraction(f *testing.F) {
+	f.Add(int64(0), int64(time.Second), 1.0, 0.1)
+	f.Add(int64(time.Second/2), int64(time.Second), 2.0, 0.1)
+	f.Add(int64(-5), int64(time.Second), 0.0, 0.5)
+
+	f.Fuzz(func(t *testing.T, elapsedNS, windowNS int64, aggression, initial float64) {
+		if windowNS <= 0 {
+			t.Skip() // window > 0 is a precondition (rampEnabled gate)
+		}
+
+		if math.IsNaN(aggression) || math.IsInf(aggression, 0) {
+			t.Skip() // a non-finite aggression cannot arrive through the option
+		}
+
+		initial = clampUnitInterval(initial) // mirror RampInitialFraction's clamp
+
+		got := rampFraction(time.Duration(elapsedNS), time.Duration(windowNS), aggression, initial)
+
+		require.False(t, math.IsNaN(got), "fraction must not be NaN")
+		require.False(t, math.IsInf(got, 0), "fraction must be finite")
+		require.GreaterOrEqual(t, got, initial, "fraction floored at initial")
+		require.LessOrEqual(t, got, 1.0, "fraction never exceeds 1")
+	})
 }
 
 // ---------------------------------------------------------------------------

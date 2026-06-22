@@ -109,6 +109,19 @@ type (
 		// Only meaningful when RecoveryBackoffMultiplier is set.
 		// Parsed via time.ParseDuration. Example: "60s".
 		RecoveryMaxBackoff *string `json:"recovery_max_backoff,omitempty" yaml:"recovery_max_backoff,omitempty"`
+		// RampRecovery enables slow-start ramp recovery: after the breaker
+		// recovers it admits a growing fraction of traffic over this window
+		// instead of jumping to full load. Optional, off by default. Parsed via
+		// time.ParseDuration. Example: "10s".
+		RampRecovery *string `json:"ramp_recovery,omitempty" yaml:"ramp_recovery,omitempty"`
+		// RampAggression curves the ramp: 1.0 (default) ramps linearly, > 1 ramps
+		// faster early. Optional. Only meaningful when RampRecovery is set.
+		// Example: 2.0.
+		RampAggression *float64 `json:"ramp_aggression,omitempty" yaml:"ramp_aggression,omitempty"`
+		// RampInitialFraction is the share of traffic admitted at the start of the
+		// ramp, in [0,1]. Optional. Default 0.1. Only meaningful when RampRecovery
+		// is set. Example: 0.05.
+		RampInitialFraction *float64 `json:"ramp_initial_fraction,omitempty" yaml:"ramp_initial_fraction,omitempty"` //nolint:lll // struct tag cannot be split across lines
 	}
 
 	// RetryConfig holds retry configuration values. Embed it
@@ -755,6 +768,40 @@ func cbOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, err
 		}
 
 		opts = append(opts, RecoveryMaxBackoff(maxBackoffDur))
+	}
+
+	rampOpts, err := rampOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	opts = append(opts, rampOpts...)
+
+	return opts, nil
+}
+
+// rampOptionsFromConfig maps the slow-start ramp-recovery fields of a
+// [CircuitBreakerConfig] to circuit-breaker options. RampRecovery enables the
+// ramp; the curve tuners (RampAggression, RampInitialFraction) are inert without
+// it, mirroring the slow-call window tuners.
+func rampOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, error) {
+	var opts []CircuitBreakerOption
+
+	if cfg.RampRecovery != nil {
+		window, err := time.ParseDuration(*cfg.RampRecovery)
+		if err != nil {
+			return nil, fmt.Errorf("circuit_breaker.ramp_recovery: %w", err)
+		}
+
+		opts = append(opts, RampRecovery(window))
+	}
+
+	if cfg.RampAggression != nil {
+		opts = append(opts, RampAggression(*cfg.RampAggression))
+	}
+
+	if cfg.RampInitialFraction != nil {
+		opts = append(opts, RampInitialFraction(*cfg.RampInitialFraction))
 	}
 
 	return opts, nil

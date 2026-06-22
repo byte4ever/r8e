@@ -180,9 +180,9 @@ r8e.WithCircuitBreaker(opts ...CircuitBreakerOption)
 
 **Options**: `r8e.FailureThreshold(n)` (default 5), `r8e.RecoveryTimeout(d)` (default 30s), `r8e.HalfOpenMaxAttempts(n)` (default 1).
 
-States: closed -> open (fast-fail `r8e.ErrCircuitOpen`) -> half-open -> closed.
-State transitions are mutex-guarded (linearizable); half-open admits at most
-`HalfOpenMaxAttempts` concurrent probes.
+States: closed -> open (fast-fail `r8e.ErrCircuitOpen`) -> half-open -> closed
+(or -> ramping -> closed with ramp recovery). State transitions are mutex-guarded
+(linearizable); half-open admits at most `HalfOpenMaxAttempts` concurrent probes.
 
 **Slow-call rate** (opt-in, off by default): `r8e.SlowCallRate(duration, rate)`
 trips the breaker when the fraction of calls slower than `duration` reaches
@@ -206,6 +206,23 @@ cap). Backoff resets to 0 when the breaker successfully closes. Config-
 expressible via `RecoveryBackoffMultiplier *float64` and `RecoveryMaxBackoff
 *string` fields in `CircuitBreakerConfig` (JSON/YAML). Example:
 `examples/30-recovery-backoff`.
+
+**Ramp recovery / slow-start** (opt-in, default disabled): `r8e.RampRecovery(window)`
+makes a recovered half-open probe enter the `CircuitRamping` state instead of
+closing straight to 100% traffic — admission grows from `RampInitialFraction`
+(default 0.1) to full over `window`, easing a healing downstream back to load
+(Envoy/Istio slow-start). Fraction = `max(initial, timeFactor^(1/aggression))`,
+`timeFactor = elapsed/window`; `r8e.RampAggression(a)` (default 1.0 = linear, >1 =
+faster early) curves it. Probabilistic admission (a `sampler` draw vs the
+fraction); shed calls return `r8e.ErrCircuitRamping` (distinct from
+`ErrCircuitOpen`). A failed/slow call during the ramp reopens the breaker and
+bumps the recovery backoff (reaching the ramp does NOT reset `recoveryAttempt`;
+only a full close does). The ramp completes lazily in `Allow` once the window
+elapses. Config-expressible via `RampRecovery *string` (duration), `RampAggression
+*float64`, `RampInitialFraction *float64` (the latter two inert without
+RampRecovery, like the slow-call tuners). Observability: `OnCircuitRamping` hook,
+`CircuitRamps` counter, `RampRecoveryFraction` gauge. Example:
+`examples/39-ramp-recovery`.
 
 ### Rate Limiter
 
@@ -437,7 +454,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
+`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
 
 ## Hooks
 
@@ -447,6 +464,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCircuitOpen:      func() {},
     OnCircuitClose:     func() {},
     OnCircuitHalfOpen:  func() {},
+    OnCircuitRamping:   func() {}, // breaker entered slow-start ramp recovery
     OnSlowCallRateExceeded: func() {}, // breaker opened by the slow-call rate
     OnRateLimited:      func() {},
     OnRateAdapted:      func(rate float64) {}, // AIMD moved the rate limiter's refill rate
@@ -490,14 +508,14 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 ```
 
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
-`CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
+`CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `RateLimited`, `BulkheadRejected`,
 `BulkheadTimeouts`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
 `CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `RateAdaptations`,
 `SlowCallRateExceeded`, `CacheHits`, `CacheMisses`, `CacheStores`,
 `CacheStaleServed`, `CacheRefreshes`, `PanicsRecovered`,
 `ConcurrencyBudgetExceeded`, `ChaosInjected`) and gauges
-(`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
+(`CircuitState`, `SlowCallRate`, `RampRecoveryFraction`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `AdaptiveTimeout`,
 `AdaptiveHedgeDelay`, `Saturated`, `Healthy`, `Criticality`).

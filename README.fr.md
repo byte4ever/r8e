@@ -225,6 +225,16 @@ r8e.WithCircuitBreaker(
 )
 ```
 
+**Récupération graduelle / slow-start (opt-in).** Par défaut, une sonde half-open réussie referme le breaker directement à 100 % du trafic. Avec `RampRecovery(window)`, le breaker passe plutôt dans l'état `CircuitRamping` et admet une fraction *croissante* du trafic sur `window` — ramenant en douceur une dépendance en convalescence vers la charge plutôt que de la noyer dès qu'elle paraît saine (slow-start de l'outlier-detection Envoy/Istio). La fraction admise suit `max(initial, timeFactor^(1/aggression))` où `timeFactor = elapsed/window` : `RampAggression` (défaut 1.0 = linéaire, > 1 = plus rapide au début) courbe la montée et `RampInitialFraction` (défaut 0.1) la plancher. Les appels rejetés pendant la montée renvoient `ErrCircuitRamping`, distinct de `ErrCircuitOpen` ; un appel échoué ou lent pendant la montée rouvre le breaker (et fait croître le backoff de récupération). Le hook `OnCircuitRamping` et la gauge `RampRecoveryFraction` exposent la montée. Voir [`examples/39-ramp-recovery`](examples/39-ramp-recovery).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.RecoveryTimeout(200*time.Millisecond),
+    r8e.RampRecovery(1*time.Second),   // montée 10 % → 100 % sur 1s après reprise
+    r8e.RampInitialFraction(0.1),
+)
+```
+
 ### Rate Limiter
 
 Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton.
@@ -929,7 +939,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (31) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Hooks disponibles sur `Hooks` (32) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 

@@ -25,6 +25,12 @@ type (
 var (
 	// ErrCircuitOpen is returned when the circuit breaker is in the open state.
 	ErrCircuitOpen error = resilienceError("circuit breaker is open")
+	// ErrCircuitRamping is returned when the circuit breaker, recovering through
+	// slow-start ramp recovery (see [RampRecovery]), sheds a call because it is
+	// still admitting only a fraction of traffic. It is distinct from
+	// [ErrCircuitOpen] so callers can tell a partial ramp shed apart from a fully
+	// open breaker.
+	ErrCircuitRamping error = resilienceError("circuit breaker ramping")
 	// ErrRateLimited is returned when a request is rejected by a rate limiter.
 	ErrRateLimited error = resilienceError("rate limited")
 	// ErrBulkheadFull is returned when the bulkhead has no available capacity and

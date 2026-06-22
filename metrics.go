@@ -22,6 +22,12 @@ type (
 		CircuitOpens     int64 `json:"circuit_opens"`
 		CircuitCloses    int64 `json:"circuit_closes"`
 		CircuitHalfOpens int64 `json:"circuit_half_opens"`
+		// CircuitRamps counts transitions into the slow-start ramp state after a
+		// recovery (see [RampRecovery]). It is NOT a subset of CircuitCloses: a ramp
+		// that runs its window to completion closes (counting in CircuitCloses), but
+		// a ramp cut short by a failed or slow call reopens instead (counting in
+		// CircuitOpens). So CircuitRamps − CircuitCloses is not a meaningful figure.
+		CircuitRamps     int64 `json:"circuit_ramps"`
 		RateLimited      int64 `json:"rate_limited"`
 		BulkheadRejected int64 `json:"bulkhead_rejected"`
 		// BulkheadTimeouts counts calls that waited the full bulkhead max-wait
@@ -110,6 +116,12 @@ type (
 		// breaker's window, in [0, 1]; 0 when the policy has no breaker, slow-call
 		// detection is off, or no calls have been observed (see [SlowCallRate]).
 		SlowCallRate float64 `json:"slow_call_rate"`
+		// RampRecoveryFraction is the fraction of traffic the breaker is currently
+		// admitting while in slow-start ramp recovery, in [0, 1]; 0 when the
+		// breaker is not ramping or ramp recovery is disabled (see [RampRecovery]).
+		// 0 is also the live value at the very start of a ramp with
+		// RampInitialFraction(0); read CircuitState == "ramping" to disambiguate.
+		RampRecoveryFraction float64 `json:"ramp_recovery_fraction"`
 		// PanicsRecovered counts calls where the user function panicked and the
 		// panic was caught by [WithRecover] and returned as a *[PanicError].
 		PanicsRecovered int64 `json:"panics_recovered"`
@@ -170,6 +182,7 @@ type (
 		circuitOpens         atomic.Int64
 		circuitCloses        atomic.Int64
 		circuitHalfOpens     atomic.Int64
+		circuitRamps         atomic.Int64
 		rateLimited          atomic.Int64
 		bulkheadRejected     atomic.Int64
 		bulkheadTimeouts     atomic.Int64
@@ -240,6 +253,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 
 			if user.OnCircuitHalfOpen != nil {
 				user.OnCircuitHalfOpen()
+			}
+		},
+		OnCircuitRamping: func() {
+			m.circuitRamps.Add(1)
+
+			if user.OnCircuitRamping != nil {
+				user.OnCircuitRamping()
 			}
 		},
 		OnRateLimited: func() {
@@ -422,6 +442,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CircuitOpens:              p.metrics.circuitOpens.Load(),
 		CircuitCloses:             p.metrics.circuitCloses.Load(),
 		CircuitHalfOpens:          p.metrics.circuitHalfOpens.Load(),
+		CircuitRamps:              p.metrics.circuitRamps.Load(),
 		RateLimited:               p.metrics.rateLimited.Load(),
 		BulkheadRejected:          p.metrics.bulkheadRejected.Load(),
 		BulkheadTimeouts:          p.metrics.bulkheadTimeouts.Load(),
@@ -451,6 +472,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	if p.circuitBreaker != nil {
 		metrics.CircuitState = string(p.circuitBreaker.State())
 		metrics.SlowCallRate = p.circuitBreaker.SlowCallFraction()
+		metrics.RampRecoveryFraction = p.circuitBreaker.RampRecoveryFraction()
 	}
 
 	if p.rateLimiter != nil {

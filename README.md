@@ -226,6 +226,16 @@ r8e.WithCircuitBreaker(
 )
 ```
 
+**Ramp recovery / slow-start (opt-in).** By default a recovered half-open probe closes the breaker straight to 100% traffic. With `RampRecovery(window)` the breaker instead enters the `CircuitRamping` state and admits a *growing* fraction of traffic over `window` — easing a healing downstream back to load rather than slamming it with the full firehose the instant it looks healthy (Envoy/Istio outlier-detection slow-start). The admitted fraction follows `max(initial, timeFactor^(1/aggression))` where `timeFactor = elapsed/window`: `RampAggression` (default 1.0 = linear, > 1 = faster early) curves it and `RampInitialFraction` (default 0.1) floors it. Shed calls during the ramp return `ErrCircuitRamping`, distinct from `ErrCircuitOpen`; a failed or slow call during the ramp reopens the breaker (and grows the recovery backoff). The `OnCircuitRamping` hook and the `RampRecoveryFraction` gauge surface the ramp. See [`examples/39-ramp-recovery`](examples/39-ramp-recovery).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.RecoveryTimeout(200*time.Millisecond),
+    r8e.RampRecovery(1*time.Second),   // ramp 10% → 100% over 1s after recovery
+    r8e.RampInitialFraction(0.1),
+)
+```
+
 ### Rate Limiter
 
 Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token.
@@ -911,7 +921,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (31): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Available hooks on `Hooks` (32): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 

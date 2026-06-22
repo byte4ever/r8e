@@ -9,10 +9,15 @@ package r8e
 // initialisation (there is no runtime subscription, unlike a true Observer; it
 // is a plain optional-callback set).
 type Hooks struct {
-	OnRetry            func(attempt int, err error)
-	OnCircuitOpen      func()
-	OnCircuitClose     func()
-	OnCircuitHalfOpen  func()
+	OnRetry           func(attempt int, err error)
+	OnCircuitOpen     func()
+	OnCircuitClose    func()
+	OnCircuitHalfOpen func()
+	// OnCircuitRamping fires when the breaker enters the slow-start ramp state
+	// after recovering through half-open: admission then grows from the initial
+	// fraction to full over the ramp window (see [RampRecovery]) instead of
+	// jumping straight to closed.
+	OnCircuitRamping   func()
 	OnRateLimited      func()
 	OnBulkheadFull     func()
 	OnBulkheadAcquired func()
@@ -119,6 +124,12 @@ func (h *Hooks) emitCircuitOpen() {
 func (h *Hooks) emitCircuitClose() {
 	if h != nil && h.OnCircuitClose != nil {
 		h.OnCircuitClose()
+	}
+}
+
+func (h *Hooks) emitCircuitRamping() {
+	if h != nil && h.OnCircuitRamping != nil {
+		h.OnCircuitRamping()
 	}
 }
 

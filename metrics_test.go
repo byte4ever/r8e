@@ -85,6 +85,53 @@ func TestMetricsCircuitLifecycle(t *testing.T) {
 	assert.True(t, opened.Load() && halfOpened.Load() && closed.Load())
 }
 
+func TestMetricsRampRecovery(t *testing.T) {
+	clk := &stubClock{now: time.Now()}
+
+	var ramped atomic.Bool
+
+	p := NewPolicy[string]("cb-ramp",
+		WithRegistry(NewRegistry()),
+		WithClock(clk),
+		WithCircuitBreaker(
+			FailureThreshold(1),
+			RecoveryTimeout(time.Second),
+			HalfOpenMaxAttempts(1),
+			RampRecovery(100*time.Second),
+		),
+		WithHooks(&Hooks{
+			OnCircuitRamping: func() { ramped.Store(true) },
+		}),
+	)
+
+	// A failure trips the breaker.
+	_, _ = p.Do(context.Background(), func(_ context.Context) (string, error) {
+		return "", errors.New("down")
+	})
+	require.Equal(t, "open", p.Metrics().CircuitState)
+
+	// After the recovery timeout a successful probe enters the slow-start ramp
+	// instead of closing straight to full traffic.
+	clk.setElapsed(2 * time.Second)
+	_, err := p.Do(context.Background(), func(_ context.Context) (string, error) {
+		return "ok", nil
+	})
+	require.NoError(t, err)
+
+	metrics := p.Metrics()
+	assert.Equal(t, "ramping", metrics.CircuitState)
+	assert.Equal(t, int64(1), metrics.CircuitRamps)
+	assert.InDelta(t, 0.1, metrics.RampRecoveryFraction, 1e-9, "floored at initial 0.1 (2s/100s)")
+	assert.True(t, ramped.Load())
+
+	// A draw at or above the ramp fraction sheds the call with ErrCircuitRamping.
+	p.circuitBreaker.sampler = func() float64 { return 1 }
+	_, err = p.Do(context.Background(), func(_ context.Context) (string, error) {
+		return "ok", nil
+	})
+	require.ErrorIs(t, err, ErrCircuitRamping)
+}
+
 func TestMetricsRateLimited(t *testing.T) {
 	var hook atomic.Bool
 
