@@ -145,6 +145,10 @@ var (
 	ErrRetryMaxAttemptsRequired error = resilienceError(
 		"retry max_attempts is required",
 	)
+	// ErrPanic is matched by errors.Is when a panic was recovered by [WithRecover].
+	// To inspect the original panic value and goroutine stack trace, use errors.As
+	// to obtain the underlying *[PanicError].
+	ErrPanic error = resilienceError("panic recovered")
 )
 
 func (e *transientError) Error() string { return "transient: " + e.err.Error() }

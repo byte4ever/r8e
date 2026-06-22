@@ -237,6 +237,26 @@ r8e.WithHedge(delay time.Duration)
 
 Fires a second concurrent call after `delay`. Returns first success, cancels the other.
 
+### Recover
+
+```go
+r8e.WithRecover()
+```
+
+Catches any panic from the user function and converts it to a `*r8e.PanicError`
+instead of propagating the panic up the call stack. Sits **innermost** in the
+chain (priority 11, inside Hedge at 10) so each hedge goroutine recovers
+independently and Retry sees the recovered error.
+
+`PanicError` implements `error` and carries:
+- `Value any` — the original panic value
+- `Stack []byte` — goroutine stack trace at recovery time
+
+Match with `errors.Is(err, r8e.ErrPanic)`; inspect via `errors.As(err, &pe)`.
+Hook: `OnPanic func(value any)`. Counter: `PanicsRecovered`.
+Standalone: `r8e.DoRecover[T](ctx, fn, hooks)`.
+Example: `examples/31-recover`.
+
 ### Request Coalescing (singleflight)
 
 ```go
@@ -309,7 +329,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`.
+`r8e.ErrCircuitOpen`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrPanic`.
 
 ## Hooks
 
@@ -341,6 +361,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCacheMiss:   func() {},  // no fresh value; downstream executed
     OnCacheStored: func() {},  // successful result written to cache
     OnStaleServed: func() {},  // stale value served after a downstream failure
+    OnPanic:       func(value any) {},  // panic recovered by WithRecover
 })
 ```
 
@@ -361,7 +382,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `BulkheadTimeouts`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
 `CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `SlowCallRateExceeded`,
-`CacheHits`, `CacheMisses`, `CacheStores`, `CacheStaleServed`) and gauges
+`CacheHits`, `CacheMisses`, `CacheStores`, `CacheStaleServed`,
+`PanicsRecovered`) and gauges
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `Saturated`, `Healthy`,
@@ -559,4 +581,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/30-recovery-backoff`.
+Examples: `examples/01-quickstart` through `examples/31-recover`.

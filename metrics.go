@@ -94,6 +94,9 @@ type (
 		// breaker's window, in [0, 1]; 0 when the policy has no breaker, slow-call
 		// detection is off, or no calls have been observed (see [SlowCallRate]).
 		SlowCallRate float64 `json:"slow_call_rate"`
+		// PanicsRecovered counts calls where the user function panicked and the
+		// panic was caught by [WithRecover] and returned as a *[PanicError].
+		PanicsRecovered int64 `json:"panics_recovered"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -126,6 +129,7 @@ type (
 		cacheMisses          atomic.Int64
 		cacheStores          atomic.Int64
 		cacheStaleServed     atomic.Int64
+		panicsRecovered      atomic.Int64
 	}
 
 	// MetricsReporter is implemented by every [Policy]; [Registry.Snapshot]
@@ -306,6 +310,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnTimeBudgetExceeded()
 			}
 		},
+		OnPanic: func(value any) {
+			m.panicsRecovered.Add(1)
+
+			if user.OnPanic != nil {
+				user.OnPanic(value)
+			}
+		},
 	}
 }
 
@@ -338,6 +349,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CacheMisses:          p.metrics.cacheMisses.Load(),
 		CacheStores:          p.metrics.cacheStores.Load(),
 		CacheStaleServed:     p.metrics.cacheStaleServed.Load(),
+		PanicsRecovered:      p.metrics.panicsRecovered.Load(),
 		Criticality:          health.Criticality,
 		Healthy:              health.Healthy,
 	}

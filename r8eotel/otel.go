@@ -115,6 +115,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CacheStores })
 	builder.counter("r8e.policy.cache_stale_served", "Stale values served after a downstream failure",
 		func(m *r8e.PolicyMetrics) int64 { return m.CacheStaleServed })
+	builder.counter("r8e.policy.panics_recovered", "Panics caught by WithRecover and returned as errors",
+		func(m *r8e.PolicyMetrics) int64 { return m.PanicsRecovered })
 
 	builder.gauge("r8e.policy.bulkhead_in_use", "Bulkhead slots currently held",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadInUse })

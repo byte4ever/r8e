@@ -74,6 +74,11 @@ type Hooks struct {
 	// the consecutive-failure trip. OnCircuitOpen also fires for the same
 	// transition; this hook identifies the slow-call cause specifically.
 	OnSlowCallRateExceeded func()
+
+	// OnPanic fires when [WithRecover] catches a panic from the user function,
+	// with the value that was passed to panic(). Use errors.As with *[PanicError]
+	// to obtain the full context (value + stack trace) from the returned error.
+	OnPanic func(value any)
 }
 
 // Each emit method guards both a nil receiver and a nil field, so a nil *Hooks
@@ -232,5 +237,11 @@ func (h *Hooks) emitThrottled() {
 func (h *Hooks) emitSlowCallRateExceeded() {
 	if h != nil && h.OnSlowCallRateExceeded != nil {
 		h.OnSlowCallRateExceeded()
+	}
+}
+
+func (h *Hooks) emitPanic(value any) {
+	if h != nil && h.OnPanic != nil {
+		h.OnPanic(value)
 	}
 }

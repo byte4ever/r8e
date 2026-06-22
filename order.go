@@ -32,6 +32,7 @@ const (
 	priorityBulkhead       = 8
 	priorityRetry          = 9
 	priorityHedge          = 10 // innermost — closest to user function
+	priorityRecover        = 11 // inside hedge so each hedge goroutine also recovers panics
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

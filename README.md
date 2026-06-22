@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 26 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 27 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -67,6 +67,7 @@ health reporting, and configuration hot-reload.
 | **Read-Through Cache** | Memoize successful results per key in the chain; fresh hits skip the chain, with stale-if-error and negative caching |
 | **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper; superseded by Read-Through Cache for chain use) |
 | **Fallback** | Static value or function fallback as last resort |
+| **Recover** | Catch panics from the user function and return them as `*PanicError`; lets retry, fallback, or circuit breaker handle them instead of crashing |
 
 Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, `Clock` for deterministic tests.
 
@@ -664,6 +665,37 @@ The three levels are: `SheddabilityNever` (bypass — critical traffic),
 adaptive throttler reads the stamp; other patterns are unaffected. See
 [`examples/29-sheddability`](examples/29-sheddability).
 
+## Recover (panic → error)
+
+`WithRecover` wraps the innermost call and converts any panic into a
+`*PanicError` value instead of propagating the panic up the call stack. The
+recovered error carries both the original panic value and the goroutine stack
+trace captured at recovery time.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithRecover(),
+    r8e.WithRetry(3, r8e.ConstantBackoff(0)),  // retry the panicking call
+    r8e.WithFallback("default"),               // or fall back on panic
+    r8e.WithHooks(&r8e.Hooks{
+        OnPanic: func(value any) { log.Printf("panic recovered: %v", value) },
+    }),
+)
+
+_, err := policy.Do(ctx, fn)
+if errors.Is(err, r8e.ErrPanic) {
+    var pe *r8e.PanicError
+    errors.As(err, &pe)
+    log.Printf("value=%v\nstack=%s", pe.Value, pe.Stack)
+}
+```
+
+`WithRecover` sits **innermost** in the chain (inside the hedge fork), so every
+hedge goroutine gets its own recovery wrapper and retry sees the recovered error.
+The `OnPanic` hook fires for each caught panic. The `PanicsRecovered` counter
+increments automatically. Standalone use: `r8e.DoRecover[T](ctx, fn, hooks)`.
+See [`examples/31-recover`](examples/31-recover).
+
 ## Error Classification
 
 Classify errors to control retry behavior:
@@ -699,7 +731,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (26): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
+Available hooks on `Hooks` (27): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -982,6 +1014,9 @@ go run ./examples/25-adaptive-throttle/
 go run ./examples/26-slow-call-breaker/
 go run ./examples/27-bulkhead-wait/
 go run ./examples/28-deadline-propagation/
+go run ./examples/29-sheddability/
+go run ./examples/30-recovery-backoff/
+go run ./examples/31-recover/
 ```
 
 ## License

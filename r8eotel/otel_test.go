@@ -139,6 +139,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.throttled", "r8e.policy.slow_call_rate_exceeded",
 		"r8e.policy.cache_hits", "r8e.policy.cache_misses",
 		"r8e.policy.cache_stores", "r8e.policy.cache_stale_served",
+		"r8e.policy.panics_recovered",
 		// Gauges.
 		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
 		"r8e.policy.bulkhead_queued", "r8e.policy.circuit_state",

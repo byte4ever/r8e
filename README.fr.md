@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 26 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 27 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -66,6 +66,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Cache read-through** | Mémoïse les résultats réussis par clé dans la chaîne ; les hits frais court-circuitent la chaîne, avec stale-if-error et negative caching |
 | **Stale Cache** | Sert la dernière valeur connue par clé en cas d'erreur (wrapper autonome ; supplanté par le Cache read-through pour l'usage en chaîne) |
 | **Fallback** | Valeur statique ou fonction de repli en dernier recours |
+| **Recover** | Intercepte les panics de la fonction utilisateur et les retourne en tant que `*PanicError` ; retry, fallback ou circuit breaker peuvent alors les gérer au lieu de crasher |
 
 Plus : ordonnancement automatique des patterns, configuration JSON, presets, santé et readiness, hooks, `Clock` pour des tests déterministes.
 
@@ -675,6 +676,38 @@ spéculatif). Seul le throttler adaptatif lit l'annotation ; les autres patterns
 ne sont pas affectés. Voir
 [`examples/29-sheddability`](examples/29-sheddability).
 
+## Récupération de panic (panic → error)
+
+`WithRecover` enveloppe l'appel le plus interne et convertit tout panic en
+valeur `*PanicError` au lieu de le propager dans la pile d'appels. L'erreur
+récupérée contient à la fois la valeur originale du panic et la trace de pile
+de la goroutine capturée au moment de la récupération.
+
+```go
+policy := r8e.NewPolicy[string]("svc",
+    r8e.WithRecover(),
+    r8e.WithRetry(3, r8e.ConstantBackoff(0)),  // réessayer l'appel qui a paniché
+    r8e.WithFallback("default"),               // ou basculer sur fallback
+    r8e.WithHooks(&r8e.Hooks{
+        OnPanic: func(value any) { log.Printf("panic récupéré : %v", value) },
+    }),
+)
+
+_, err := policy.Do(ctx, fn)
+if errors.Is(err, r8e.ErrPanic) {
+    var pe *r8e.PanicError
+    errors.As(err, &pe)
+    log.Printf("value=%v\nstack=%s", pe.Value, pe.Stack)
+}
+```
+
+`WithRecover` se positionne **le plus à l'intérieur** de la chaîne (à l'intérieur
+du fork hedge), de sorte que chaque goroutine hedge possède son propre wrapper de
+récupération et que retry voit l'erreur récupérée. Le hook `OnPanic` se déclenche
+pour chaque panic intercepté. Le compteur `PanicsRecovered` s'incrémente
+automatiquement. Usage autonome : `r8e.DoRecover[T](ctx, fn, hooks)`.
+Voir [`examples/31-recover`](examples/31-recover).
+
 ## Classification des erreurs
 
 Classifiez les erreurs pour contrôler le comportement de retry :
@@ -710,7 +743,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (26) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`.
+Hooks disponibles sur `Hooks` (27) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
@@ -993,6 +1026,9 @@ go run ./examples/25-adaptive-throttle/
 go run ./examples/26-slow-call-breaker/
 go run ./examples/27-bulkhead-wait/
 go run ./examples/28-deadline-propagation/
+go run ./examples/29-sheddability/
+go run ./examples/30-recovery-backoff/
+go run ./examples/31-recover/
 ```
 
 ## Licence

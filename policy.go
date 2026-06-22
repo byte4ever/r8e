@@ -96,6 +96,9 @@ type (
 		// propagateDeadline requests a hard clock-driven deadline derived from
 		// the time budget (see PropagateDeadline); ignored without timeBudget.
 		propagateDeadline bool
+		// panicRecover, when true, adds the innermost recover middleware that
+		// catches panics and converts them to *PanicError (see WithRecover).
+		panicRecover bool
 	}
 
 	// retryDesc holds deferred retry configuration.
@@ -381,6 +384,24 @@ func WithHedge(delay time.Duration) Option {
 	})
 }
 
+// WithRecover adds panic recovery: if the user function (or any inner pattern)
+// panics, the panic is caught and returned as a *[PanicError] instead of
+// crashing the process. The recovered value, a goroutine stack trace, and the
+// [Hooks.OnPanic] hook are all available to callers. Use errors.Is(err,
+// [ErrPanic]) to detect it and errors.As to inspect the full *[PanicError].
+//
+// Recovery sits innermost in the chain (priority > hedge), so each goroutine
+// spawned by hedge also gets its own recovery wrapper. When paired with
+// [WithRetry], a recovered panic becomes an error that retry can retry — useful
+// for intermittent panics caused by race conditions or nil-pointer bugs that a
+// retry might avoid. Pair it with [WithFallback] to return a safe default on
+// unrecoverable panics.
+func WithRecover() Option {
+	return optionFunc(func(s *policySetup) {
+		s.panicRecover = true
+	})
+}
+
 // WithCoalesce adds request coalescing (singleflight): concurrent calls for
 // which keyFn returns the same non-empty key collapse into a single shared
 // execution, and every caller receives that one result (see [Coalescer]). keyFn
@@ -581,6 +602,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
 		entries = append(entries, newHedgeEntry[T](hedgeCell, &hooks, clock))
+	}
+
+	if setup.panicRecover {
+		entries = append(entries, newRecoverEntry[T](&hooks))
 	}
 
 	if setup.cache != nil {

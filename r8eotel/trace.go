@@ -144,6 +144,8 @@ func rejectionReason(err error) string {
 		return "time_budget_exceeded"
 	case errors.Is(err, r8e.ErrRetriesExhausted):
 		return "retries_exhausted"
+	case errors.Is(err, r8e.ErrPanic):
+		return "panic_recovered"
 	default:
 		return "error"
 	}
