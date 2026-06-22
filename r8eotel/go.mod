@@ -3,7 +3,7 @@ module github.com/byte4ever/r8e/r8eotel
 go 1.25.11
 
 require (
-	github.com/byte4ever/r8e v0.6.0
+	github.com/byte4ever/r8e v0.7.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
