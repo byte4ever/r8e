@@ -117,6 +117,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CacheStores })
 	builder.counter("r8e.policy.cache_stale_served", "Stale values served after a downstream failure",
 		func(m *r8e.PolicyMetrics) int64 { return m.CacheStaleServed })
+	builder.counter("r8e.policy.cache_refreshes", "Refresh-ahead background reloads that repopulated an entry",
+		func(m *r8e.PolicyMetrics) int64 { return m.CacheRefreshes })
 	builder.counter("r8e.policy.panics_recovered", "Panics caught by WithRecover and returned as errors",
 		func(m *r8e.PolicyMetrics) int64 { return m.PanicsRecovered })
 	builder.counter("r8e.policy.concurrency_budget_exceeded", "Retries/hedges shed by the concurrency budget",

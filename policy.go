@@ -516,15 +516,18 @@ func WithCoalesce(keyFn func(context.Context) string) Option {
 // burst of concurrent misses on a hot key into one downstream call.
 //
 // The underlying [Cache] is parameterised by [CacheEntry], e.g.
-// otter.MustNew[string, r8e.CacheEntry[T]](cfg). Configure stale-if-error and
-// negative caching with [StaleIfError] and [NegativeCache], and bust a single
-// call's cache read with [ForceRefresh]. Because the cache and keyFn are code,
-// caching is code-only — it is deliberately absent from [PolicyConfig],
-// [BuildOptions], and [Policy.Reconfigure], like [WithCoalesce].
+// otter.MustNew[string, r8e.CacheEntry[T]](cfg). Configure stale-if-error,
+// negative caching, and refresh-ahead with [StaleIfError], [NegativeCache], and
+// [RefreshAhead], and bust a single call's cache read with [ForceRefresh].
+// Because the cache and keyFn are code, caching is code-only — it is
+// deliberately absent from [PolicyConfig], [BuildOptions], and
+// [Policy.Reconfigure], like [WithCoalesce].
 //
 // A nil keyFn, a nil cache, or a non-positive ttl are misconfigurations:
 // [NewPolicy] panics with [ErrCacheNilKeyFunc], [ErrCacheNilCache], or
-// [ErrCacheNonPositiveTTL] respectively.
+// [ErrCacheNonPositiveTTL] respectively. With [RefreshAhead] set, the policy
+// must also have a [WithTimeout] to bound the detached background reload, else
+// [NewPolicy] panics with [ErrRefreshAheadWithoutTimeout].
 func WithCache[T any](
 	cache Cache[string, CacheEntry[T]],
 	keyFn func(context.Context) string,
@@ -838,6 +841,12 @@ func checkSetupInvariants(setup *policySetup) error {
 		if setup.cache.ttl <= 0 {
 			return ErrCacheNonPositiveTTL
 		}
+
+		// Refresh-ahead reloads run detached (deadline stripped), so they need an
+		// inner timeout to bound them — exactly like coalescing's shared call.
+		if setup.timeout == nil && setup.cache.refreshAheadEnabled() {
+			return ErrRefreshAheadWithoutTimeout
+		}
 	}
 
 	// The bulkhead and the adaptive limiter both drive the concurrency slot;
@@ -1132,6 +1141,25 @@ func newAdaptiveHedgeEntry[T any](
 			}
 		},
 	}
+}
+
+// refreshAheadEnabled reports whether the cache's [CacheOption] values turn on
+// refresh-ahead in a way that can actually fire a detached reload — i.e. a
+// positive refresh threshold strictly inside the fresh ttl. This is exactly the
+// window classify can return entryRefreshAhead for: a threshold at or beyond ttl
+// leaves the feature inert (no in-fresh-window read is ever old enough), so it
+// does not demand a timeout. The opts are opaque setters, so it resolves them
+// onto a throwaway cacheOptions and inspects the result; this runs once at
+// construction, off the hot path, and is harmless to repeat (every CacheOption
+// is a pure, independent field setter). Only ever called for a non-nil
+// descriptor (see checkSetupInvariants).
+func (d *cacheDesc) refreshAheadEnabled() bool {
+	var cfg cacheOptions
+	for _, opt := range d.opts {
+		opt(&cfg)
+	}
+
+	return cfg.refreshTTL > 0 && cfg.refreshTTL < d.ttl
 }
 
 // newCacheEntry builds the read-through-cache middleware. It asserts the erased

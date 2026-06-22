@@ -65,7 +65,7 @@ health reporting, and configuration hot-reload.
 | **Adaptive Throttle** | Probabilistic client-side load shedding by the live accept/request ratio (Google SRE), before the breaker trips |
 | **Hedged Requests** | Fire a second call after a delay to reduce tail latency |
 | **Request Coalescing** | Collapse concurrent identical calls into one shared execution (singleflight), killing cache stampede |
-| **Read-Through Cache** | Memoize successful results per key in the chain; fresh hits skip the chain, with stale-if-error and negative caching |
+| **Read-Through Cache** | Memoize successful results per key in the chain; fresh hits skip the chain, with refresh-ahead, stale-if-error and negative caching |
 | **Stale Cache** | Serve last-known-good value per key on failure (standalone wrapper; superseded by Read-Through Cache for chain use) |
 | **Fallback** | Static value or function fallback as last resort |
 | **Recover** | Catch panics from the user function and return them as `*PanicError`; lets retry, fallback, or circuit breaker handle them instead of crashing |
@@ -596,6 +596,7 @@ policy := r8e.NewPolicy[string]("catalog",
     r8e.WithCache(cache, keyFromCtx, 30*time.Second,
         r8e.StaleIfError(5*time.Minute),     // serve stale on error past the TTL
         r8e.NegativeCache(2*time.Second),    // briefly cache failures too
+        r8e.RefreshAhead(25*time.Second),    // reload hot keys before they expire
     ),
     r8e.WithCoalesce(keyFromCtx),            // collapse the miss stampede
     r8e.WithTimeout(time.Second),
@@ -608,9 +609,21 @@ to carry each entry's age and any recorded error), so build the adapter with
 `Clock`, not the backing cache's own expiry, so it stays deterministic under a
 fake clock.
 
-It unifies three behaviours behind one option:
+It unifies four behaviours behind one option:
 
 - **Read-through** — within the fresh TTL, a hit skips the downstream entirely.
+- **Refresh-ahead** (`RefreshAhead`) — a hit landing in the tail of the fresh
+  window (past the refresh threshold but still fresh) is served immediately and
+  additionally kicks off a single coalesced background reload, so a hot key keeps
+  serving fresh hits instead of falling through to a synchronous miss at expiry
+  (Caffeine `refreshAfterWrite`). The reload runs detached (the caller is not
+  blocked) and is deduplicated per key; a failed reload is best-effort (the current
+  entry is kept and the next in-window read retries), a successful one fires
+  `OnCacheRefreshed`. Because the detached reload loses the caller's deadline, a
+  policy whose threshold actually fires must also have a `WithTimeout` to bound it
+  (`ErrRefreshAheadWithoutTimeout` otherwise); standalone, bound the loader
+  yourself. Set the threshold shorter than the fresh TTL; at or beyond it,
+  refresh-ahead is inert (and needs no timeout).
 - **Stale-if-error** (`StaleIfError`) — past the fresh TTL a value lingers as a
   stale fallback for the given duration. A call in the stale window re-executes to
   refresh, but if that fails the stale value is served instead of the error
@@ -628,11 +641,13 @@ are code, caching is code-only — it is deliberately absent from `PolicyConfig`
 `BuildOptions`, and `Reconfigure`, exactly like coalescing.
 
 Observability: the `OnCacheHit` / `OnCacheMiss` / `OnCacheStored` / `OnStaleServed`
-hooks and the `CacheHits` / `CacheMisses` / `CacheStores` / `CacheStaleServed`
-counters (hits/(hits+misses) is the hit ratio). Caching is a healthy optimisation,
-so it has no health condition — only metrics. A `ReadThroughCache` can also be used
-standalone via `r8e.NewReadThroughCache` (configure clock and hooks with
-`CacheClock` / `CacheHooks`). See [`examples/24-read-through-cache`](examples/24-read-through-cache).
+/ `OnCacheRefreshed` hooks and the `CacheHits` / `CacheMisses` / `CacheStores` /
+`CacheStaleServed` / `CacheRefreshes` counters (hits/(hits+misses) is the hit
+ratio). Caching is a healthy optimisation, so it has no health condition — only
+metrics. A `ReadThroughCache` can also be used standalone via
+`r8e.NewReadThroughCache` (configure clock and hooks with `CacheClock` /
+`CacheHooks`). See [`examples/24-read-through-cache`](examples/24-read-through-cache)
+and [`examples/38-cache-refresh-ahead`](examples/38-cache-refresh-ahead).
 
 ## Request Coalescing
 
@@ -896,7 +911,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (30): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Available hooks on `Hooks` (31): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 

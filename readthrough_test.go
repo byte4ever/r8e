@@ -72,15 +72,16 @@ func (c *memCache[V]) lastTTL(key string) time.Duration {
 // cacheCounters tallies the read-through hooks so tests can assert which events
 // fired without caring about ordering.
 type cacheCounters struct {
-	hits, misses, stores, stale atomic.Int64
+	hits, misses, stores, stale, refreshed atomic.Int64
 }
 
 func (c *cacheCounters) hooks() *Hooks {
 	return &Hooks{
-		OnCacheHit:    func() { c.hits.Add(1) },
-		OnCacheMiss:   func() { c.misses.Add(1) },
-		OnCacheStored: func() { c.stores.Add(1) },
-		OnStaleServed: func() { c.stale.Add(1) },
+		OnCacheHit:       func() { c.hits.Add(1) },
+		OnCacheMiss:      func() { c.misses.Add(1) },
+		OnCacheStored:    func() { c.stores.Add(1) },
+		OnStaleServed:    func() { c.stale.Add(1) },
+		OnCacheRefreshed: func() { c.refreshed.Add(1) },
 	}
 }
 
@@ -768,4 +769,287 @@ func TestWithCacheTypeMismatchPanics(t *testing.T) {
 	assert.Panics(t, func() {
 		NewPolicy[int]("", WithCache(cache, keyFn, cacheTTL))
 	})
+}
+
+// ---------------------------------------------------------------------------
+// ReadThroughCache.Do — refresh-ahead
+// ---------------------------------------------------------------------------
+
+// refreshAfter is the refresh-ahead threshold used by the tests: well inside the
+// fresh cacheTTL so a clock advance can land a read in the refresh window.
+const refreshAfter = 40 * time.Second
+
+// signalRefreshed wraps a cacheCounters' hooks so the test can block until a
+// background refresh has repopulated the entry (the deterministic barrier for
+// the detached reload goroutine — it fires only after the successful store).
+func signalRefreshed(ctr *cacheCounters) (*Hooks, <-chan struct{}) {
+	done := make(chan struct{}, 1)
+	hooks := ctr.hooks()
+	tally := hooks.OnCacheRefreshed
+	hooks.OnCacheRefreshed = func() {
+		tally()
+		done <- struct{}{}
+	}
+
+	return hooks, done
+}
+
+func TestReadThroughRefreshAheadServesAndReloads(t *testing.T) {
+	t.Parallel()
+
+	cache := newMemCache[CacheEntry[string]]()
+	ctr := &cacheCounters{}
+	hooks, refreshed := signalRefreshed(ctr)
+	clk := newPolicyClock()
+	rc := newStringRTC(cache, clk, hooks, RefreshAhead(refreshAfter))
+
+	var calls atomic.Int64
+
+	// Miss populates the entry at t0.
+	got, err := rc.Do(context.Background(), "k", constFn("v1", &calls))
+	require.NoError(t, err)
+	assert.Equal(t, "v1", got)
+
+	// Age into the refresh-ahead window: still fresh, but past the threshold.
+	clk.advance(45 * time.Second)
+
+	// The read serves the current (still fresh) value immediately and kicks off a
+	// detached background reload that produces v2.
+	got, err = rc.Do(context.Background(), "k", constFn("v2", &calls))
+	require.NoError(t, err)
+	assert.Equal(t, "v1", got,
+		"refresh-ahead serves the current value, not the reloaded one")
+
+	<-refreshed // wait for the detached reload to repopulate the entry
+
+	// The reload reset the store time, so the entry is fresh again at v2.
+	got, err = rc.Do(context.Background(), "k", constFn("v3", &calls))
+	require.NoError(t, err)
+	assert.Equal(t, "v2", got, "the next read sees the refreshed value as a fresh hit")
+
+	assert.Equal(t, int64(2), calls.Load(),
+		"miss + one background reload; the final read is a hit")
+	assert.Equal(t, int64(1), ctr.refreshed.Load())
+	assert.Equal(t, int64(2), ctr.stores.Load(), "the refresh also counts as a store")
+	assert.GreaterOrEqual(t, ctr.hits.Load(), int64(2))
+}
+
+func TestReadThroughRefreshAheadDedupesConcurrentReloads(t *testing.T) {
+	t.Parallel()
+
+	const readers = 12
+
+	cache := newMemCache[CacheEntry[string]]()
+	ctr := &cacheCounters{}
+	hooks, refreshed := signalRefreshed(ctr)
+	clk := newPolicyClock()
+	rc := newStringRTC(cache, clk, hooks, RefreshAhead(refreshAfter))
+
+	// Seed the entry, then age into the refresh window.
+	_, err := rc.Do(context.Background(), "k", constFn("v1", new(atomic.Int64)))
+	require.NoError(t, err)
+	clk.advance(45 * time.Second)
+
+	// The reload blocks until released, so the winning reload stays in flight
+	// while every reader piles on.
+	g := newGate()
+
+	var served sync.WaitGroup
+
+	for range readers {
+		served.Add(1)
+
+		go func() {
+			defer served.Done()
+
+			got, doErr := rc.Do(context.Background(), "k", g.fn("v2"))
+			assert.NoError(t, doErr)
+			assert.Equal(t, "v1", got) // every reader is served the current value
+		}()
+	}
+
+	served.Wait() // all readers returned without waiting for the reload
+
+	// Exactly one reader won the refresh slot and entered the (blocked) reload;
+	// the others saw the slot held and skipped.
+	<-g.started
+	assert.Empty(t, g.started, "only one reload runs despite the concurrent readers")
+	assert.Equal(t, int64(1), g.calls.Load())
+
+	close(g.release)
+	<-refreshed
+	assert.Equal(t, int64(1), ctr.refreshed.Load())
+}
+
+func TestReadThroughRefreshAheadKeepsEntryOnReloadError(t *testing.T) {
+	t.Parallel()
+
+	cache := newMemCache[CacheEntry[string]]()
+	ctr := &cacheCounters{}
+	clk := newPolicyClock()
+	rc := newStringRTC(cache, clk, ctr.hooks(), RefreshAhead(refreshAfter))
+
+	var calls atomic.Int64
+
+	_, err := rc.Do(context.Background(), "k", constFn("v1", &calls))
+	require.NoError(t, err)
+	clk.advance(45 * time.Second)
+
+	// The reload fails: the current entry must be kept and nothing stored.
+	reloadDone := make(chan struct{})
+	failing := func(context.Context) (string, error) {
+		calls.Add(1)
+		close(reloadDone)
+
+		return "", errDownstream
+	}
+
+	got, err := rc.Do(context.Background(), "k", failing)
+	require.NoError(t, err)
+	assert.Equal(t, "v1", got)
+
+	<-reloadDone // the background reload has run and returned its error
+
+	// The err != nil path in refresh() returns before reaching store(), so a
+	// failed reload can never write: the entry is untouched and no store/refresh
+	// was recorded. (This holds by the short-circuit, not by reloadDone ordering;
+	// the slot-release barrier below is the synchronised post-condition.)
+	entry, ok := cache.Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "v1", entry.value)
+	require.NoError(t, entry.err)
+	assert.Equal(t, int64(0), ctr.refreshed.Load(), "a failed reload fires no refresh hook")
+	assert.Equal(t, int64(1), ctr.stores.Load(), "a failed reload stores nothing")
+	assert.Equal(t, int64(2), calls.Load(), "miss + the failed reload both executed")
+
+	// The slot is released even on failure, so a later in-window read can retry.
+	require.Eventually(t, func() bool {
+		rc.refreshMu.Lock()
+		defer rc.refreshMu.Unlock()
+
+		_, busy := rc.refreshing["k"]
+
+		return !busy
+	}, waitTimeout, waitTick)
+}
+
+func TestReadThroughRefreshSlotDedup(t *testing.T) {
+	t.Parallel()
+
+	cache := newMemCache[CacheEntry[string]]()
+	rc := newStringRTC(cache, newPolicyClock(), &Hooks{})
+
+	assert.True(t, rc.beginRefresh("k"), "first claim wins the slot")
+	assert.False(t, rc.beginRefresh("k"), "second claim sees the slot held")
+	rc.endRefresh("k")
+	assert.True(t, rc.beginRefresh("k"), "after release the slot is claimable again")
+	rc.endRefresh("k")
+}
+
+func TestReadThroughRefreshAheadInertWhenThresholdBeyondTTL(t *testing.T) {
+	t.Parallel()
+
+	cache := newMemCache[CacheEntry[string]]()
+	ctr := &cacheCounters{}
+	clk := newPolicyClock()
+	// The refresh threshold sits past the fresh TTL, so no in-fresh read is ever
+	// old enough to trigger a reload — refresh-ahead is effectively disabled.
+	rc := newStringRTC(cache, clk, ctr.hooks(), RefreshAhead(2*cacheTTL))
+
+	var calls atomic.Int64
+
+	_, err := rc.Do(context.Background(), "k", constFn("v1", &calls))
+	require.NoError(t, err)
+
+	clk.advance(50 * time.Second) // still fresh (<cacheTTL), below the threshold
+	got, err := rc.Do(context.Background(), "k", constFn("v2", &calls))
+	require.NoError(t, err)
+	assert.Equal(t, "v1", got)
+
+	assert.Equal(t, int64(1), calls.Load(),
+		"a threshold beyond the fresh TTL never triggers a reload")
+	assert.Equal(t, int64(0), ctr.refreshed.Load())
+}
+
+func TestWithCacheRefreshAheadRequiresTimeout(t *testing.T) {
+	t.Parallel()
+
+	cache := newMemCache[CacheEntry[string]]()
+	keyFn := func(context.Context) string { return "k" }
+
+	// RefreshAhead without a timeout to bound the detached reload is rejected.
+	assert.PanicsWithValue(t, ErrRefreshAheadWithoutTimeout, func() {
+		NewPolicy[string](
+			"",
+			WithCache(cache, keyFn, cacheTTL, RefreshAhead(refreshAfter)),
+		)
+	})
+
+	// With a timeout, the policy builds.
+	assert.NotPanics(t, func() {
+		NewPolicy[string](
+			"",
+			WithCache(cache, keyFn, cacheTTL, RefreshAhead(refreshAfter)),
+			WithTimeout(time.Second),
+		)
+	})
+
+	// An inert threshold (>= ttl) can never fire a reload, so it does NOT demand a
+	// timeout — the invariant matches classify's actual trigger condition.
+	assert.NotPanics(t, func() {
+		NewPolicy[string](
+			"",
+			WithCache(cache, keyFn, cacheTTL, RefreshAhead(cacheTTL)),
+		)
+	})
+
+	// Plain caching (refresh-ahead disabled) needs no timeout.
+	assert.NotPanics(t, func() {
+		NewPolicy[string]("", WithCache(cache, keyFn, cacheTTL))
+	})
+}
+
+func TestPolicyCacheRefreshAhead(t *testing.T) {
+	t.Parallel()
+
+	cache := newMemCache[CacheEntry[string]]()
+	keyFn := func(context.Context) string { return "k" }
+	clk := newPolicyClock()
+	refreshed := make(chan struct{}, 1)
+	hooks := &Hooks{OnCacheRefreshed: func() { refreshed <- struct{}{} }}
+
+	p := NewPolicy[string](
+		"",
+		WithCache(cache, keyFn, cacheTTL, RefreshAhead(refreshAfter)),
+		WithTimeout(10*time.Second),
+		WithClock(clk),
+		WithHooks(hooks),
+	)
+
+	var calls atomic.Int64
+
+	mk := func(val string) func(context.Context) (string, error) {
+		return func(context.Context) (string, error) {
+			calls.Add(1)
+
+			return val, nil
+		}
+	}
+
+	got, err := p.Do(context.Background(), mk("v1"))
+	require.NoError(t, err)
+	assert.Equal(t, "v1", got)
+
+	clk.advance(45 * time.Second)
+	got, err = p.Do(context.Background(), mk("v2"))
+	require.NoError(t, err)
+	assert.Equal(t, "v1", got, "the read serves the current value")
+
+	<-refreshed // the detached reload ran through the inner timeout and stored
+	assert.Equal(t, int64(1), p.Metrics().CacheRefreshes)
+
+	got, err = p.Do(context.Background(), mk("v3"))
+	require.NoError(t, err)
+	assert.Equal(t, "v2", got, "the refreshed value is served on the next read")
+	assert.Equal(t, int64(2), calls.Load(), "miss + one background reload")
 }

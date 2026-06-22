@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -14,10 +15,17 @@ type (
 	// ReadThroughCache memoizes successful results of a keyed call. On a fresh
 	// hit it short-circuits the work entirely and returns the cached value; on a
 	// miss it executes the work and caches a successful result for the TTL. It
-	// unifies three caching behaviours behind one type:
+	// unifies four caching behaviours behind one type:
 	//
 	//   - Read-through: within the fresh TTL, a hit returns the cached value
 	//     without executing the downstream work at all.
+	//   - Refresh-ahead: with [RefreshAhead] set, a hit landing in the tail of the
+	//     fresh window (past refreshTTL but still fresh) is served immediately and
+	//     additionally kicks off a single, coalesced background reload that
+	//     repopulates the entry before it expires — so a hot key keeps serving
+	//     fresh hits rather than falling through to a synchronous miss at expiry
+	//     (Caffeine refreshAfterWrite semantics; see [RefreshAhead] for the
+	//     timing caveats).
 	//   - Stale-if-error: with [StaleIfError] set, a value lingers past its fresh
 	//     TTL as a stale fallback. A call landing in the stale window re-executes
 	//     to refresh, but if that execution fails the stale value is served
@@ -35,10 +43,14 @@ type (
 	// metadata — store time and any recorded error — that distinguishes a fresh
 	// hit, a stale fallback, and a negative entry.
 	//
-	// Revalidation runs synchronously in the caller's path under the caller's
-	// context (it is not detached, unlike [Coalescer]); pair the cache with
-	// [WithCoalesce] so a burst of concurrent misses or stale revalidations for a
-	// hot key collapses into a single downstream call rather than a stampede.
+	// Miss and stale revalidation run synchronously in the caller's path under
+	// the caller's context (not detached, unlike [Coalescer]); pair the cache
+	// with [WithCoalesce] so a burst of concurrent misses or stale revalidations
+	// for a hot key collapses into a single downstream call rather than a
+	// stampede. A [RefreshAhead] reload is the exception: it runs in a detached
+	// background goroutine (deadline stripped, like [Coalescer]) and is
+	// deduplicated internally so only one reload per key is ever in flight; within
+	// a [Policy] [WithCache] requires a [WithTimeout] to bound that detached call.
 	//
 	// Construct one with [NewReadThroughCache]; it is safe for concurrent use as
 	// long as the underlying [Cache] is. For a simpler standalone (non-[Policy])
@@ -49,12 +61,15 @@ type (
 	// cache itself populates on miss by invoking the wrapped work, so callers
 	// never see the loader directly.
 	ReadThroughCache[T any] struct {
-		cache    Cache[string, CacheEntry[T]]
-		hooks    *Hooks
-		clock    Clock
-		freshTTL time.Duration
-		staleTTL time.Duration
-		negTTL   time.Duration
+		cache      Cache[string, CacheEntry[T]]
+		hooks      *Hooks
+		clock      Clock
+		refreshing map[string]struct{}
+		freshTTL   time.Duration
+		staleTTL   time.Duration
+		negTTL     time.Duration
+		refreshTTL time.Duration
+		refreshMu  sync.Mutex
 	}
 
 	// CacheEntry wraps a cached value with the metadata [ReadThroughCache] needs
@@ -84,10 +99,11 @@ type (
 	// corresponding behaviour); clock and hooks default to [RealClock] and the
 	// no-op zero [Hooks] in [NewReadThroughCache].
 	cacheOptions struct {
-		clock    Clock
-		hooks    *Hooks
-		staleTTL time.Duration
-		negTTL   time.Duration
+		clock      Clock
+		hooks      *Hooks
+		staleTTL   time.Duration
+		negTTL     time.Duration
+		refreshTTL time.Duration
 	}
 
 	// forceRefreshKey is the private context key under which [ForceRefresh] marks
@@ -106,6 +122,10 @@ const (
 	entryMiss entryState = iota
 	// entryFresh means a success entry within its fresh TTL — a read-through hit.
 	entryFresh
+	// entryRefreshAhead means a success entry still within its fresh TTL but past
+	// its refresh threshold (see [RefreshAhead]): served as a hit, and triggers a
+	// single coalesced background reload to repopulate it before it expires.
+	entryRefreshAhead
 	// entryStale means a success entry past its fresh TTL but within the stale
 	// window — revalidate, and serve it if revalidation fails.
 	entryStale
@@ -121,6 +141,44 @@ const (
 func StaleIfError(staleTTL time.Duration) CacheOption {
 	return func(o *cacheOptions) {
 		o.staleTTL = staleTTL
+	}
+}
+
+// RefreshAhead enables refresh-ahead (Caffeine refreshAfterWrite semantics): a
+// hit whose age has passed refreshTTL but is still within the fresh TTL is
+// served immediately and additionally triggers a single background reload that
+// repopulates the entry before it expires, so a hot key keeps serving fresh
+// hits rather than falling through to a synchronous miss when the entry expires.
+// The reload runs in a detached goroutine (the triggering caller is not blocked)
+// and is deduplicated per key, so a burst of reads in the refresh window starts
+// at most one reload. A failed reload is best-effort: the current entry is kept
+// and the next read in the window retries; a successful reload fires
+// OnCacheRefreshed (and counts as a store).
+//
+// The reload pre-empts a miss only when it finishes before the entry leaves the
+// fresh window; with a slow reload (or a refresh threshold close to ttl) a read
+// can still reach a stale revalidation or a synchronous miss while the reload is
+// in flight, and the dedup covers only refresh-vs-refresh, not a refresh racing
+// a concurrent miss or [ForceRefresh]. Because the reload stores with its own
+// completion time, a slow reload returning an older value can also overwrite a
+// newer one written by a concurrent [ForceRefresh] in that window (last write by
+// store time wins).
+//
+// The detached reload's deadline is stripped, so it must be bounded some other
+// way. Within a [Policy] this is enforced: [WithCache] with a firing refresh
+// threshold requires a [WithTimeout] (the inner timeout bounds the reload), else
+// [NewPolicy] panics with [ErrRefreshAheadWithoutTimeout]. Used standalone via
+// [NewReadThroughCache], it is the caller's responsibility to give the loader a
+// deadline — an unbounded loader that never returns parks the reload goroutine
+// and wedges that key's refresh slot.
+//
+// refreshTTL should be shorter than the fresh ttl; a non-positive refreshTTL, or
+// one at or beyond ttl, leaves refresh-ahead disabled (no in-fresh-window read
+// can ever be old enough to trigger it, and within a [Policy] such an inert
+// configuration does not demand a [WithTimeout]).
+func RefreshAhead(refreshTTL time.Duration) CacheOption {
+	return func(o *cacheOptions) {
+		o.refreshTTL = refreshTTL
 	}
 }
 
@@ -192,12 +250,14 @@ func NewReadThroughCache[T any](
 	}
 
 	return &ReadThroughCache[T]{
-		cache:    cache,
-		hooks:    cfg.hooks,
-		clock:    cfg.clock,
-		freshTTL: ttl,
-		staleTTL: cfg.staleTTL,
-		negTTL:   cfg.negTTL,
+		cache:      cache,
+		hooks:      cfg.hooks,
+		clock:      cfg.clock,
+		refreshing: make(map[string]struct{}),
+		freshTTL:   ttl,
+		staleTTL:   cfg.staleTTL,
+		negTTL:     cfg.negTTL,
+		refreshTTL: cfg.refreshTTL,
 	}
 }
 
@@ -205,7 +265,9 @@ func NewReadThroughCache[T any](
 // opts the call out of caching entirely — next runs and nothing is cached.
 //
 // On a fresh hit (or a valid negative entry) Do returns the cached outcome
-// without calling next. Otherwise it executes next and: on success caches and
+// without calling next. A fresh hit in the refresh-ahead window (see
+// [RefreshAhead]) additionally kicks off a single detached background reload of
+// next before returning. Otherwise it executes next and: on success caches and
 // returns the result; on error serves a stale value if one is available (see
 // [StaleIfError]), else caches the error if negative caching is enabled (see
 // [NegativeCache]) and returns it.
@@ -235,6 +297,11 @@ func (rc *ReadThroughCache[T]) Do(
 			return zero, entry.err //nolint:wrapcheck // recorded error replayed as-is
 		case entryFresh: // fresh success: short-circuit
 			rc.hooks.emitCacheHit()
+
+			return entry.value, nil
+		case entryRefreshAhead: // fresh but ageing: serve now, refresh in background
+			rc.hooks.emitCacheHit()
+			rc.triggerRefresh(ctx, key, next)
 
 			return entry.value, nil
 		case entryStale: // stale success: revalidate with stale fallback
@@ -289,6 +356,10 @@ func (rc *ReadThroughCache[T]) classify(key string) (CacheEntry[T], entryState) 
 
 		return entry, entryMiss
 	case age < rc.freshTTL:
+		if rc.refreshTTL > 0 && age >= rc.refreshTTL {
+			return entry, entryRefreshAhead
+		}
+
 		return entry, entryFresh
 	case age < rc.freshTTL+rc.staleTTL:
 		return entry, entryStale
@@ -319,4 +390,75 @@ func (rc *ReadThroughCache[T]) storeNegative(key string, callErr error) {
 		CacheEntry[T]{err: callErr, storedAt: rc.clock.Now()},
 		rc.negTTL,
 	)
+}
+
+// triggerRefresh starts a background reload of key if one is not already in
+// flight (see [RefreshAhead]). It is fire-and-forget: the triggering caller has
+// already been served the still-fresh value and does not wait for the reload.
+func (rc *ReadThroughCache[T]) triggerRefresh(
+	ctx context.Context,
+	key string,
+	next func(context.Context) (T, error),
+) {
+	if !rc.beginRefresh(key) {
+		return // a reload for this key is already running — dedup the stampede
+	}
+
+	go rc.refresh(ctx, key, next)
+}
+
+// beginRefresh claims the sole refresh slot for key, reporting whether this
+// caller won it. Only the winner spawns the reload goroutine; concurrent
+// callers in the refresh window see the key already claimed and skip, so at most
+// one reload per key is ever in flight.
+func (rc *ReadThroughCache[T]) beginRefresh(key string) bool {
+	rc.refreshMu.Lock()
+	defer rc.refreshMu.Unlock()
+
+	if _, refreshing := rc.refreshing[key]; refreshing {
+		return false
+	}
+
+	rc.refreshing[key] = struct{}{}
+
+	return true
+}
+
+// endRefresh releases key's refresh slot so a later read in the refresh window
+// can trigger a fresh reload.
+func (rc *ReadThroughCache[T]) endRefresh(key string) {
+	rc.refreshMu.Lock()
+	delete(rc.refreshing, key)
+	rc.refreshMu.Unlock()
+}
+
+// refresh runs the background reload for key and repopulates the cache on
+// success. It executes next under a context detached from the triggering caller
+// (cancellation and deadline stripped, values preserved) so the caller leaving
+// cannot abort the shared refresh — the inner [WithTimeout] the [Policy] requires
+// bounds it instead. A failed reload is best-effort: the current entry is left
+// untouched (its store time unchanged, so the next in-window read retries) and
+// no error is surfaced. A successful reload stores the value (firing
+// OnCacheStored) and fires OnCacheRefreshed.
+//
+// The deferred endRefresh always releases the slot, so even a panic in next
+// cannot wedge the key. The panic itself is NOT recovered here (a panic in user
+// code is a caller bug, as everywhere else in this package): after the slot is
+// released it propagates out of this detached goroutine and crashes the process,
+// unless an inner [WithRecover] stage — which sits inside the cache and so wraps
+// next — has already converted it to an error.
+func (rc *ReadThroughCache[T]) refresh(
+	parent context.Context,
+	key string,
+	next func(context.Context) (T, error),
+) {
+	defer rc.endRefresh(key)
+
+	result, err := next(context.WithoutCancel(parent))
+	if err != nil {
+		return // keep the current entry; a later read retries the refresh
+	}
+
+	rc.store(key, result)
+	rc.hooks.emitCacheRefreshed()
 }

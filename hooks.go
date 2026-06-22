@@ -57,6 +57,10 @@ type Hooks struct {
 	// OnStaleServed fires when a downstream execution fails and the read-through
 	// cache serves a stale value instead of the error (see [StaleIfError]).
 	OnStaleServed func()
+	// OnCacheRefreshed fires when a refresh-ahead background reload completes
+	// successfully and repopulates the entry (see [RefreshAhead]). A failed reload
+	// is silent. The successful store also fires OnCacheStored.
+	OnCacheRefreshed func()
 
 	// OnConcurrencyRejected fires when the adaptive concurrency limiter rejects a
 	// call because in-flight is at its current limit.
@@ -229,6 +233,12 @@ func (h *Hooks) emitCacheStored() {
 func (h *Hooks) emitStaleServed() {
 	if h != nil && h.OnStaleServed != nil {
 		h.OnStaleServed()
+	}
+}
+
+func (h *Hooks) emitCacheRefreshed() {
+	if h != nil && h.OnCacheRefreshed != nil {
+		h.OnCacheRefreshed()
 	}
 }
 

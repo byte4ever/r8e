@@ -69,6 +69,10 @@ type (
 		// failure (see [StaleIfError]) — a signal the downstream is failing while
 		// the cache masks it.
 		CacheStaleServed int64 `json:"cache_stale_served"`
+		// CacheRefreshes counts refresh-ahead background reloads that completed
+		// successfully and repopulated an entry before it expired (see
+		// [RefreshAhead]). Each is also counted in CacheStores.
+		CacheRefreshes int64 `json:"cache_refreshes"`
 
 		// Live gauges at snapshot time.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
@@ -184,6 +188,7 @@ type (
 		cacheMisses          atomic.Int64
 		cacheStores          atomic.Int64
 		cacheStaleServed     atomic.Int64
+		cacheRefreshes       atomic.Int64
 		panicsRecovered      atomic.Int64
 		concBudgetExceeded   atomic.Int64
 		chaosInjected        atomic.Int64
@@ -367,6 +372,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnStaleServed()
 			}
 		},
+		OnCacheRefreshed: func() {
+			m.cacheRefreshes.Add(1)
+
+			if user.OnCacheRefreshed != nil {
+				user.OnCacheRefreshed()
+			}
+		},
 		OnTimeBudgetExceeded: func() {
 			m.timeBudgetExceeded.Add(1)
 
@@ -428,6 +440,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CacheMisses:               p.metrics.cacheMisses.Load(),
 		CacheStores:               p.metrics.cacheStores.Load(),
 		CacheStaleServed:          p.metrics.cacheStaleServed.Load(),
+		CacheRefreshes:            p.metrics.cacheRefreshes.Load(),
 		PanicsRecovered:           p.metrics.panicsRecovered.Load(),
 		ConcurrencyBudgetExceeded: p.metrics.concBudgetExceeded.Load(),
 		ChaosInjected:             p.metrics.chaosInjected.Load(),

@@ -90,6 +90,18 @@ var (
 	ErrCacheNonPositiveTTL error = resilienceError(
 		"cache requires a positive TTL",
 	)
+	// ErrRefreshAheadWithoutTimeout indicates [WithCache] was configured with a
+	// firing [RefreshAhead] (a refresh threshold inside the fresh ttl) but the
+	// policy has no [WithTimeout]. The refresh-ahead reload runs in a detached
+	// background goroutine whose deadline is stripped, so it needs an inner
+	// timeout to bound it (a reload that never returns would park a goroutine and
+	// wedge the key's refresh slot). It is the value [NewPolicy] panics with for
+	// that misconfiguration. Caching is code-only (absent from [PolicyConfig]), so
+	// unlike the cross-pattern config errors this is never returned by
+	// [BuildOptions] — the config path cannot express a cache.
+	ErrRefreshAheadWithoutTimeout error = resilienceError(
+		"cache refresh-ahead requires a timeout to bound the detached reload",
+	)
 	// ErrConcurrencyLimiterConflict indicates a policy was configured with both
 	// [WithBulkhead] and [WithAdaptiveConcurrency]. Both drive the same
 	// concurrency-limiting slot, so they are mutually exclusive. It is the value

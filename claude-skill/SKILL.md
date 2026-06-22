@@ -385,7 +385,7 @@ is code), so absent from `BuildOptions`/`Reconfigure`.
 
 ```go
 r8e.WithCache[T](cache Cache[string, CacheEntry[T]], keyFn func(context.Context) string,
-    ttl time.Duration, opts ...CacheOption)   // opts: StaleIfError(d), NegativeCache(d)
+    ttl time.Duration, opts ...CacheOption)   // opts: StaleIfError(d), NegativeCache(d), RefreshAhead(d)
 ```
 
 Memoizes successful results. A **fresh hit short-circuits the whole chain**; a miss
@@ -398,17 +398,24 @@ with `WithCoalesce` to collapse the miss stampede.
 The backing `Cache` is parameterised by **`CacheEntry[T]`** (wrapper carrying age +
 recorded error), e.g. `otter.MustNew[string, r8e.CacheEntry[T]](cfg)`. Freshness
 uses the policy **`Clock`** (deterministic under a fake clock), not the cache's own
-expiry. Three behaviours: **read-through** (fresh hit), **stale-if-error**
-(`StaleIfError(d)` — past `ttl`, a value lingers `d` as a fallback; a stale call
-revalidates but serves the stale value + fires `OnStaleServed` if that fails; RFC
-5861), **negative caching** (`NegativeCache(d)` — a failure with no stale fallback
-is cached `d` so repeats fast-fail with the recorded error). `r8e.ForceRefresh(ctx)`
-bypasses the cached read for one call. Three `NewPolicy` panics: nil keyFn →
-`ErrCacheNilKeyFunc`, nil cache → `ErrCacheNilCache`, ttl ≤ 0 →
-`ErrCacheNonPositiveTTL`. Code-only (absent from `PolicyConfig`/`BuildOptions`/
-`Reconfigure`). No health condition (healthy optimisation). Standalone via
-`r8e.NewReadThroughCache[T](cache, ttl, opts...)` (set clock/hooks with
-`CacheClock`/`CacheHooks`). Supersedes the standalone `StaleCache` for in-chain use.
+expiry. Four behaviours: **read-through** (fresh hit), **refresh-ahead**
+(`RefreshAhead(d)` — a hit past `d` but still within `ttl` is served immediately AND
+kicks off a single coalesced **detached background reload** so a hot key keeps
+serving fresh hits instead of falling to a synchronous miss at expiry; Caffeine
+`refreshAfterWrite`; failed reload keeps the current entry best-effort, success fires
+`OnCacheRefreshed` + counts a store; a FIRING threshold requires a `WithTimeout` to
+bound the detached reload → `ErrRefreshAheadWithoutTimeout` (standalone: bound the
+loader yourself); inert + no-timeout-needed if `d ≥ ttl`), **stale-if-error** (`StaleIfError(d)` — past `ttl`, a value lingers
+`d` as a fallback; a stale call revalidates but serves the stale value + fires
+`OnStaleServed` if that fails; RFC 5861), **negative caching** (`NegativeCache(d)` —
+a failure with no stale fallback is cached `d` so repeats fast-fail with the
+recorded error). `r8e.ForceRefresh(ctx)` bypasses the cached read for one call.
+Three `NewPolicy` panics: nil keyFn → `ErrCacheNilKeyFunc`, nil cache →
+`ErrCacheNilCache`, ttl ≤ 0 → `ErrCacheNonPositiveTTL`. Code-only (absent from
+`PolicyConfig`/`BuildOptions`/`Reconfigure`). No health condition (healthy
+optimisation). Standalone via `r8e.NewReadThroughCache[T](cache, ttl, opts...)`
+(set clock/hooks with `CacheClock`/`CacheHooks`). Supersedes the standalone
+`StaleCache` for in-chain use.
 
 ### Fallback
 
@@ -464,6 +471,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCacheMiss:   func() {},  // no fresh value; downstream executed
     OnCacheStored: func() {},  // successful result written to cache
     OnStaleServed: func() {},  // stale value served after a downstream failure
+    OnCacheRefreshed: func() {}, // refresh-ahead background reload repopulated an entry
     OnPanic:       func(value any) {},  // panic recovered by WithRecover
     OnChaosInjected: func(kind string) {}, // chaos strategy injected (fault/latency/outcome/behavior)
 })
@@ -487,8 +495,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
 `CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `RateAdaptations`,
 `SlowCallRateExceeded`, `CacheHits`, `CacheMisses`, `CacheStores`,
-`CacheStaleServed`, `PanicsRecovered`, `ConcurrencyBudgetExceeded`,
-`ChaosInjected`) and gauges
+`CacheStaleServed`, `CacheRefreshes`, `PanicsRecovered`,
+`ConcurrencyBudgetExceeded`, `ChaosInjected`) and gauges
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `AdaptiveTimeout`,

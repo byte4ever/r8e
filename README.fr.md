@@ -64,7 +64,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Throttle adaptatif** | Délestage probabiliste côté client selon le ratio accepts/requests observé (Google SRE), avant que le breaker ne déclenche |
 | **Requêtes spéculatives** | Lance un second appel après un délai pour réduire la latence de queue |
 | **Coalescing de requêtes** | Fusionne les appels identiques concurrents en une seule exécution partagée (singleflight), éliminant le cache stampede |
-| **Cache read-through** | Mémoïse les résultats réussis par clé dans la chaîne ; les hits frais court-circuitent la chaîne, avec stale-if-error et negative caching |
+| **Cache read-through** | Mémoïse les résultats réussis par clé dans la chaîne ; les hits frais court-circuitent la chaîne, avec refresh-ahead, stale-if-error et negative caching |
 | **Stale Cache** | Sert la dernière valeur connue par clé en cas d'erreur (wrapper autonome ; supplanté par le Cache read-through pour l'usage en chaîne) |
 | **Fallback** | Valeur statique ou fonction de repli en dernier recours |
 | **Recover** | Intercepte les panics de la fonction utilisateur et les retourne en tant que `*PanicError` ; retry, fallback ou circuit breaker peuvent alors les gérer au lieu de crasher |
@@ -601,6 +601,7 @@ policy := r8e.NewPolicy[string]("catalog",
     r8e.WithCache(cache, keyFromCtx, 30*time.Second,
         r8e.StaleIfError(5*time.Minute),     // sert le périmé en cas d'erreur après le TTL
         r8e.NegativeCache(2*time.Second),    // met aussi brièvement les échecs en cache
+        r8e.RefreshAhead(25*time.Second),    // recharge les clés chaudes avant expiration
     ),
     r8e.WithCoalesce(keyFromCtx),            // fusionne la rafale de miss
     r8e.WithTimeout(time.Second),
@@ -613,9 +614,22 @@ l'adaptateur avec `r8e.CacheEntry[T]` comme type de valeur. La fraîcheur est me
 contre le `Clock` de la policy, pas contre l'expiration propre du cache : elle reste
 déterministe sous une horloge factice.
 
-Il unifie trois comportements derrière une seule option :
+Il unifie quatre comportements derrière une seule option :
 
 - **Read-through** — dans le TTL frais, un hit saute entièrement l'aval.
+- **Refresh-ahead** (`RefreshAhead`) — un hit qui tombe en fin de fenêtre fraîche
+  (au-delà du seuil de rafraîchissement mais encore frais) est servi immédiatement
+  et déclenche en plus un unique rechargement de fond coalescé, de sorte qu'une clé
+  chaude continue de servir des hits frais au lieu de retomber dans un miss
+  synchrone à l'expiration (`refreshAfterWrite` de Caffeine). Le rechargement est
+  détaché (l'appelant n'est pas bloqué) et dédoublonné par clé ; un rechargement en
+  échec est best-effort (l'entrée courante est conservée, la prochaine lecture en
+  fenêtre réessaie), un succès déclenche `OnCacheRefreshed`. Comme le rechargement
+  détaché perd la deadline de l'appelant, une policy dont le seuil se déclenche
+  réellement doit aussi avoir un `WithTimeout` pour le borner (sinon
+  `ErrRefreshAheadWithoutTimeout`) ; en usage autonome, bornez le loader vous-même.
+  Mettez le seuil plus court que le TTL frais ; au-delà ou égal, le refresh-ahead
+  est inerte (et n'exige aucun timeout).
 - **Stale-if-error** (`StaleIfError`) — après le TTL frais, une valeur subsiste
   comme repli périmé pendant la durée donnée. Un appel dans la fenêtre périmée
   ré-exécute pour rafraîchir, mais si cela échoue la valeur périmée est servie au
@@ -635,12 +649,13 @@ elle est délibérément absente de `PolicyConfig`, `BuildOptions` et `Reconfigu
 exactement comme le coalescing.
 
 Observabilité : les hooks `OnCacheHit` / `OnCacheMiss` / `OnCacheStored` /
-`OnStaleServed` et les compteurs `CacheHits` / `CacheMisses` / `CacheStores` /
-`CacheStaleServed` (hits/(hits+misses) est le taux de hit). La mise en cache est une
-optimisation saine, donc sans condition de santé — uniquement des métriques. Un
-`ReadThroughCache` peut aussi s'utiliser seul via `r8e.NewReadThroughCache`
-(configurez l'horloge et les hooks avec `CacheClock` / `CacheHooks`). Voir
-[`examples/24-read-through-cache`](examples/24-read-through-cache).
+`OnStaleServed` / `OnCacheRefreshed` et les compteurs `CacheHits` / `CacheMisses` /
+`CacheStores` / `CacheStaleServed` / `CacheRefreshes` (hits/(hits+misses) est le
+taux de hit). La mise en cache est une optimisation saine, donc sans condition de
+santé — uniquement des métriques. Un `ReadThroughCache` peut aussi s'utiliser seul
+via `r8e.NewReadThroughCache` (configurez l'horloge et les hooks avec `CacheClock` /
+`CacheHooks`). Voir [`examples/24-read-through-cache`](examples/24-read-through-cache)
+et [`examples/38-cache-refresh-ahead`](examples/38-cache-refresh-ahead).
 
 ## Coalescing de requêtes
 
@@ -914,7 +929,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (30) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Hooks disponibles sur `Hooks` (31) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
