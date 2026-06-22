@@ -2,6 +2,8 @@ package r8e
 
 import (
 	"context"
+	"encoding/binary"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -350,4 +352,109 @@ func TestPolicyMetricsLatencyEmpty(t *testing.T) {
 	assert.Zero(t, m.LatencySamples)
 	assert.Zero(t, m.LatencyP50)
 	assert.Zero(t, m.LatencyP99)
+}
+
+// FuzzLatencyIndex asserts the pure DDSketch bucket mapping over the whole int64
+// domain: index must always land in [0, size) — the property that keeps the
+// counts[idx] write in observe panic-free — and valueAt of that bucket must be a
+// finite, positive, in-range latency. Line coverage proves the clamps run; this
+// proves no boundary input (MinInt64, MaxInt64, the floor/ceiling edges) slips
+// through them.
+func FuzzLatencyIndex(f *testing.F) {
+	for _, n := range []int64{
+		math.MinInt64, -1_000_000, -1, 0, 1, minLatencyNanos, minLatencyNanos + 1,
+		1_000_000, int64(time.Second), maxLatencyNanos, maxLatencyNanos + 1, math.MaxInt64,
+	} {
+		f.Add(n)
+	}
+
+	w := newLatencyWindow(&stubClock{now: epochBase()})
+
+	f.Fuzz(func(t *testing.T, nanos int64) {
+		idx := w.index(nanos) // must not panic
+		if idx < 0 || idx >= w.size {
+			t.Fatalf("index(%d) = %d, outside [0, %d)", nanos, idx, w.size)
+		}
+
+		// valueAt over a valid bucket must be finite, positive, and no larger than
+		// the ceiling representative — an overflow in math.Pow would breach this.
+		v := w.valueAt(idx)
+		if v <= 0 || v > w.valueAt(w.size-1) {
+			t.Fatalf("valueAt(%d) = %v, outside (0, %v] (nanos=%d)",
+				idx, v, w.valueAt(w.size-1), nanos)
+		}
+	})
+}
+
+// FuzzLatencyWindow drives a fuzzed stream of call durations (and clock
+// advances) through a window and asserts the observable invariants hold for any
+// input: observe never panics, the per-bucket total == sum(counts) coupling is
+// preserved, the live sample count never exceeds what was observed, and a
+// non-empty snapshot yields finite, monotone (p50 <= p95 <= p99), in-range
+// percentiles. Mirrors FuzzAdaptiveRecompute's white-box sequence style.
+func FuzzLatencyWindow(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 10})                         // 10ns
+	f.Add([]byte{255, 255, 255, 255, 255, 255, 255, 255})          // -1ns → floor
+	f.Add([]byte{127, 255, 255, 255, 255, 255, 255, 255})          // MaxInt64 → ceiling
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 5}) // two samples
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		clk := &stubClock{now: epochBase()}
+		w := newLatencyWindow(clk)
+
+		var observed int64
+
+		for len(data) >= 8 {
+			raw := binary.BigEndian.Uint64(data[:8])
+			data = data[8:]
+
+			w.observe(time.Duration(int64(raw))) // must not panic
+			observed++
+
+			// Advance 0–3 bucket spans so rotation, reuse, and aging are exercised
+			// deterministically; bounded, so the clock cannot overflow.
+			clk.now = clk.now.Add(time.Duration(int64(raw&0x3) * w.bucketNanos))
+		}
+
+		// Structural invariant: every allocated bucket keeps total == sum(counts).
+		for i := range w.buckets {
+			bucket := &w.buckets[i]
+			if bucket.counts == nil {
+				continue
+			}
+
+			var sum int64
+			for _, c := range bucket.counts {
+				sum += c
+			}
+
+			if bucket.total != sum {
+				t.Fatalf("bucket %d: total %d != sum(counts) %d", i, bucket.total, sum)
+			}
+		}
+
+		s := w.snapshot()
+		if s.samples < 0 || s.samples > observed {
+			t.Fatalf("samples %d outside [0, %d]", s.samples, observed)
+		}
+
+		if s.samples == 0 {
+			if s.p50 != 0 || s.p95 != 0 || s.p99 != 0 {
+				t.Fatalf("empty window must report zero percentiles, got %v/%v/%v",
+					s.p50, s.p95, s.p99)
+			}
+
+			return
+		}
+
+		if s.p50 > s.p95 || s.p95 > s.p99 {
+			t.Fatalf("percentiles not monotone: p50=%v p95=%v p99=%v", s.p50, s.p95, s.p99)
+		}
+
+		if s.p50 < w.valueAt(0) || s.p99 > w.valueAt(w.size-1) {
+			t.Fatalf("percentiles outside [%v, %v]: p50=%v p99=%v",
+				w.valueAt(0), w.valueAt(w.size-1), s.p50, s.p99)
+		}
+	})
 }
