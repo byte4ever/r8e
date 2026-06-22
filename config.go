@@ -34,6 +34,10 @@ type (
 		// RateLimit is the maximum requests per second.
 		// Optional. Example: 100.
 		RateLimit *float64 `json:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`
+		// AIMD configures additive-increase / multiplicative-decrease adaptation
+		// of the rate limiter (see [AIMD]). Requires RateLimit (the starting and
+		// ceiling rate). Optional. Example: {"backoff": 0.9, "interval": "1s"}.
+		AIMD *AIMDConfig `json:"aimd,omitempty" yaml:"aimd,omitempty"`
 		// Bulkhead is the maximum concurrent requests.
 		// Optional. Example: 10.
 		Bulkhead *int `json:"bulkhead,omitempty" yaml:"bulkhead,omitempty"`
@@ -151,6 +155,29 @@ type (
 		MinRequests *int `json:"min_requests,omitempty" yaml:"min_requests,omitempty"`
 	}
 
+	// AIMDConfig holds the AIMD adaptive-rate-limiter tunables. Embed it (via
+	// [PolicyConfig.AIMD]) in your own config struct for JSON or YAML
+	// unmarshaling. The overload classifier is code-only (it cannot be expressed
+	// declaratively); the default server-overload signal is used unless one is
+	// set through the [AIMDClassifier] option.
+	AIMDConfig struct {
+		// MinRate is the rate floor the adaptation never reduces below.
+		// Optional. Default: a tenth of the ceiling rate. Example: 10.
+		MinRate *float64 `json:"min_rate,omitempty" yaml:"min_rate,omitempty"`
+		// MaxRate is the rate ceiling the adaptation never raises above.
+		// Optional. Default: the rate_limit value. Example: 100.
+		MaxRate *float64 `json:"max_rate,omitempty" yaml:"max_rate,omitempty"`
+		// Backoff is the multiplicative factor applied on overload, in (0, 1).
+		// Optional. Default: 0.9. Example: 0.8.
+		Backoff *float64 `json:"backoff,omitempty" yaml:"backoff,omitempty"`
+		// Increase is the additive step (tokens/sec) added back on a clean
+		// interval. Optional. Default: a twentieth of the ceiling rate. Example: 5.
+		Increase *float64 `json:"increase,omitempty" yaml:"increase,omitempty"`
+		// Interval is the minimum time between two rate adjustments.
+		// Optional. Parsed via time.ParseDuration. Default: "1s". Example: "500ms".
+		Interval *string `json:"interval,omitempty" yaml:"interval,omitempty"`
+	}
+
 	// RetryBudgetConfig holds retry-budget configuration values. Embed it
 	// (via [PolicyConfig]) in your own config struct for JSON or YAML
 	// unmarshaling.
@@ -229,7 +256,14 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	if pc.RateLimit != nil {
-		opts = append(opts, WithRateLimit(*pc.RateLimit))
+		rlOpts, err := rateLimitOptionsFromConfig(pc)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithRateLimit(*pc.RateLimit, rlOpts...))
+	} else if pc.AIMD != nil {
+		return nil, ErrAIMDWithoutRateLimit
 	}
 
 	if pc.Bulkhead != nil && pc.AdaptiveConcurrency != nil {
@@ -363,6 +397,57 @@ func throttleOptionsFromConfig(
 
 	if cfg.MinRequests != nil {
 		opts = append(opts, MinRequests(*cfg.MinRequests))
+	}
+
+	return opts, nil
+}
+
+// rateLimitOptionsFromConfig converts the rate-limiter fields of a
+// [PolicyConfig] into rate-limiter options, wrapping the AIMD tunables in an
+// [AIMD] option when an aimd block is present. Shared by [BuildOptions]; the
+// caller guarantees pc.RateLimit is set (AIMD without it is rejected there).
+func rateLimitOptionsFromConfig(pc *PolicyConfig) ([]RateLimitOption, error) {
+	if pc.AIMD == nil {
+		return nil, nil
+	}
+
+	aimdOpts, err := aimdOptionsFromConfig(pc.AIMD)
+	if err != nil {
+		return nil, err
+	}
+
+	return []RateLimitOption{AIMD(aimdOpts...)}, nil
+}
+
+// aimdOptionsFromConfig converts an [AIMDConfig] into AIMD options. Shared by
+// [BuildOptions] and [Policy.Reconfigure]. It returns an error only when the
+// interval string fails to parse.
+func aimdOptionsFromConfig(cfg *AIMDConfig) ([]AIMDOption, error) {
+	var opts []AIMDOption
+
+	if cfg.MinRate != nil {
+		opts = append(opts, AIMDMinRate(*cfg.MinRate))
+	}
+
+	if cfg.MaxRate != nil {
+		opts = append(opts, AIMDMaxRate(*cfg.MaxRate))
+	}
+
+	if cfg.Backoff != nil {
+		opts = append(opts, AIMDBackoff(*cfg.Backoff))
+	}
+
+	if cfg.Increase != nil {
+		opts = append(opts, AIMDIncrease(*cfg.Increase))
+	}
+
+	if cfg.Interval != nil {
+		interval, err := time.ParseDuration(*cfg.Interval)
+		if err != nil {
+			return nil, fmt.Errorf("aimd.interval: %w", err)
+		}
+
+		opts = append(opts, AIMDInterval(interval))
 	}
 
 	return opts, nil

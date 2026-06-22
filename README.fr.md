@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 27 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 28 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -203,6 +203,39 @@ policy = r8e.NewPolicy[string]("rl-blocking",
     r8e.WithRateLimit(10, r8e.RateLimitBlocking()),
 )
 ```
+
+**Débit adaptatif (AIMD).** Par défaut le débit de recharge est fixe. `AIMD(...)`
+en fait une valeur de départ et un plafond ajustés par **additive-increase /
+multiplicative-decrease** — la loi de contrôle de congestion derrière TCP. Après
+chaque appel la policy réinjecte le résultat : un résultat signalant une surcharge
+serveur multiplie le débit par `AIMDBackoff` (défaut `0.9`), tout autre résultat
+ajoute `AIMDIncrease`, et le débit reste dans `[AIMDMinRate, AIMDMaxRate]`. Au
+plus un ajustement est appliqué par `AIMDInterval` (défaut `1s`), donc une rafale
+de rejets réduit le débit une seule fois au lieu de l'effondrer.
+
+```go
+policy := r8e.NewPolicy[Response]("api",
+    r8e.WithRateLimit(100, // débit de départ et plafond
+        r8e.AIMD(
+            r8e.AIMDMinRate(10),                  // jamais sous 10/s (continuer à sonder)
+            r8e.AIMDBackoff(0.5),                 // diviser le débit par deux sur surcharge
+            r8e.AIMDIncrease(5),                  // rajouter 5/s par intervalle propre
+            r8e.AIMDInterval(time.Second),        // au plus un mouvement par seconde
+        ),
+    ),
+)
+```
+
+Par défaut un résultat est une surcharge seulement s'il est `ErrRateLimited` ou
+porte un indice serveur `Retry-After` (un HTTP 429/503 exposé via le `StatusError`
+de [`httpx`](httpx), ou tout `RetryAfterProvider`) ; une erreur métier laisse le
+débit intact. Surchargez le signal avec `AIMDClassifier(func(error) bool)`. Les
+paramètres numériques sont configurables en JSON (`AIMDConfig`, nécessite
+`rate_limit`) et rechargeables à chaud ; le classifier est code-only.
+Observabilité : le hook `OnRateAdapted` (déclenché avec le nouveau débit), le
+compteur `RateAdaptations` et la jauge `RateLimit` (le débit live). Un
+`RateLimiter` peut piloter l'AIMD en autonome via `NewRateLimiter` +
+`RecordOutcome`. Voir [`examples/32-aimd-rate-limit`](examples/32-aimd-rate-limit).
 
 ### Bulkhead
 
@@ -743,7 +776,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (27) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`.
+Hooks disponibles sur `Hooks` (28) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnPanic`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 
@@ -1029,6 +1062,7 @@ go run ./examples/28-deadline-propagation/
 go run ./examples/29-sheddability/
 go run ./examples/30-recovery-backoff/
 go run ./examples/31-recover/
+go run ./examples/32-aimd-rate-limit/
 ```
 
 ## Licence

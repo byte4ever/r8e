@@ -105,6 +105,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyRejected })
 	builder.counter("r8e.policy.throttled", "Calls shed locally by the adaptive throttler",
 		func(m *r8e.PolicyMetrics) int64 { return m.Throttled })
+	builder.counter("r8e.policy.rate_adaptations", "AIMD adjustments to the rate limiter's refill rate",
+		func(m *r8e.PolicyMetrics) int64 { return m.RateAdaptations })
 	builder.counter("r8e.policy.slow_call_rate_exceeded", "Circuit-breaker opens triggered by the slow-call rate",
 		func(m *r8e.PolicyMetrics) int64 { return m.SlowCallRateExceeded })
 	builder.counter("r8e.policy.cache_hits", "Calls served from the read-through cache",
@@ -140,6 +142,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.RetryBudgetTokens })
 	builder.gaugeFloat64("r8e.policy.throttle_probability", "Adaptive throttler's current local-rejection probability",
 		func(m *r8e.PolicyMetrics) float64 { return m.ThrottleProbability })
+	builder.gaugeFloat64("r8e.policy.rate_limit", "Rate limiter's current refill rate in tokens per second",
+		func(m *r8e.PolicyMetrics) float64 { return m.RateLimit })
 	builder.gaugeFloat64("r8e.policy.slow_call_rate", "Current fraction of slow calls in the circuit-breaker window",
 		func(m *r8e.PolicyMetrics) float64 { return m.SlowCallRate })
 

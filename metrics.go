@@ -45,6 +45,10 @@ type (
 		// Throttled counts calls shed locally by the adaptive throttler to
 		// protect a struggling backend (see [WithAdaptiveThrottle]).
 		Throttled int64 `json:"throttled"`
+		// RateAdaptations counts AIMD adjustments to the rate limiter's refill
+		// rate — both backoffs and recoveries (see [AIMD]); read it with RateLimit
+		// (the resulting live rate) to tell which direction dominates.
+		RateAdaptations int64 `json:"rate_adaptations"`
 		// SlowCallRateExceeded counts circuit-breaker opens caused by the
 		// slow-call rate reaching its threshold (see [SlowCallRate]), as opposed
 		// to the consecutive-failure trip. It is a subset of CircuitOpens.
@@ -90,6 +94,11 @@ type (
 		// shedding a call, in [0, MaxRejectionRate]; 0 when the policy has no
 		// throttler or it is forwarding all traffic.
 		ThrottleProbability float64 `json:"throttle_probability"`
+		// RateLimit is the rate limiter's current refill rate in tokens per
+		// second; 0 when the policy has no rate limiter. With [AIMD] it is the live
+		// adapted rate (moving within [AIMDMinRate, AIMDMaxRate]); otherwise the
+		// configured (or last Reconfigured) rate.
+		RateLimit float64 `json:"rate_limit"`
 		// SlowCallRate is the current fraction of slow calls in the circuit
 		// breaker's window, in [0, 1]; 0 when the policy has no breaker, slow-call
 		// detection is off, or no calls have been observed (see [SlowCallRate]).
@@ -123,6 +132,7 @@ type (
 		coalesceFollowers    atomic.Int64
 		concurrencyRejected  atomic.Int64
 		throttled            atomic.Int64
+		rateAdaptations      atomic.Int64
 		slowCallRateExceeded atomic.Int64
 		timeBudgetExceeded   atomic.Int64
 		cacheHits            atomic.Int64
@@ -268,6 +278,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnThrottled()
 			}
 		},
+		OnRateAdapted: func(rate float64) {
+			m.rateAdaptations.Add(1)
+
+			if user.OnRateAdapted != nil {
+				user.OnRateAdapted(rate)
+			}
+		},
 		OnSlowCallRateExceeded: func() {
 			m.slowCallRateExceeded.Add(1)
 
@@ -343,6 +360,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CoalesceFollowers:    p.metrics.coalesceFollowers.Load(),
 		ConcurrencyRejected:  p.metrics.concurrencyRejected.Load(),
 		Throttled:            p.metrics.throttled.Load(),
+		RateAdaptations:      p.metrics.rateAdaptations.Load(),
 		SlowCallRateExceeded: p.metrics.slowCallRateExceeded.Load(),
 		TimeBudgetExceeded:   p.metrics.timeBudgetExceeded.Load(),
 		CacheHits:            p.metrics.cacheHits.Load(),
@@ -361,6 +379,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 
 	if p.rateLimiter != nil {
 		metrics.Saturated = p.rateLimiter.Saturated()
+		metrics.RateLimit = p.rateLimiter.CurrentRate()
 	}
 
 	if p.bulkhead != nil {

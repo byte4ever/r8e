@@ -825,22 +825,40 @@ func newCircuitBreakerEntry[T any](cb *CircuitBreaker) PatternEntry[T] {
 	}
 }
 
-func newRateLimiterEntry[T any](rl *RateLimiter) PatternEntry[T] {
+// admitRecordEntry builds an admit → next → record middleware: a guard that may
+// reject before the inner work runs, and a record callback fed the outcome
+// afterwards. The rate limiter (AIMD adaptation) and the adaptive throttler share
+// this shape; keeping it in one place avoids two near-identical entry builders.
+func admitRecordEntry[T any](
+	priority int,
+	name string,
+	admit func(context.Context) error,
+	record func(error),
+) PatternEntry[T] {
 	return PatternEntry[T]{
-		Priority: priorityRateLimiter,
-		Name:     "rate_limiter",
+		Priority: priority,
+		Name:     name,
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				if err := rl.Allow(ctx); err != nil {
+				if err := admit(ctx); err != nil {
 					var zero T
 
-					return zero, err //nolint:wrapcheck // rate limiter error returned as-is
+					return zero, err //nolint:wrapcheck // admission error returned as-is
 				}
 
-				return next(ctx)
+				val, err := next(ctx)
+				record(err)
+
+				return val, err //nolint:wrapcheck // caller's error returned as-is
 			}
 		},
 	}
+}
+
+func newRateLimiterEntry[T any](rl *RateLimiter) PatternEntry[T] {
+	return admitRecordEntry[T](
+		priorityRateLimiter, "rate_limiter", rl.Allow, rl.RecordOutcome,
+	)
 }
 
 func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
@@ -885,24 +903,9 @@ func newAdaptiveEntry[T any](limiter *AdaptiveLimiter) PatternEntry[T] {
 }
 
 func newThrottleEntry[T any](throttler *Throttler) PatternEntry[T] {
-	return PatternEntry[T]{
-		Priority: priorityThrottle,
-		Name:     "adaptive_throttle",
-		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
-			return func(ctx context.Context) (T, error) {
-				if err := throttler.Allow(ctx); err != nil {
-					var zero T
-
-					return zero, err //nolint:wrapcheck // throttler error returned as-is
-				}
-
-				val, err := next(ctx)
-				throttler.Record(err)
-
-				return val, err //nolint:wrapcheck // caller's error returned as-is
-			}
-		},
-	}
+	return admitRecordEntry[T](
+		priorityThrottle, "adaptive_throttle", throttler.Allow, throttler.Record,
+	)
 }
 
 func newHedgeEntry[T any](cell *atomic.Int64, hooks *Hooks, clock Clock) PatternEntry[T] {

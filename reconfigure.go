@@ -136,6 +136,15 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		actions = append(actions, func() { p.rateLimiter.Reconfigure(rate) })
 	}
 
+	if cfg.AIMD != nil {
+		action, err := p.aimdReconfigureAction(cfg.AIMD)
+		if err != nil {
+			return err
+		}
+
+		actions = append(actions, action)
+	}
+
 	if cfg.Bulkhead != nil {
 		if p.bulkhead == nil {
 			return absentPatternError("bulkhead")
@@ -232,6 +241,27 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 	}
 
 	return nil
+}
+
+// aimdReconfigureAction validates an AIMD config overlay and returns the action
+// that applies it. It errors when the policy has no rate limiter, when the rate
+// limiter was built without AIMD (adaptation cannot be enabled at runtime), or
+// when the interval string fails to parse.
+func (p *Policy[T]) aimdReconfigureAction(cfg *AIMDConfig) (func(), error) {
+	if p.rateLimiter == nil {
+		return nil, absentPatternError("rate_limit")
+	}
+
+	if p.rateLimiter.aimd == nil {
+		return nil, ErrAIMDWithoutRateLimit
+	}
+
+	aimdOpts, err := aimdOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure: %w", err)
+	}
+
+	return func() { p.rateLimiter.aimd.reconfigure(aimdOpts...) }, nil
 }
 
 func absentPatternError(pattern string) error {

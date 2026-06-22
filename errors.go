@@ -138,6 +138,16 @@ var (
 	ErrBulkheadQueueWithoutWait error = resilienceError(
 		"bulkhead_queue_depth requires bulkhead_max_wait",
 	)
+	// ErrAIMDWithoutRateLimit indicates AIMD adaptation was requested where it is
+	// not available: an aimd config block without rate_limit, a [Policy.Reconfigure]
+	// or [RateLimiter.ReconfigureAIMD] targeting a rate limiter that was not built
+	// with the [AIMD] option. AIMD cannot be enabled after construction, so the
+	// remedy is always to build the rate limiter with WithRateLimit(rate,
+	// AIMD(...)). It is the error [BuildOptions], [Policy.Reconfigure], and
+	// ReconfigureAIMD return for that misconfiguration.
+	ErrAIMDWithoutRateLimit error = resilienceError(
+		"AIMD adaptation requires a rate limiter built with the AIMD option",
+	)
 	// ErrRetryMaxAttemptsRequired indicates a [RetryConfig] omitted max_attempts.
 	// It is required: without it the retry would silently collapse to a single
 	// attempt. It is the error [BuildOptions] and [Policy.Reconfigure] return for

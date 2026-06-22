@@ -69,6 +69,12 @@ type Hooks struct {
 	// of forwarding it to a struggling backend (see [WithAdaptiveThrottle]).
 	OnThrottled func()
 
+	// OnRateAdapted fires when the AIMD rate controller moves the rate limiter's
+	// refill rate, with the new rate in tokens per second (see [AIMD]). A new
+	// rate below the previous one signals server pushback (a multiplicative
+	// backoff); a higher one is the additive recovery.
+	OnRateAdapted func(rate float64)
+
 	// OnSlowCallRateExceeded fires when the circuit breaker opens because the
 	// slow-call rate reached its threshold (see [SlowCallRate]), as opposed to
 	// the consecutive-failure trip. OnCircuitOpen also fires for the same
@@ -231,6 +237,12 @@ func (h *Hooks) emitConcurrencyLimitChanged(limit int) {
 func (h *Hooks) emitThrottled() {
 	if h != nil && h.OnThrottled != nil {
 		h.OnThrottled()
+	}
+}
+
+func (h *Hooks) emitRateAdapted(rate float64) {
+	if h != nil && h.OnRateAdapted != nil {
+		h.OnRateAdapted(rate)
 	}
 }
 

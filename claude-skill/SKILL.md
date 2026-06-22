@@ -157,6 +157,20 @@ r8e.WithRateLimit(rate float64, opts ...RateLimitOption)
 Token-bucket. `rate` = tokens/sec. Option: `r8e.RateLimitBlocking()` (wait instead of reject).
 Returns `r8e.ErrRateLimited` in non-blocking mode.
 
+**Adaptive rate (AIMD):** `r8e.AIMD(opts...)` (a `RateLimitOption`) makes the refill
+rate adapt by additive-increase / multiplicative-decrease. The policy feeds each
+outcome back: a server-overload outcome multiplies the rate by `AIMDBackoff`
+(default 0.9), any other adds `AIMDIncrease` back; held within
+`[AIMDMinRate, AIMDMaxRate]`; at most one move per `AIMDInterval` (default 1s). The
+configured `rate` is the starting/ceiling value. Sub-options: `AIMDMinRate`,
+`AIMDMaxRate`, `AIMDBackoff`, `AIMDIncrease`, `AIMDInterval`, `AIMDClassifier`.
+Default overload = `ErrRateLimited` or an error carrying a `Retry-After`
+(`RetryAfterProvider`; httpx 429/503); business errors don't slow the rate.
+Config-expressible (`AIMDConfig`, requires `rate_limit`) + reconfigurable; the
+classifier is code-only. Observability: `OnRateAdapted(rate)` hook,
+`RateAdaptations` counter, `RateLimit` gauge. Standalone: `NewRateLimiter` +
+`RecordOutcome(err)` + `ReconfigureAIMD`. Example: `examples/32-aimd-rate-limit`.
+
 ### Bulkhead
 
 ```go
@@ -341,6 +355,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnCircuitHalfOpen:  func() {},
     OnSlowCallRateExceeded: func() {}, // breaker opened by the slow-call rate
     OnRateLimited:      func() {},
+    OnRateAdapted:      func(rate float64) {}, // AIMD moved the rate limiter's refill rate
     OnBulkheadFull:     func() {},
     OnBulkheadAcquired: func() {},
     OnBulkheadReleased: func() {},
@@ -381,12 +396,12 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `CircuitCloses`, `CircuitHalfOpens`, `RateLimited`, `BulkheadRejected`,
 `BulkheadTimeouts`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
-`CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `SlowCallRateExceeded`,
-`CacheHits`, `CacheMisses`, `CacheStores`, `CacheStaleServed`,
-`PanicsRecovered`) and gauges
+`CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `RateAdaptations`,
+`SlowCallRateExceeded`, `CacheHits`, `CacheMisses`, `CacheStores`,
+`CacheStaleServed`, `PanicsRecovered`) and gauges
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
-`ConcurrencyInFlight`, `ThrottleProbability`, `Saturated`, `Healthy`,
+`ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `Saturated`, `Healthy`,
 `Criticality`).
 
 Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
