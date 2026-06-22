@@ -353,6 +353,12 @@ Bridges: `r8ehttp.MetricsHandler(reg)` (JSON, stdlib) and
 `r8eotel.Register(meter, reg)` (OpenTelemetry observable instruments, separate
 module — keeps core dependency-free).
 
+**OTel tracing:** `r8eotel.Trace(policy, tp)` returns a `*TracedPolicy[T]`
+decorator (drop-in for `*Policy[T]`): one root span per `Do()` call (named after
+the policy) + one child span per fn invocation (initial, retry, hedge). Root span
+carries `r8e.policy`, `r8e.attempts`, and `r8e.rejection_reason` on error; child
+span carries `r8e.attempt.number` (1-indexed).
+
 ## Hot reload
 
 Retune the parameters of patterns a policy ALREADY has, at runtime, without
@@ -530,7 +536,7 @@ github.com/byte4ever/r8e            # core (zero external deps)
 github.com/byte4ever/r8e/r8ehttp    # net/http edge: ReadinessHandler, MetricsHandler
 github.com/byte4ever/r8e/r8econf    # os+JSON edge: Load, GetPolicy, LoadCacheConfig, Store.Reload
 github.com/byte4ever/r8e/httpx      # HTTP client adapter
-github.com/byte4ever/r8e/r8eotel    # OpenTelemetry metrics bridge (separate module)
+github.com/byte4ever/r8e/r8eotel    # OpenTelemetry metrics (Register) + tracing (Trace) bridge (separate module)
 github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
