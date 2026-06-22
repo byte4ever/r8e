@@ -117,6 +117,23 @@ result, err := policy.Do(ctx, func(ctx context.Context) (string, error) {
 // err == r8e.ErrTimeout
 ```
 
+**Timeout adaptatif (piloté par les percentiles).** Par défaut le timeout est fixe. `AdaptiveTimeout(...)` dimensionne à la place chaque délai à partir d'une fenêtre glissante des latences **réussies** récentes — `clamp(percentile × multiplicateur, plancher, plafond)` — pour que le délai suive le temps de service réel du backend plutôt qu'une constante devinée. La durée passée à `WithTimeout` devient le **plafond** dur (l'adaptatif ne peut que resserrer en dessous, jamais le dépasser) et la valeur de repli utilisée tant que pas assez d'échantillons ne se sont accumulés, donc une policy froide ou à faible trafic utilise le timeout complet de l'opérateur.
+
+```go
+policy := r8e.NewPolicy[string]("adaptive-timeout",
+    r8e.WithTimeout(time.Second,            // plafond dur + repli au démarrage
+        r8e.AdaptiveTimeout(
+            r8e.AdaptiveTimeoutPercentile(0.99), // défaut 0.99
+            r8e.AdaptiveTimeoutMultiplier(2.0),  // défaut 2.0 (p99 × 2)
+            r8e.AdaptiveTimeoutFloor(20*time.Millisecond), // défaut : aucun
+            r8e.AdaptiveTimeoutMinSamples(20),   // défaut : démarrage à 20 échantillons
+        ),
+    ),
+)
+```
+
+Seuls les appels réussis alimentent la fenêtre, donc un timeout ne gonfle jamais le percentile qui l'a fixé. C'est l'analogue latence→timeout du latence→limite de la [concurrence adaptative](#adaptive-concurrency). Observabilité : `Metrics().AdaptiveTimeout` (le timeout que la policy appliquerait actuellement) et la jauge OpenTelemetry `r8e.policy.adaptive_timeout` ; les déclenchements comptent toujours dans le compteur `Timeouts` et le hook `OnTimeout`. Voir [`examples/35-adaptive-timeout`](examples/35-adaptive-timeout).
+
 ### Retry
 
 Réessaie les erreurs transitoires avec des stratégies de backoff configurables. Les erreurs encapsulées avec `r8e.Permanent()` arrêtent immédiatement les retries.

@@ -43,6 +43,21 @@ r8e.WithTimeout(5 * time.Second)
 
 Returns `r8e.ErrTimeout` if exceeded.
 
+**Adaptive timeout (percentile-driven):** `r8e.AdaptiveTimeout(opts...)` (a
+`TimeoutOption`) sizes each call's deadline from a sliding window of recent
+**successful** latencies: `clamp(percentile × multiplier, floor, ceiling)`. The
+`WithTimeout` duration is the hard **ceiling** (adaptive only tightens below it,
+never exceeds it) and the warmup fallback until `MinSamples` successes accumulate.
+Only successes feed the window (a timeout can't inflate its own percentile);
+dedicated window, separate from the always-on Do() percentiles. Sub-options:
+`AdaptiveTimeoutPercentile` (default 0.99), `AdaptiveTimeoutMultiplier` (default
+2.0, must be ≥1), `AdaptiveTimeoutFloor` (default none), `AdaptiveTimeoutMinSamples`
+(default 20). Config-expressible (`AdaptiveTimeoutConfig`, requires `timeout` →
+`ErrAdaptiveTimeoutWithoutTimeout`) + reconfigurable (the ceiling via `timeout`,
+the tunables via `adaptive_timeout`). Observability: `Metrics().AdaptiveTimeout`
+gauge + `r8e.policy.adaptive_timeout` OTel gauge; reuses the `Timeouts` counter /
+`OnTimeout` hook. Example: `examples/35-adaptive-timeout`.
+
 ### Time Budget
 
 ```go
@@ -428,8 +443,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `CacheStaleServed`, `PanicsRecovered`) and gauges
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
-`ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `Saturated`, `Healthy`,
-`Criticality`).
+`ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `AdaptiveTimeout`,
+`Saturated`, `Healthy`, `Criticality`).
 
 **Latency percentiles (always on, no option):** every `Do()` duration feeds a
 sliding-window DDSketch; `PolicyMetrics` exposes `LatencyP50`, `LatencyP95`,

@@ -148,6 +148,16 @@ var (
 	ErrAIMDWithoutRateLimit error = resilienceError(
 		"AIMD adaptation requires a rate limiter built with the AIMD option",
 	)
+	// ErrAdaptiveTimeoutWithoutTimeout indicates percentile-driven adaptive timeout
+	// was requested where there is no timeout to adapt: an adaptive_timeout config
+	// block without timeout, or a [Policy.Reconfigure] targeting a policy whose
+	// timeout was not built with the [AdaptiveTimeout] option. Adaptation cannot be
+	// enabled after construction, so the remedy is to build the timeout with
+	// WithTimeout(d, AdaptiveTimeout(...)). It is the error [BuildOptions] and
+	// [Policy.Reconfigure] return for that misconfiguration.
+	ErrAdaptiveTimeoutWithoutTimeout error = resilienceError(
+		"adaptive timeout requires a timeout built with the AdaptiveTimeout option",
+	)
 	// ErrRetryMaxAttemptsRequired indicates a [RetryConfig] omitted max_attempts.
 	// It is required: without it the retry would silently collapse to a single
 	// attempt. It is the error [BuildOptions] and [Policy.Reconfigure] return for

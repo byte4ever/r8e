@@ -50,7 +50,8 @@ func readConfig(path string) (map[string]r8e.PolicyConfig, error) {
 		return nil, fmt.Errorf("r8e: parse config: %w", err)
 	}
 
-	for name, pc := range cfg.Policies {
+	for name := range cfg.Policies {
+		pc := cfg.Policies[name]
 		if _, buildErr := r8e.BuildOptions(&pc); buildErr != nil {
 			return nil, fmt.Errorf("r8e: policy %q: %w", name, buildErr)
 		}
@@ -98,8 +99,8 @@ func (s *Store) Reload(path string) error {
 
 	var errs []error
 
-	for name, pc := range configs {
-		reErr := s.registry.Reconfigure(name, pc)
+	for name := range configs {
+		reErr := s.registry.Reconfigure(name, configs[name])
 		// A policy that hasn't been built yet is not an error: it will pick up
 		// the new config on its next GetPolicy.
 		if reErr != nil && !errors.Is(reErr, r8e.ErrPolicyNotRegistered) {

@@ -191,6 +191,21 @@ func (w *latencyWindow) snapshot() latencySnapshot {
 	}
 }
 
+// quantileSnapshot returns the q-th percentile latency over the current window
+// (q in (0, 1]) together with the sample count it was computed from. It is the
+// single-percentile companion to snapshot, used by the adaptive timeout to read
+// one arbitrary percentile (its driving percentile) without computing the fixed
+// p50/p95/p99 triple. With no samples in the window it returns (0, 0) — a zero
+// latency means "no recent calls", not a zero-latency call.
+func (w *latencyWindow) quantileSnapshot(q float64) (latency time.Duration, samples int64) {
+	merged, total := w.merge()
+	if total == 0 {
+		return 0, 0
+	}
+
+	return w.quantile(merged, total, q), total
+}
+
 // merge sums every live ring slice into one DDSketch and returns it with the
 // total sample count. The window edges are resolved from the clock once, then
 // each slice is folded in under the lock; the per-slice quantile derivation

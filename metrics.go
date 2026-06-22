@@ -134,6 +134,12 @@ type (
 		// percentiles were computed from; 0 means the percentiles are not yet
 		// meaningful.
 		LatencySamples int64 `json:"latency_samples"`
+		// AdaptiveTimeout is the timeout the policy would currently apply when
+		// [AdaptiveTimeout] is enabled — clamp(percentile-latency × multiplier,
+		// floor, ceiling). It equals the configured ceiling during warmup or when
+		// adaptive timeout is off (the latter reported as 0, since the field is only
+		// populated for an adaptive timeout).
+		AdaptiveTimeout time.Duration `json:"adaptive_timeout"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -451,6 +457,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 	metrics.LatencyP95 = latency.p95
 	metrics.LatencyP99 = latency.p99
 	metrics.LatencySamples = latency.samples
+
+	if p.adaptiveTimeout != nil {
+		metrics.AdaptiveTimeout = p.adaptiveTimeout.compute(time.Duration(p.timeout.Load()))
+	}
 
 	return metrics
 }

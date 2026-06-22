@@ -39,6 +39,10 @@ type (
 		// latency records each Do() duration into a sliding-window DDSketch for
 		// the p50/p95/p99 figures in Metrics. Always present (zero-config).
 		latency *latencyWindow
+		// adaptiveTimeout, when non-nil, sizes the timeout from observed
+		// success-latency percentiles (see WithTimeout + AdaptiveTimeout); the
+		// timeout cell below then holds the ceiling rather than the fixed timeout.
+		adaptiveTimeout *adaptiveTimeout
 		// Reloadable cells for the stateless patterns; nil when the pattern is
 		// absent. The middleware reads them per call so Reconfigure takes
 		// effect without rebuilding the chain.
@@ -92,6 +96,7 @@ type (
 		registry *Registry
 
 		timeout           *time.Duration
+		timeoutAdaptive   *adaptiveTimeoutConfig
 		timeBudget        *time.Duration
 		retry             *retryDesc
 		circuitBreaker    *circuitBreakerDesc
@@ -238,10 +243,18 @@ func WithRegistry(reg *Registry) Option {
 	})
 }
 
-// WithTimeout adds a timeout that cancels slow calls after d.
-func WithTimeout(d time.Duration) Option {
+// WithTimeout adds a timeout that cancels slow calls after the given duration.
+// Pass [AdaptiveTimeout] to instead tune the timeout from observed latency
+// percentiles, using the duration as the hard ceiling and warmup fallback.
+func WithTimeout(timeout time.Duration, opts ...TimeoutOption) Option {
+	var cfg timeoutConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	return optionFunc(func(s *policySetup) {
-		s.timeout = &d
+		s.timeout = &timeout
+		s.timeoutAdaptive = cfg.adaptive
 	})
 }
 
@@ -583,9 +596,10 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		bulkhead       *Bulkhead
 		adaptive       *AdaptiveLimiter
 		throttler      *Throttler
-		coalescer      *Coalescer[T]
-		timeoutCell    *atomic.Int64
-		timeBudgetCell *atomic.Pointer[timeBudgetState]
+		coalescer       *Coalescer[T]
+		timeoutCell     *atomic.Int64
+		adaptiveTimeout *adaptiveTimeout
+		timeBudgetCell  *atomic.Pointer[timeBudgetState]
 		hedgeCell      *atomic.Int64
 		retryCell      *atomic.Pointer[retryRuntime]
 	)
@@ -593,7 +607,16 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	if setup.timeout != nil {
 		timeoutCell = new(atomic.Int64)
 		timeoutCell.Store(int64(*setup.timeout))
-		entries = append(entries, newTimeoutEntry[T](timeoutCell, &hooks))
+
+		if setup.timeoutAdaptive != nil {
+			adaptiveTimeout = newAdaptiveTimeout(setup.timeoutAdaptive, clock)
+			entries = append(
+				entries,
+				newAdaptiveTimeoutEntry[T](timeoutCell, adaptiveTimeout, &hooks),
+			)
+		} else {
+			entries = append(entries, newTimeoutEntry[T](timeoutCell, &hooks))
+		}
 	}
 
 	if setup.timeBudget != nil {
@@ -713,6 +736,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		metrics:           metrics,
 		clock:             clock,
 		latency:           newLatencyWindow(clock),
+		adaptiveTimeout:   adaptiveTimeout,
 		timeout:           timeoutCell,
 		timeBudget:        timeBudgetCell,
 		hedge:             hedgeCell,
@@ -810,6 +834,31 @@ func newTimeoutEntry[T any](cell *atomic.Int64, hooks *Hooks) PatternEntry[T] {
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
 				return DoTimeout[T](ctx, time.Duration(cell.Load()), next, hooks)
+			}
+		},
+	}
+}
+
+// newAdaptiveTimeoutEntry builds the timeout middleware in adaptive mode: the
+// per-call timeout is at.compute(ceiling) where ceiling is the reloadable cell,
+// and a successful call's elapsed time (measured on the policy clock) is recorded
+// back into the controller's percentile window.
+func newAdaptiveTimeoutEntry[T any](
+	cell *atomic.Int64,
+	at *adaptiveTimeout,
+	hooks *Hooks,
+) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityTimeout,
+		Name:     "timeout",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				ceiling := time.Duration(cell.Load())
+				start := at.clock.Now()
+				result, err := DoTimeout[T](ctx, at.compute(ceiling), next, hooks)
+				at.record(at.clock.Since(start), err)
+
+				return result, err
 			}
 		},
 	}

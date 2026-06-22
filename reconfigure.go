@@ -66,18 +66,12 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 	// Phase 1 — validate everything into deferred apply actions; no mutation.
 	var actions []func()
 
-	if cfg.Timeout != nil {
-		if p.timeout == nil {
-			return absentPatternError("timeout")
-		}
-
-		dur, err := time.ParseDuration(*cfg.Timeout)
-		if err != nil {
-			return fmt.Errorf("r8e: reconfigure timeout: %w", err)
-		}
-
-		actions = append(actions, func() { p.timeout.Store(int64(dur)) })
+	timeoutActions, timeoutErr := p.timeoutReconfigureActions(&cfg)
+	if timeoutErr != nil {
+		return timeoutErr
 	}
+
+	actions = append(actions, timeoutActions...)
 
 	if cfg.TimeBudget != nil {
 		if p.timeBudget == nil {
@@ -267,6 +261,71 @@ func (p *Policy[T]) aimdReconfigureAction(cfg *AIMDConfig) (func(), error) {
 	}
 
 	return func() { p.rateLimiter.aimd.reconfigure(aimdOpts...) }, nil
+}
+
+// timeoutReconfigureActions validates the timeout config overlay (the ceiling via
+// Timeout and the adaptive parameters via AdaptiveTimeout) and returns the actions
+// that apply it, in chain order. Bundling both keeps [Policy.Reconfigure] under its
+// maintainability budget.
+func (p *Policy[T]) timeoutReconfigureActions(cfg *PolicyConfig) ([]func(), error) {
+	var actions []func()
+
+	if cfg.Timeout != nil {
+		action, err := p.timeoutReconfigureAction(cfg.Timeout)
+		if err != nil {
+			return nil, err
+		}
+
+		actions = append(actions, action)
+	}
+
+	if cfg.AdaptiveTimeout != nil {
+		action, err := p.adaptiveTimeoutReconfigureAction(cfg.AdaptiveTimeout)
+		if err != nil {
+			return nil, err
+		}
+
+		actions = append(actions, action)
+	}
+
+	return actions, nil
+}
+
+// timeoutReconfigureAction validates a timeout config overlay and returns the
+// action that applies it. It errors when the policy has no timeout pattern or when
+// the duration string fails to parse. For an adaptive timeout this reconfigures
+// the ceiling; the adaptive parameters reconfigure through adaptive_timeout.
+func (p *Policy[T]) timeoutReconfigureAction(raw *string) (func(), error) {
+	if p.timeout == nil {
+		return nil, absentPatternError("timeout")
+	}
+
+	dur, err := time.ParseDuration(*raw)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure timeout: %w", err)
+	}
+
+	return func() { p.timeout.Store(int64(dur)) }, nil
+}
+
+// adaptiveTimeoutReconfigureAction validates an adaptive-timeout config overlay
+// and returns the action that applies it. It errors when the policy's timeout was
+// built without [AdaptiveTimeout] (adaptation cannot be enabled at runtime) or when
+// the floor string fails to parse. The ceiling itself is reconfigured through the
+// timeout field; this overlay tunes only the adaptive parameters.
+func (p *Policy[T]) adaptiveTimeoutReconfigureAction(
+	cfg *AdaptiveTimeoutConfig,
+) (func(), error) {
+	if p.adaptiveTimeout == nil {
+		return nil, ErrAdaptiveTimeoutWithoutTimeout
+	}
+
+	atOpts, err := adaptiveTimeoutOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure: %w", err)
+	}
+
+	return func() { p.adaptiveTimeout.reconfigure(atOpts...) }, nil
 }
 
 // retryBudgetReconfigureAction validates a retry-budget config overlay and

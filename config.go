@@ -20,6 +20,10 @@ type (
 		// Timeout is the maximum duration for a single call.
 		// Optional. Parsed via time.ParseDuration. Example: "2s".
 		Timeout *string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+		// AdaptiveTimeout configures percentile-driven adaptive timeout (see
+		// [AdaptiveTimeout]). Requires Timeout, which becomes the ceiling and warmup
+		// fallback. Optional. Example: {"percentile": 0.99, "multiplier": 2.0}.
+		AdaptiveTimeout *AdaptiveTimeoutConfig `json:"adaptive_timeout,omitempty" yaml:"adaptive_timeout,omitempty"`
 		// TimeBudget is the total time budget shared across retry and hedge.
 		// Optional. Parsed via time.ParseDuration. Example: "5s".
 		TimeBudget *string `json:"time_budget,omitempty" yaml:"time_budget,omitempty"`
@@ -182,6 +186,25 @@ type (
 		Interval *string `json:"interval,omitempty" yaml:"interval,omitempty"`
 	}
 
+	// AdaptiveTimeoutConfig holds the percentile-driven adaptive-timeout tunables.
+	// Embed it (via [PolicyConfig.AdaptiveTimeout]) in your own config struct for
+	// JSON or YAML unmarshaling. Every field is optional; an omitted or
+	// out-of-range value falls back to its default.
+	AdaptiveTimeoutConfig struct {
+		// Percentile is the latency percentile (in (0, 1]) the timeout is derived
+		// from. Optional. Default: 0.99. Example: 0.95.
+		Percentile *float64 `json:"percentile,omitempty" yaml:"percentile,omitempty"`
+		// Multiplier is the headroom applied to the percentile latency; must be at
+		// least 1. Optional. Default: 2.0. Example: 3.0.
+		Multiplier *float64 `json:"multiplier,omitempty" yaml:"multiplier,omitempty"`
+		// Floor is the lower bound the adaptive timeout is never reduced below.
+		// Optional. Parsed via time.ParseDuration. Default: none. Example: "5ms".
+		Floor *string `json:"floor,omitempty" yaml:"floor,omitempty"`
+		// MinSamples is how many successful calls must be in the window before the
+		// adaptive value is used. Optional. Default: 20. Example: 50.
+		MinSamples *int `json:"min_samples,omitempty" yaml:"min_samples,omitempty"`
+	}
+
 	// RetryBudgetConfig holds retry-budget configuration values. Embed it
 	// (via [PolicyConfig]) in your own config struct for JSON or YAML
 	// unmarshaling.
@@ -215,12 +238,21 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	var opts []Option
 
 	if pc.Timeout != nil {
-		d, err := time.ParseDuration(*pc.Timeout)
+		timeout, err := time.ParseDuration(*pc.Timeout)
 		if err != nil {
 			return nil, fmt.Errorf("timeout: %w", err)
 		}
 
-		opts = append(opts, WithTimeout(d))
+		toOpts, err := timeoutOptionsFromConfig(pc.AdaptiveTimeout)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithTimeout(timeout, toOpts...))
+	} else if pc.AdaptiveTimeout != nil {
+		// Adaptive timeout has no fixed timeout to adapt — reject the same input
+		// cold and hot so BuildOptions and Reconfigure agree.
+		return nil, ErrAdaptiveTimeoutWithoutTimeout
 	}
 
 	if pc.TimeBudget != nil {
@@ -407,6 +439,9 @@ func adaptiveOptionsFromConfig(cfg *AdaptiveConfig) []AdaptiveOption {
 // throttleOptionsFromConfig converts an [AdaptiveThrottleConfig] into
 // adaptive-throttler options. Shared by [BuildOptions] and [Policy.Reconfigure].
 // It returns an error only when the window string fails to parse.
+//
+//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
+// distinct config type to a distinct option type; no shared abstraction without generics.
 func throttleOptionsFromConfig(
 	cfg *AdaptiveThrottleConfig,
 ) ([]ThrottleOption, error) {
@@ -431,6 +466,56 @@ func throttleOptionsFromConfig(
 
 	if cfg.MinRequests != nil {
 		opts = append(opts, MinRequests(*cfg.MinRequests))
+	}
+
+	return opts, nil
+}
+
+// timeoutOptionsFromConfig converts an [AdaptiveTimeoutConfig] into [WithTimeout]
+// options, wrapping the tunables in an [AdaptiveTimeout] option when a block is
+// present. Shared by [BuildOptions]; the caller guarantees pc.Timeout is set
+// (adaptive timeout without it is rejected there).
+func timeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]TimeoutOption, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+
+	atOpts, err := adaptiveTimeoutOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return []TimeoutOption{AdaptiveTimeout(atOpts...)}, nil
+}
+
+// adaptiveTimeoutOptionsFromConfig converts an [AdaptiveTimeoutConfig] into
+// [AdaptiveTimeout] options. Shared by [BuildOptions] and [Policy.Reconfigure]. It
+// returns an error only when the floor string fails to parse.
+//
+//nolint:dupl // structurally mirrors throttleOptionsFromConfig but maps a distinct
+// config type to a distinct option type; no shared abstraction without generics.
+func adaptiveTimeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]AdaptiveTimeoutOption, error) {
+	var opts []AdaptiveTimeoutOption
+
+	if cfg.Percentile != nil {
+		opts = append(opts, AdaptiveTimeoutPercentile(*cfg.Percentile))
+	}
+
+	if cfg.Multiplier != nil {
+		opts = append(opts, AdaptiveTimeoutMultiplier(*cfg.Multiplier))
+	}
+
+	if cfg.Floor != nil {
+		floor, err := time.ParseDuration(*cfg.Floor)
+		if err != nil {
+			return nil, fmt.Errorf("adaptive_timeout.floor: %w", err)
+		}
+
+		opts = append(opts, AdaptiveTimeoutFloor(floor))
+	}
+
+	if cfg.MinSamples != nil {
+		opts = append(opts, AdaptiveTimeoutMinSamples(*cfg.MinSamples))
 	}
 
 	return opts, nil

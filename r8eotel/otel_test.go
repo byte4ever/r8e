@@ -257,7 +257,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.slow_call_rate",
 		"r8e.policy.concurrency_budget_in_use",
 		"r8e.policy.latency_p50", "r8e.policy.latency_p95",
-		"r8e.policy.latency_p99",
+		"r8e.policy.latency_p99", "r8e.policy.adaptive_timeout",
 	}
 	assert.ElementsMatch(t, want, gotNames,
 		"registered instruments drifted from the expected set")

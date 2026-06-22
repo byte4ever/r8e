@@ -156,6 +156,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP95.Seconds() })
 	builder.gaugeFloat64("r8e.policy.latency_p99", "99th-percentile Do() latency over the recent window, in seconds",
 		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP99.Seconds() })
+	builder.gaugeFloat64("r8e.policy.adaptive_timeout", "Current adaptive timeout, in seconds",
+		func(m *r8e.PolicyMetrics) float64 { return m.AdaptiveTimeout.Seconds() })
 
 	if builder.err != nil {
 		return nil, builder.err
