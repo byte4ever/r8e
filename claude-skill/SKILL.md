@@ -138,6 +138,16 @@ hook, `SlowCallRateExceeded` counter, `SlowCallRate` gauge. Standalone:
 `cb.Record(elapsed, err)` (latency-aware; `RecordSuccess`/`RecordFailure` treat
 the call as fast).
 
+**Adaptive recovery backoff** (opt-in, default disabled): after each failed
+half-open probe, the next recovery wait is `recoveryTimeout × factor^n` where
+`n` is the number of consecutive failed probes. First trip always uses the base
+`recoveryTimeout` (n=0). Options: `r8e.RecoveryBackoffMultiplier(factor float64)`
+(factor ≤ 0 = disabled) and `r8e.RecoveryMaxBackoff(d time.Duration)` (0 = no
+cap). Backoff resets to 0 when the breaker successfully closes. Config-
+expressible via `RecoveryBackoffMultiplier *float64` and `RecoveryMaxBackoff
+*string` fields in `CircuitBreakerConfig` (JSON/YAML). Example:
+`examples/30-recovery-backoff`.
+
 ### Rate Limiter
 
 ```go
@@ -549,4 +559,4 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/29-sheddability`.
+Examples: `examples/01-quickstart` through `examples/30-recovery-backoff`.

@@ -177,6 +177,16 @@ r8e.WithCircuitBreaker(
 )
 ```
 
+**Backoff adaptatif de récupération (opt-in).** Par défaut, le breaker sonde la dépendance à intervalle fixe (`RecoveryTimeout`). Avec `RecoveryBackoffMultiplier`, chaque sonde half-open échouée double (ou multiplie par le facteur configuré) l'attente avant la tentative suivante, réduisant la pression sur une dépendance en difficulté. `RecoveryMaxBackoff` plafonne la croissance. Le compteur se réinitialise à la valeur de base lorsque le breaker se referme avec succès. Voir [`examples/30-recovery-backoff`](examples/30-recovery-backoff).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.RecoveryTimeout(5*time.Second),
+    r8e.RecoveryBackoffMultiplier(2.0),   // 5s → 10s → 20s → …
+    r8e.RecoveryMaxBackoff(60*time.Second),
+)
+```
+
 ### Rate Limiter
 
 Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton.

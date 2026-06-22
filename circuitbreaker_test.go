@@ -843,6 +843,293 @@ func TestPolicySlowCallRateMetricsAndMiddleware(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Adaptive recovery backoff (C3)
+// ---------------------------------------------------------------------------
+
+// TestRecoveryBackoffDisabledByDefault verifies that without
+// RecoveryBackoffMultiplier the breaker always uses the base recoveryTimeout,
+// even after multiple failed probes.
+func TestRecoveryBackoffDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+	)
+
+	for range 3 {
+		cb.RecordFailure()                         // open (or already open)
+		clk.setElapsed(10*time.Second - 1)         // just below base timeout
+		require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
+
+		clk.setElapsed(10*time.Second + 1)         // just above base timeout
+		require.NoError(t, cb.Allow())             // half-open
+		cb.RecordFailure()                         // re-open
+	}
+}
+
+// TestRecoveryBackoffNotAppliedOnFirstTrip verifies that the first trip from
+// closed always uses the base recoveryTimeout (recoveryAttempt starts at 0).
+func TestRecoveryBackoffNotAppliedOnFirstTrip(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+		RecoveryBackoffMultiplier(100.0), // would be enormous if applied
+	)
+
+	cb.RecordFailure() // first trip: recoveryAttempt=0
+	require.Equal(t, CircuitOpen, cb.State())
+
+	clk.setElapsed(10*time.Second - 1)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // base timeout not yet elapsed
+
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow()) // base timeout elapsed → half-open
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryBackoffGrowsExponentially verifies that each failed half-open
+// probe doubles the recovery wait (with factor=2).
+func TestRecoveryBackoffGrowsExponentially(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+		HalfOpenMaxAttempts(1),
+		RecoveryBackoffMultiplier(2.0),
+	)
+
+	// 1st trip (from closed): base timeout = 10s.
+	cb.RecordFailure()
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow())          // half-open
+	cb.RecordFailure()                      // 1st failed probe: recoveryAttempt=1
+
+	// 2nd open: timeout = 10s × 2^1 = 20s.
+	clk.setElapsed(15 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // 15s < 20s
+
+	clk.setElapsed(20*time.Second + 1)
+	require.NoError(t, cb.Allow())          // half-open
+	cb.RecordFailure()                      // 2nd failed probe: recoveryAttempt=2
+
+	// 3rd open: timeout = 10s × 2^2 = 40s.
+	clk.setElapsed(30 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // 30s < 40s
+
+	clk.setElapsed(40*time.Second + 1)
+	require.NoError(t, cb.Allow()) // half-open
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryBackoffCappedByMax verifies that RecoveryMaxBackoff caps the
+// computed exponential value.
+func TestRecoveryBackoffCappedByMax(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+		RecoveryBackoffMultiplier(10.0),    // uncapped: 100s after first failed probe
+		RecoveryMaxBackoff(30*time.Second), // should clamp at 30s
+	)
+
+	cb.RecordFailure()
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow()) // half-open
+	cb.RecordFailure()             // 1st failed probe: would be 100s, capped at 30s
+
+	clk.setElapsed(25 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // 25s < cap 30s
+
+	clk.setElapsed(30*time.Second + 1)
+	require.NoError(t, cb.Allow()) // 30s+ past cap → half-open
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryBackoffResetsOnClose verifies that a successful close resets the
+// backoff counter so the next trip starts from the base recoveryTimeout.
+func TestRecoveryBackoffResetsOnClose(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+		RecoveryBackoffMultiplier(2.0),
+	)
+
+	// Trip and accumulate one failed probe: next timeout would be 20s.
+	cb.RecordFailure()
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	cb.RecordFailure() // recoveryAttempt=1
+
+	// Now close via a successful probe.
+	clk.setElapsed(20*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	cb.RecordSuccess() // close: recoveryAttempt should reset to 0
+	require.Equal(t, CircuitClosed, cb.State())
+
+	// Next trip from closed must use the base timeout (10s), not 20s.
+	cb.RecordFailure()
+	require.Equal(t, CircuitOpen, cb.State())
+
+	clk.setElapsed(9 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // 9s < 10s: still waiting
+
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow()) // base timeout elapsed → half-open
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryBackoffSlowProbeIncrementsAttempt verifies that a slow (not failed)
+// probe re-opening the breaker also increments the backoff counter.
+func TestRecoveryBackoffSlowProbeIncrementsAttempt(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(100),
+		RecoveryTimeout(10*time.Second),
+		RecoveryBackoffMultiplier(2.0),
+		SlowCallRate(100*time.Millisecond, 0.5),
+		SlowCallWindow(4),
+		SlowCallMinCalls(4),
+	)
+
+	// Trip via slow-call rate to put breaker open.
+	for range 4 {
+		cb.Record(200*time.Millisecond, nil)
+	}
+	require.Equal(t, CircuitOpen, cb.State())
+
+	// Probe: a slow (but not failed) result re-opens with incremented backoff.
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow())       // half-open
+	cb.Record(200*time.Millisecond, nil) // slow probe → re-opens: recoveryAttempt=1
+
+	require.Equal(t, CircuitOpen, cb.State())
+
+	// Verify next timeout is 20s (base 10s × 2^1).
+	clk.setElapsed(15 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
+
+	clk.setElapsed(20*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryBackoffConfigRoundTrip verifies that the config path (JSON/YAML
+// struct) correctly maps RecoveryBackoffMultiplier and RecoveryMaxBackoff to the
+// circuit breaker options.
+func TestRecoveryBackoffConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	multiplier := 2.0
+	maxBackoff := "20s"
+	opts, err := cbOptionsFromConfig(&CircuitBreakerConfig{
+		RecoveryBackoffMultiplier: &multiplier,
+		RecoveryMaxBackoff:        &maxBackoff,
+	})
+	require.NoError(t, err)
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		append(opts, FailureThreshold(1), RecoveryTimeout(10*time.Second))...,
+	)
+
+	cb.RecordFailure()
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	cb.RecordFailure() // recoveryAttempt=1: would be 20s, capped at 20s (equal)
+
+	clk.setElapsed(19 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen)
+
+	clk.setElapsed(20*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryMaxBackoffInvalidDuration verifies that an unparseable duration
+// string for RecoveryMaxBackoff returns an error from cbOptionsFromConfig.
+func TestRecoveryMaxBackoffInvalidDuration(t *testing.T) {
+	t.Parallel()
+
+	invalid := "not-a-duration"
+	_, err := cbOptionsFromConfig(&CircuitBreakerConfig{
+		RecoveryMaxBackoff: &invalid,
+	})
+	require.ErrorContains(t, err, "circuit_breaker.recovery_max_backoff")
+}
+
+// TestRecoveryBackoffReconfigureResetsAttempt verifies that enabling backoff via
+// Reconfigure (disabled → enabled) resets recoveryAttempt so the first probe
+// after reconfiguration uses the base timeout, not a stale accumulated count.
+func TestRecoveryBackoffReconfigureResetsAttempt(t *testing.T) {
+	t.Parallel()
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		FailureThreshold(1),
+		RecoveryTimeout(10*time.Second),
+	)
+
+	// Trip and accumulate a failed probe without backoff.
+	cb.RecordFailure()
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	cb.RecordFailure() // would be recoveryAttempt=0 (backoff disabled)
+
+	// Now enable backoff. recoveryAttempt must reset to 0.
+	cb.Reconfigure(RecoveryBackoffMultiplier(100.0))
+
+	// With a stale recoveryAttempt > 0 the timeout would be enormous.
+	// A clean reset means the base 10s should apply.
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow()) // base timeout — not 1000s
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// TestRecoveryBackoffMultiplierOnlyConfig verifies that cbOptionsFromConfig
+// handles a config with RecoveryBackoffMultiplier set but no RecoveryMaxBackoff
+// (the common case — uncapped growth).
+func TestRecoveryBackoffMultiplierOnlyConfig(t *testing.T) {
+	t.Parallel()
+
+	multiplier := 3.0
+	opts, err := cbOptionsFromConfig(&CircuitBreakerConfig{
+		RecoveryBackoffMultiplier: &multiplier,
+	})
+	require.NoError(t, err)
+
+	clk := &stubClock{now: time.Now()}
+	cb := NewCircuitBreaker(clk, &Hooks{},
+		append(opts, FailureThreshold(1), RecoveryTimeout(10*time.Second))...,
+	)
+
+	cb.RecordFailure()
+	clk.setElapsed(10*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	cb.RecordFailure() // recoveryAttempt=1: timeout = 10s × 3^1 = 30s
+
+	clk.setElapsed(20 * time.Second)
+	require.ErrorIs(t, cb.Allow(), ErrCircuitOpen) // 20s < 30s
+
+	clk.setElapsed(30*time.Second + 1)
+	require.NoError(t, cb.Allow())
+	require.Equal(t, CircuitHalfOpen, cb.State())
+}
+
+// ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 

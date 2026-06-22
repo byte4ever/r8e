@@ -178,6 +178,16 @@ r8e.WithCircuitBreaker(
 )
 ```
 
+**Adaptive recovery backoff (opt-in).** By default the breaker probes the downstream at a fixed interval (`RecoveryTimeout`). With `RecoveryBackoffMultiplier`, each failed half-open probe doubles (or scales by the configured factor) the wait before the next attempt, reducing pressure on a struggling downstream. `RecoveryMaxBackoff` caps the growth. The backoff resets to the base timeout when the breaker successfully closes. See [`examples/30-recovery-backoff`](examples/30-recovery-backoff).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.RecoveryTimeout(5*time.Second),
+    r8e.RecoveryBackoffMultiplier(2.0),   // 5s → 10s → 20s → …
+    r8e.RecoveryMaxBackoff(60*time.Second),
+)
+```
+
 ### Rate Limiter
 
 Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token.

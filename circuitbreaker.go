@@ -1,6 +1,7 @@
 package r8e
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -25,6 +26,13 @@ type (
 		slowCallRateThreshold float64
 		slowCallWindow        int
 		slowCallMinCalls      int
+
+		// Adaptive recovery backoff (opt-in via RecoveryBackoffMultiplier).
+		// After each failed half-open probe, the recovery wait is multiplied by
+		// recoveryBackoffMultiplier. A value <= 0 disables the feature (default).
+		// recoveryMaxBackoff caps the computed duration; 0 means no cap.
+		recoveryBackoffMultiplier float64
+		recoveryMaxBackoff        time.Duration
 	}
 
 	// CircuitBreakerOption configures a circuit breaker.
@@ -62,6 +70,12 @@ type (
 		failureCount      int
 		halfOpenSuccesses int
 		halfOpenInFlight  int // probes currently admitted in half-open
+
+		// recoveryAttempt counts consecutive failed half-open probes since the last
+		// closed→open transition. Used by currentRecoveryTimeout to scale the next
+		// recovery wait. Reset to zero when the breaker closes, or on a new trip
+		// from closed state. Guarded by mu.
+		recoveryAttempt int
 
 		mu    sync.Mutex
 		state uint32 // stateClosed | stateOpen | stateHalfOpen
@@ -195,6 +209,31 @@ func SlowCallMinCalls(n int) CircuitBreakerOption {
 	}
 }
 
+// RecoveryBackoffMultiplier enables exponential backoff on the recovery timeout
+// after consecutive failed half-open probes. After each probe that re-opens the
+// breaker, the next recovery wait is recoveryTimeout × factor^n, where n is the
+// number of consecutive failed probes. The first trip from closed always waits
+// one full recoveryTimeout (n=0). Pair with [RecoveryMaxBackoff] to cap growth.
+//
+// A factor ≤ 0 disables backoff (default: no backoff, base timeout always used).
+// A factor between 0 and 1 shortens the wait on each probe (anti-backoff — use
+// with caution). A factor > 1 is the typical use case.
+func RecoveryBackoffMultiplier(factor float64) CircuitBreakerOption {
+	return func(cfg *circuitBreakerConfig) {
+		cfg.recoveryBackoffMultiplier = factor
+	}
+}
+
+// RecoveryMaxBackoff caps the recovery timeout computed by
+// [RecoveryBackoffMultiplier]. It has no effect unless RecoveryBackoffMultiplier
+// is set to a value > 0. A non-positive duration means no configured cap.
+// Default: 0 (no cap).
+func RecoveryMaxBackoff(d time.Duration) CircuitBreakerOption {
+	return func(cfg *circuitBreakerConfig) {
+		cfg.recoveryMaxBackoff = d
+	}
+}
+
 // clampUnitInterval clamps rate into [0, 1], the valid range for a fraction.
 func clampUnitInterval(rate float64) float64 {
 	if rate < 0 {
@@ -206,6 +245,37 @@ func clampUnitInterval(rate float64) float64 {
 	}
 
 	return rate
+}
+
+// currentRecoveryTimeout returns the effective recovery wait for the current
+// open period. With no backoff configured (the default) it returns the base
+// recoveryTimeout unchanged. With [RecoveryBackoffMultiplier] > 0 it scales
+// the base by factor^recoveryAttempt, optionally capped by recoveryMaxBackoff.
+// Caller must hold mu.
+func (cb *CircuitBreaker) currentRecoveryTimeout() time.Duration {
+	if cb.cfg.recoveryBackoffMultiplier <= 0 || cb.recoveryAttempt == 0 {
+		return cb.cfg.recoveryTimeout
+	}
+
+	factor := math.Pow(cb.cfg.recoveryBackoffMultiplier, float64(cb.recoveryAttempt))
+
+	// Guard against overflow when converting to int64 (time.Duration). We use
+	// 9e18 rather than float64(math.MaxInt64) because the latter rounds up to
+	// 2^63 (9.22e18), which overflows back to negative on int64 conversion.
+	// 9e18 is a safe conservative bound (~285 years).
+	const safeMax = 9e18
+
+	ns := float64(cb.cfg.recoveryTimeout) * factor
+	if ns > safeMax || math.IsInf(ns, 1) {
+		ns = safeMax
+	}
+
+	d := time.Duration(ns)
+	if cb.cfg.recoveryMaxBackoff > 0 && d > cb.cfg.recoveryMaxBackoff {
+		return cb.cfg.recoveryMaxBackoff
+	}
+
+	return d
 }
 
 // NewCircuitBreaker creates a circuit breaker with the given options.
@@ -230,13 +300,21 @@ func NewCircuitBreaker(
 // options as [NewCircuitBreaker]. The current state and counters are
 // preserved; the new thresholds apply to subsequent decisions. One exception:
 // changing the slow-call window size (see [SlowCallWindow]) resets that window's
-// accumulated history on the next recorded call.
+// accumulated history on the next recorded call. When [RecoveryBackoffMultiplier]
+// transitions from disabled (≤ 0) to enabled (> 0), the accumulated probe-failure
+// counter is reset so the first probe after reconfiguration uses the base timeout.
 func (cb *CircuitBreaker) Reconfigure(opts ...CircuitBreakerOption) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	prevMultiplier := cb.cfg.recoveryBackoffMultiplier
+
 	for _, opt := range opts {
 		opt(&cb.cfg)
+	}
+
+	if prevMultiplier <= 0 && cb.cfg.recoveryBackoffMultiplier > 0 {
+		cb.recoveryAttempt = 0
 	}
 }
 
@@ -259,7 +337,7 @@ func (cb *CircuitBreaker) Allow() error {
 
 	switch cb.state {
 	case stateOpen:
-		if cb.clock.Since(cb.lastFailure) <= cb.cfg.recoveryTimeout {
+		if cb.clock.Since(cb.lastFailure) <= cb.currentRecoveryTimeout() {
 			err = ErrCircuitOpen
 
 			break
@@ -363,7 +441,9 @@ func (cb *CircuitBreaker) recordOutcome(in callInput) {
 // half-open probe counters, and (re)starts the recovery clock from now. It is
 // the sole writer of lastFailure on an open transition (the non-opening failure
 // paths stamp it themselves), and returns the supplied trip hook for the caller
-// to fire after unlock. Caller must hold mu.
+// to fire after unlock. Callers are responsible for updating recoveryAttempt
+// before calling (recordClosed resets it; recordHalfOpen bumps it via
+// bumpRecoveryAttemptLocked). Caller must hold mu.
 func (cb *CircuitBreaker) openLocked(emit func()) func() {
 	cb.state = stateOpen
 	cb.halfOpenSuccesses = 0
@@ -371,6 +451,15 @@ func (cb *CircuitBreaker) openLocked(emit func()) func() {
 	cb.lastFailure = cb.clock.Now()
 
 	return emit
+}
+
+// bumpRecoveryAttemptLocked increments recoveryAttempt when adaptive recovery
+// backoff is configured (recoveryBackoffMultiplier > 0). Called by
+// recordHalfOpen before a half-open → open transition. Caller must hold mu.
+func (cb *CircuitBreaker) bumpRecoveryAttemptLocked() {
+	if cb.cfg.recoveryBackoffMultiplier > 0 {
+		cb.recoveryAttempt++
+	}
 }
 
 // recordClosed applies a closed-state outcome and returns the hook to fire (or
@@ -383,6 +472,7 @@ func (cb *CircuitBreaker) recordClosed(out callOutcome) func() {
 	if out.failed {
 		cb.failureCount++
 		if cb.failureCount >= cb.cfg.failureThreshold {
+			cb.recoveryAttempt = 0
 			return cb.openLocked(cb.hooks.emitCircuitOpen)
 		}
 	} else {
@@ -391,6 +481,7 @@ func (cb *CircuitBreaker) recordClosed(out callOutcome) func() {
 
 	if cb.slowCallEnabled() &&
 		cb.slowWin.tripped(cb.cfg.slowCallMinCalls, cb.cfg.slowCallRateThreshold) {
+		cb.recoveryAttempt = 0
 		return cb.openLocked(cb.emitOpenedBySlowCall)
 	}
 
@@ -411,11 +502,13 @@ func (cb *CircuitBreaker) recordHalfOpen(out callOutcome) func() {
 	cb.releaseProbe()
 
 	if out.failed {
+		cb.bumpRecoveryAttemptLocked()
 		return cb.openLocked(cb.hooks.emitCircuitOpen)
 	}
 
 	if out.slow {
 		// Reopened by a slow (not failed) probe — surface the slow-call reason.
+		cb.bumpRecoveryAttemptLocked()
 		return cb.openLocked(cb.emitOpenedBySlowCall)
 	}
 
@@ -428,6 +521,7 @@ func (cb *CircuitBreaker) recordHalfOpen(out callOutcome) func() {
 	cb.failureCount = 0
 	cb.halfOpenSuccesses = 0
 	cb.halfOpenInFlight = 0
+	cb.recoveryAttempt = 0 // reset backoff — next trip starts from base recoveryTimeout
 
 	return cb.hooks.emitCircuitClose
 }

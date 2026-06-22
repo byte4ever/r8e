@@ -85,6 +85,14 @@ type (
 		// SlowCallMinCalls is the minimum observed calls before the slow-call
 		// rate is evaluated. Optional. Default 10. Example: 20.
 		SlowCallMinCalls *int `json:"slow_call_min_calls,omitempty" yaml:"slow_call_min_calls,omitempty"`
+		// RecoveryBackoffMultiplier enables exponential backoff on the recovery
+		// timeout after consecutive failed half-open probes (opt-in, default 0 =
+		// disabled). A factor > 1 is the typical use case. Example: 2.0.
+		RecoveryBackoffMultiplier *float64 `json:"recovery_backoff_multiplier,omitempty" yaml:"recovery_backoff_multiplier,omitempty"` //nolint:lll // struct tag cannot be split across lines
+		// RecoveryMaxBackoff caps the exponential backoff duration. Optional.
+		// Only meaningful when RecoveryBackoffMultiplier is set.
+		// Parsed via time.ParseDuration. Example: "60s".
+		RecoveryMaxBackoff *string `json:"recovery_max_backoff,omitempty" yaml:"recovery_max_backoff,omitempty"`
 	}
 
 	// RetryConfig holds retry configuration values. Embed it
@@ -431,6 +439,19 @@ func cbOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, err
 	}
 
 	opts = append(opts, slowOpts...)
+
+	if cfg.RecoveryBackoffMultiplier != nil {
+		opts = append(opts, RecoveryBackoffMultiplier(*cfg.RecoveryBackoffMultiplier))
+	}
+
+	if cfg.RecoveryMaxBackoff != nil {
+		maxBackoffDur, parseErr := time.ParseDuration(*cfg.RecoveryMaxBackoff)
+		if parseErr != nil {
+			return nil, fmt.Errorf("circuit_breaker.recovery_max_backoff: %w", parseErr)
+		}
+
+		opts = append(opts, RecoveryMaxBackoff(maxBackoffDur))
+	}
 
 	return opts, nil
 }
