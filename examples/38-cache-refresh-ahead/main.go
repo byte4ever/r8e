@@ -2,8 +2,17 @@
 // (WithCache + RefreshAhead). Past the refresh threshold but still within the
 // fresh TTL, a read is served the current value immediately AND kicks off a
 // single coalesced background reload, so a hot key keeps serving fresh hits and
-// never falls through to a synchronous miss (Caffeine refreshAfterWrite). The
-// detached reload is bounded by the required WithTimeout.
+// never falls through to a synchronous miss (Caffeine refreshAfterWrite).
+//
+// The problem it solves: a plain read-through cache lets a hot key expire, and
+// the unlucky request that arrives at expiry eats the full backend latency (a
+// "synchronous miss") — and a stampede of them can all miss at once. Refresh-ahead
+// repaints the entry in the background just before it would go stale, so callers
+// keep getting fast hits and the latency spike never lands on the request path.
+// The reload is detached from the caller (it loses the caller's deadline), so it
+// requires WithTimeout to bound it. This run walks one key through the cold miss,
+// a fresh hit, a refresh-window hit that fires the background reload, and the hit
+// that sees the refreshed value land — all without a single synchronous miss.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -77,10 +86,15 @@ func main() {
 	policy := r8e.NewPolicy[string]("catalog",
 		r8e.WithCache(
 			cache, resourceKey,
-			100*time.Millisecond,                 // fresh TTL
-			r8e.RefreshAhead(50*time.Millisecond), // reload in the background past 50ms
+			100*time.Millisecond, // fresh TTL: hits within 100ms skip the backend
+			// Threshold deliberately shorter than the TTL: a hit in the [50ms,
+			// 100ms) tail is still served from cache but also triggers a reload, so
+			// the entry is refreshed before it can expire into a synchronous miss.
+			r8e.RefreshAhead(50*time.Millisecond),
 		),
-		// RefreshAhead's detached reload needs a timeout to bound it.
+		// The reload runs detached and thus loses the caller's deadline; WithTimeout
+		// gives it its own bound. Omitting it would panic with
+		// ErrRefreshAheadWithoutTimeout once the threshold can actually fire.
 		r8e.WithTimeout(time.Second),
 	)
 
@@ -95,21 +109,29 @@ func main() {
 		return v
 	}
 
-	// Cold read: a miss populates the cache at v1.
+	// Cold read at age 0: nothing cached yet, so this is the one and only
+	// synchronous backend hit — it populates the entry at v1.
 	fmt.Printf("cold read    -> %q (miss, backend hit)\n", read())
 
-	// Still fresh, before the refresh threshold: a plain hit, no reload.
+	// Age ~20ms: still well within the fresh TTL and before the 50ms threshold,
+	// so this is a plain read-through hit — no reload, value unchanged at v1.
 	time.Sleep(20 * time.Millisecond)
 	fmt.Printf("early hit    -> %q (fresh hit, no reload)\n", read())
 
-	// Age into the refresh window [50ms, 100ms): served immediately, reload fired.
+	// Age ~60ms: now inside the refresh window [50ms, 100ms). The caller is still
+	// served the cached v1 immediately (no latency penalty), and a single detached
+	// reload is fired in the background to repaint the entry.
 	time.Sleep(40 * time.Millisecond)
 	fmt.Printf("ageing hit   -> %q (served now, refreshing in background)\n", read())
 
-	// Give the detached reload a moment to repopulate the entry.
+	// Give the detached reload a moment to finish and write v2 back into the cache
+	// before we read again — otherwise we might observe v1 before v2 lands.
 	time.Sleep(20 * time.Millisecond)
 	fmt.Printf("refreshed hit-> %q (background reload landed; still a hit)\n", read())
 
+	// The tally tells the whole story: exactly one miss (the cold read), three
+	// hits (every subsequent read), two stores (cold populate + refresh write),
+	// and one refresh — i.e. the hot key never suffered a synchronous miss.
 	m := policy.Metrics()
 	fmt.Printf("\nhits=%d misses=%d stores=%d refreshes=%d\n",
 		m.CacheHits, m.CacheMisses, m.CacheStores, m.CacheRefreshes)

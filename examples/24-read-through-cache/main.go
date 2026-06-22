@@ -1,8 +1,11 @@
 // Example 24-read-through-cache: Demonstrates the read-through cache policy
-// (WithCache). A fresh hit short-circuits the whole chain; past the fresh TTL a
-// value lingers as a stale fallback served when revalidation fails
-// (stale-if-error); failures for a never-seen key are negatively cached to
-// fast-fail; and ForceRefresh busts a single call's cached read.
+// (WithCache), which folds four behaviours behind one option so a hot key does
+// not turn every request into a downstream round-trip. A fresh hit short-circuits
+// the whole chain; past the fresh TTL a value lingers as a stale fallback served
+// when revalidation fails (stale-if-error, so a downstream outage degrades to
+// last-known-good instead of an error); failures for a never-seen key are
+// negatively cached so a known-bad key fast-fails instead of hammering the
+// backend; and ForceRefresh busts a single call's cached read on demand.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -62,6 +65,9 @@ func main() {
 		data: make(map[string]r8e.CacheEntry[string]),
 	}
 
+	// backendCalls counts real downstream work so each section can prove a hit
+	// skipped it; fail flips the backend "broken" to exercise the stale and
+	// negative paths without a real failing dependency.
 	var (
 		backendCalls atomic.Int64
 		fail         atomic.Bool
@@ -88,9 +94,13 @@ func main() {
 		// concurrent miss stampede into one downstream call (see example 20).
 	)
 
+	// The id rides in the context; the key function reads it back, so the same
+	// context drives both the cache key and (if paired) coalescing.
 	doc1 := withID(context.Background(), "doc:1")
 
 	// --- Read-through: the second call is served from cache ---
+	// First call misses and populates; the second lands within the 50ms fresh TTL,
+	// so it returns the cached value and never touches the backend.
 	fmt.Println("=== Read-through ===")
 
 	for i := 1; i <= 2; i++ {
@@ -101,6 +111,9 @@ func main() {
 	fmt.Printf("  backend calls: %d (second was a cache hit)\n\n", backendCalls.Load())
 
 	// --- ForceRefresh: bypass the cached read for one call ---
+	// doc:1 is still fresh, so a normal call would hit the cache. ForceRefresh
+	// wraps the context to skip the cached read for this one call (and repopulate
+	// on success) — the escape hatch for "I need the authoritative value now".
 	fmt.Println("=== ForceRefresh ===")
 	backendCalls.Store(0)
 
@@ -109,6 +122,9 @@ func main() {
 		forced, err, backendCalls.Load())
 
 	// --- Stale-if-error: past the fresh TTL, a failure serves the stale value ---
+	// Once the value is stale, a call re-executes to refresh it; here that refresh
+	// fails, so rather than surface the error we serve the last-known-good value —
+	// a brief outage degrades to slightly stale data instead of a hard failure.
 	fmt.Println("=== Stale-if-error ===")
 	backendCalls.Store(0)
 
@@ -120,6 +136,9 @@ func main() {
 		stale, err, backendCalls.Load())
 
 	// --- Negative caching: a fresh failing key fast-fails the next call ---
+	// doc:missing has never succeeded, so there is no stale value to fall back on.
+	// The first failure is cached briefly; the second call fast-fails from that
+	// negative entry instead of retrying the (still broken) backend.
 	fmt.Println("=== Negative caching ===")
 	backendCalls.Store(0)
 

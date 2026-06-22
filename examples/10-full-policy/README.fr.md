@@ -1,40 +1,40 @@
 *[Read in English](README.md)*
 
-# Exemple 10 — Politique complete
+# Exemple 10 — Politique complète
 
-Illustre la composition de tous les patrons de resilience en une seule
-politique. r8e trie automatiquement les patrons dans un ordre d'execution
-raisonnable, quel que soit l'ordre dans lequel les options sont specifiees.
+Illustre la composition de tous les patrons de résilience en une seule
+politique. r8e trie automatiquement les patrons dans un ordre d'exécution
+raisonnable, quel que soit l'ordre dans lequel les options sont spécifiées.
 
 ## Ce que cet exemple illustre
 
-Une seule politique est creee avec chaque patron disponible :
+Une seule politique est créée avec chaque patron disponible :
 
 - **Fallback** — valeur statique en dernier recours
-- **Timeout** — delai global de 2 secondes
-- **Circuit breaker** — s'ouvre apres 3 echecs, recuperation en 10 secondes
-- **Rate limiter** — 100 requetes par seconde
+- **Timeout** — délai global de 2 secondes
+- **Circuit breaker** — s'ouvre après 3 échecs, récupération en 10 secondes
+- **Rate limiter** — 100 requêtes par seconde
 - **Bulkhead** — 10 appels concurrents
 - **Retry** — 3 tentatives avec backoff exponentiel
-- **Hedge** — lance un second appel apres 50 ms
-- **Hooks** — callbacks d'observabilite pour retry, timeout et fallback
+- **Hedge** — lance un second appel après 50 ms
+- **Hooks** — callbacks d'observabilité pour retry, timeout et fallback
 
-Trois scenarios sont executes avec la politique composee :
+Trois scénarios sont exécutés avec la politique composée :
 
-1. **Appel reussi** — tous les patrons laissent passer de maniere
-   transparente. Le resultat de la fonction est renvoye directement.
+1. **Appel réussi** — tous les patrons laissent passer de manière
+   transparente. Le résultat de la fonction est renvoyé directement.
 
-2. **Appel en echec** — la fonction echoue systematiquement. Les retentatives
-   sont epuisees (les hooks enregistrent chaque tentative), puis le fallback
+2. **Appel en échec** — la fonction échoue systématiquement. Les retentatives
+   sont épuisées (les hooks enregistrent chaque tentative), puis le fallback
    fournit la valeur finale.
 
-3. **Retry + fallback sur une politique neuve** — demontre que le fallback
-   intercepte l'erreur une fois les retentatives epuisees.
+3. **Retry + fallback sur une politique neuve** — démontre que le fallback
+   intercepte l'erreur une fois les retentatives épuisées.
 
-## Ordre d'execution
+## Ordre d'exécution
 
-Les patrons sont tries automatiquement par priorite. Le middleware le plus
-externe s'execute en premier :
+Les patrons sont triés automatiquement par priorité. Le middleware le plus
+externe s'exécute en premier :
 
 ```mermaid
 flowchart LR
@@ -58,13 +58,13 @@ flowchart LR
 
 Cet ordre garantit que :
 - Le fallback intercepte tout
-- Le timeout limite la duree totale d'execution
-- Le circuit breaker empeche les appels vers un service en mauvaise sante
-- Le rate limiter et le bulkhead protegent les ressources partagees
-- Le retry et le hedge sont les plus internes — ils retentent/mettent en
-  concurrence la fonction reelle
+- Le timeout limite la durée totale d'exécution
+- Le circuit breaker empêche les appels vers un service en mauvaise santé
+- Le rate limiter et le bulkhead protègent les ressources partagées
+- Le retry et le hedge sont les plus internes — ils retentent ou mettent en
+  concurrence la fonction réelle
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/10-full-policy/
@@ -72,5 +72,5 @@ go run ./examples/10-full-policy/
 
 ## Sortie attendue
 
-Un appel reussi renvoie directement le resultat. Un appel en echec affiche
-les hooks de retry se declenchant, puis la valeur de fallback renvoyee.
+Un appel réussi renvoie directement le résultat. Un appel en échec affiche
+les hooks de retry qui se déclenchent, puis la valeur de fallback renvoyée.

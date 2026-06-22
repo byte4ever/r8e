@@ -2,33 +2,33 @@
 
 # Exemple 03 — Circuit Breaker
 
-Demontre la machine a etats du circuit breaker : **closed** (normal),
-**open** (echec immediat) et **half-open** (sonde de reprise).
+Démontre la machine à états du circuit breaker : **closed** (normal),
+**open** (échec immédiat) et **half-open** (sonde de reprise).
 
-## Ce que cet exemple demontre
+## Ce que cet exemple démontre
 
 L'exemple parcourt le cycle de vie complet d'un circuit breaker :
 
-1. **Phase 1 — Declenchement d'echecs :** Trois echecs consecutifs atteignent
-   le seuil `FailureThreshold(3)`, provoquant la transition du breaker de
-   closed a **open**. Un quatrieme appel est immediatement rejete avec
-   `ErrCircuitOpen` sans atteindre le service en aval.
+1. **Phase 1 — Déclenchement d'échecs :** Trois échecs consécutifs atteignent
+   le seuil `FailureThreshold(3)`, ce qui provoque la transition du breaker de
+   closed à **open**. Un quatrième appel est immédiatement rejeté avec
+   `ErrCircuitOpen` sans jamais atteindre le service en aval.
 
-2. **Phase 2 — Delai de reprise :** Le programme attend au-dela du
-   `RecoveryTimeout(500ms)`, permettant au breaker de passer a **half-open**.
+2. **Phase 2 — Délai de reprise :** Le programme attend au-delà du
+   `RecoveryTimeout(500ms)`, ce qui permet au breaker de passer à **half-open**.
 
-3. **Phase 3 — Sonde half-open :** L'appel suivant est autorise a passer en
-   tant que sonde. Puisque le service en aval a recupere
-   (`shouldFail = false`), la sonde reussit et le breaker revient a **closed**.
+3. **Phase 3 — Sonde half-open :** L'appel suivant est autorisé à passer en
+   tant que sonde. Comme le service en aval s'est rétabli
+   (`shouldFail = false`), la sonde réussit et le breaker revient à **closed**.
 
 4. **Phase 4 — Fonctionnement normal :** Les appels suivants transitent
-   normalement a travers le breaker ferme.
+   normalement à travers le breaker fermé.
 
 Les hooks de cycle de vie (`OnCircuitOpen`, `OnCircuitHalfOpen`,
-`OnCircuitClose`) journalisent chaque transition d'etat au moment ou elle se
+`OnCircuitClose`) journalisent chaque transition d'état au moment où elle se
 produit.
 
-## Machine a etats
+## Machine à états
 
 ```mermaid
 stateDiagram-v2
@@ -46,16 +46,16 @@ stateDiagram-v2
     HalfOpen : Next call decides state
 ```
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `FailureThreshold(n)` | Nombre d'echecs consecutifs avant l'ouverture du breaker |
-| `RecoveryTimeout(d)` | Duree pendant laquelle le breaker reste ouvert avant de passer en half-open |
-| `HalfOpenMaxAttempts(n)` | Nombre de sondes reussies necessaires pour refermer le breaker |
-| `ErrCircuitOpen` | Erreur sentinelle retournee lorsqu'un appel est rejete par un breaker ouvert |
+| `FailureThreshold(n)` | Nombre d'échecs consécutifs avant l'ouverture du breaker |
+| `RecoveryTimeout(d)` | Durée pendant laquelle le breaker reste ouvert avant de passer en half-open |
+| `HalfOpenMaxAttempts(n)` | Nombre de sondes réussies nécessaires pour refermer le breaker |
+| `ErrCircuitOpen` | Erreur sentinelle renvoyée lorsqu'un appel est rejeté par un breaker ouvert |
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/03-circuit-breaker/
@@ -63,6 +63,6 @@ go run ./examples/03-circuit-breaker/
 
 ## Sortie attendue
 
-Les transitions d'etat sont journalisees via les hooks, montrant le breaker
-s'ouvrir apres les echecs, puis recuperer en passant par half-open pour revenir
-a closed.
+Les transitions d'état sont journalisées via les hooks, montrant le breaker
+s'ouvrir après les échecs, puis se rétablir en passant par half-open pour
+revenir à closed.

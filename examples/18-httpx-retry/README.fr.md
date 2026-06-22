@@ -2,46 +2,46 @@
 
 # Exemple 18 — httpx Retry
 
-Demontre l'adaptateur `httpx` avec retry, montrant la recuperation apres des
-echecs transitoires, l'epuisement des tentatives, le court-circuit des erreurs
+Démontre l'adaptateur `httpx` avec retry, en montrant la récupération après des
+échecs transitoires, l'épuisement des tentatives, le court-circuit des erreurs
 permanentes et la gestion du rate-limit (429).
 
-## Ce que cet exemple demontre
+## Ce que cet exemple démontre
 
-### Recuperation transitoire
+### Récupération transitoire
 
 Un serveur retourne 503 deux fois, puis 200. Le `httpx.Client` avec retry
-configure retente automatiquement les echecs transitoires et recupere a la
-troisieme tentative. Le corps de la reponse est draine et ferme a chaque
-retentative transitoire afin que les connexions TCP soient reutilisees.
+configuré retente automatiquement les échecs transitoires et récupère à la
+troisième tentative. Le corps de la réponse est drainé et fermé à chaque
+retentative transitoire afin que les connexions TCP soient réutilisées.
 
-### Tentatives epuisees
+### Tentatives épuisées
 
 Lorsque le serveur retourne toujours 503, toutes les tentatives sont
-consommees. L'erreur encapsule `r8e.ErrRetriesExhausted` et le dernier
+consommées. L'erreur encapsule `r8e.ErrRetriesExhausted` et le dernier
 `StatusError` est extractible via `errors.As`.
 
-### L'erreur permanente arrete les retentatives
+### L'erreur permanente arrête les retentatives
 
-Une reponse 400 est classifiee comme permanente. Meme avec 5 retentatives
-configurees, le client s'arrete apres une seule tentative — aucun budget de
-retry n'est gaspille.
+Une réponse 400 est classifiée comme permanente. Même avec 5 retentatives
+configurées, le client s'arrête après une seule tentative — aucun budget de
+retry n'est gaspillé.
 
-### Recuperation apres rate-limit (429)
+### Récupération après rate-limit (429)
 
-Un 429 (Too Many Requests) est classifie comme transitoire. Le client retente
-et reussit a la tentative suivante.
+Un 429 (Too Many Requests) est classifié comme transitoire. Le client retente
+et réussit à la tentative suivante.
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `WithRetry` | Configure le retry avec un nombre max de tentatives et une strategie de backoff |
-| Classification `Transient` | 429, 502, 503, 504 declenchent un retry |
-| Classification `Permanent` | 4xx (sauf 429) arrete immediatement les retentatives |
-| `ErrRetriesExhausted` | Erreur sentinelle lorsque toutes les tentatives echouent |
-| `StatusError` | Extractible depuis la chaine d'erreurs meme apres epuisement des tentatives |
-| Drainage du corps au retry | Les reponses transitoires ont leur corps draine et ferme automatiquement |
+| `WithRetry` | Configure le retry avec un nombre max de tentatives et une stratégie de backoff |
+| Classification `Transient` | 429, 502, 503, 504 déclenchent un retry |
+| Classification `Permanent` | 4xx (sauf 429) arrête immédiatement les retentatives |
+| `ErrRetriesExhausted` | Erreur sentinelle lorsque toutes les tentatives échouent |
+| `StatusError` | Extractible depuis la chaîne d'erreurs même après épuisement des tentatives |
+| Drainage du corps au retry | Les réponses transitoires ont leur corps drainé et fermé automatiquement |
 
 ## Flux de retry avec httpx
 
@@ -60,7 +60,7 @@ flowchart TD
     J --> K[Pas de retry]
 ```
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/18-httpx-retry/

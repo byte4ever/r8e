@@ -2,39 +2,39 @@
 
 # Exemple 13 — Health & Readiness
 
-Montre le reporting de sante des policies, les dependances hierarchiques et
+Montre le reporting de santé des policies, les dépendances hiérarchiques et
 l'exposition d'un endpoint HTTP `/readyz` compatible Kubernetes.
 
-## Ce que cet exemple demontre
+## Ce que cet exemple démontre
 
-### Reporting de sante
+### Reporting de santé
 
-Toute policy dotee d'un circuit breaker rapporte automatiquement son etat de
-sante via l'interface `HealthReporter`. La methode `HealthStatus()` retourne :
+Toute policy dotée d'un circuit breaker rapporte automatiquement son état de
+santé via l'interface `HealthReporter`. La méthode `HealthStatus()` retourne :
 
 - **Name** — le nom de la policy
-- **Healthy** — `true` si le circuit breaker est ferme ou semi-ouvert
-- **State** — etat lisible (`"healthy"`, `"circuit_open"`, etc.)
+- **Healthy** — `true` si le circuit breaker est fermé ou semi-ouvert
+- **State** — état lisible (`"healthy"`, `"circuit_open"`, etc.)
 - **Criticality** — `CriticalityNone`, `CriticalityDegraded` ou
   `CriticalityCritical`
 
-### Dependances hierarchiques
+### Dépendances hiérarchiques
 
-`DependsOn(dbPolicy)` declare que la policy `api-gateway` depend de la policy
-`database`. Lorsque le circuit breaker de la base de donnees s'ouvre :
+`DependsOn(dbPolicy)` déclare que la policy `api-gateway` dépend de la policy
+`database`. Lorsque le circuit breaker de la base de données s'ouvre :
 
 - `dbPolicy.HealthStatus().Healthy` devient `false`
-- `apiPolicy.HealthStatus()` inclut la base de donnees comme dependance dans
+- `apiPolicy.HealthStatus()` inclut la base de données comme dépendance dans
   son statut
 
 ### Registry et readiness
 
-Les deux policies s'enregistrent dans le meme `Registry`. Le registry agrege
-la sante de toutes les policies enregistrees :
+Les deux policies s'enregistrent dans le même `Registry`. Le registry agrège
+la santé de toutes les policies enregistrées :
 
 - `CheckReadiness()` retourne `Ready: true` uniquement si aucune policy
-  critique n'est en mauvaise sante
-- Lorsque le breaker de la base de donnees s'ouvre, `Ready` devient `false`
+  critique n'est en mauvaise santé
+- Lorsque le breaker de la base de données s'ouvre, `Ready` devient `false`
 
 ### Endpoint HTTP `/readyz`
 
@@ -42,11 +42,11 @@ la sante de toutes les policies enregistrees :
 `http.Handler` qui :
 
 - Retourne HTTP 200 avec un corps JSON lorsque toutes les policies critiques
-  sont en bonne sante
-- Retourne HTTP 503 lorsqu'une policy critique est en mauvaise sante
+  sont en bonne santé
+- Retourne HTTP 503 lorsqu'une policy critique est en mauvaise santé
 
-L'exemple utilise `httptest.NewRecorder` pour demonstrer l'endpoint sans
-demarrer un veritable serveur.
+L'exemple utilise `httptest.NewRecorder` pour démontrer l'endpoint sans
+démarrer un véritable serveur.
 
 ## Architecture
 
@@ -75,17 +75,17 @@ flowchart TD
     K8S -->|Critical unhealthy| FAIL[HTTP 503]
 ```
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `HealthReporter` | Interface implementee par les policies dotees d'un circuit breaker |
-| `DependsOn(reporters...)` | Declare les dependances de sante hierarchiques |
-| `Registry` | Agrege la sante de toutes les policies enregistrees |
-| `CheckReadiness()` | Retourne un `ReadinessStatus` avec l'etat de readiness global |
+| `HealthReporter` | Interface implémentée par les policies dotées d'un circuit breaker |
+| `DependsOn(reporters...)` | Déclare les dépendances de santé hiérarchiques |
+| `Registry` | Agrège la santé de toutes les policies enregistrées |
+| `CheckReadiness()` | Retourne un `ReadinessStatus` avec l'état de readiness global |
 | `r8ehttp.ReadinessHandler(reg)` | Handler HTTP pour les sondes Kubernetes `/readyz` |
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/13-health-readiness/
@@ -93,6 +93,6 @@ go run ./examples/13-health-readiness/
 
 ## Sortie attendue
 
-L'etat de sante initial est entierement sain. Apres avoir declenche des
-erreurs sur la base de donnees, la policy de base de donnees devient en
-mauvaise sante, la readiness devient `false` et l'endpoint HTTP retourne 503.
+L'état de santé initial est entièrement sain. Après avoir déclenché des
+erreurs sur la base de données, la policy de base de données passe en
+mauvaise santé, la readiness devient `false` et l'endpoint HTTP retourne 503.

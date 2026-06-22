@@ -2,33 +2,33 @@
 
 # Exemple 08 — Stale Cache
 
-Illustre le cache autonome a cle avec donnees obsoletes en cas d'erreur
-(`StaleCache`). En cas de succes, les resultats sont mis en cache par cle. En
-cas d'echec, la derniere valeur valide connue pour cette cle est servie si
-elle est disponible.
+Illustre le cache autonome à clé avec service de données obsolètes en cas
+d'erreur (`StaleCache`). En cas de succès, les résultats sont mis en cache par
+clé. En cas d'échec, la dernière valeur valide connue pour cette clé est servie
+si elle est disponible.
 
 ## Ce que cet exemple illustre
 
-Trois scenarios illustrent le comportement du stale cache :
+Trois scénarios illustrent le comportement du stale cache :
 
-1. **Succes -- cache alimente :** Le premier appel pour la cle `"user:1"`
-   reussit. Le resultat est stocke dans le cache et le hook `OnCacheRefreshed`
-   se declenche.
+1. **Succès — cache alimenté :** Le premier appel pour la clé `"user:1"`
+   réussit. Le résultat est stocké dans le cache et le hook `OnCacheRefreshed`
+   se déclenche.
 
-2. **Echec -- donnees obsoletes servies :** Le service aval est bascule en
-   mode erreur. Le second appel pour la meme cle `"user:1"` echoue, mais le
-   cache contient la valeur precedente. Le resultat obsolete est renvoye (sans
-   erreur), et le hook `OnStaleServed` se declenche.
+2. **Échec — données obsolètes servies :** Le service aval est basculé en
+   mode erreur. Le second appel pour la même clé `"user:1"` échoue, mais le
+   cache contient la valeur précédente. Le résultat obsolète est renvoyé (sans
+   erreur), et le hook `OnStaleServed` se déclenche.
 
-3. **Echec, cle differente -- pas de cache :** Un appel pour la cle `"user:2"`
-   echoue. Comme aucune valeur en cache n'existe pour cette cle, l'erreur
-   originale est propagee a l'appelant.
+3. **Échec, clé différente — pas de cache :** Un appel pour la clé `"user:2"`
+   échoue. Comme aucune valeur en cache n'existe pour cette clé, l'erreur
+   d'origine est propagée à l'appelant.
 
-L'exemple utilise une simple `map` en memoire comme backend de cache pour
+L'exemple utilise une simple `map` en mémoire comme backend de cache pour
 illustrer l'interface `Cache[K, V]` en action. En production, utilisez un
-adaptateur de cache adapte comme `otter` ou `ristretto`.
+adaptateur de cache adapté comme `otter` ou `ristretto`.
 
-## Flux de decision
+## Flux de décision
 
 ```mermaid
 flowchart TD
@@ -40,21 +40,21 @@ flowchart TD
     E -->|No| G[Return original error]
 ```
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `StaleCache[K, V]` | Wrapper de cache autonome a cle -- ne fait pas partie de `Policy` |
-| `Cache[K, V]` | Interface implementee par les backends de cache : `Get`, `Set`, `Delete` |
+| `StaleCache[K, V]` | Wrapper de cache autonome à clé — ne fait pas partie de `Policy` |
+| `Cache[K, V]` | Interface implémentée par les backends de cache : `Get`, `Set`, `Delete` |
 | `NewStaleCache` | Constructeur prenant un backend `Cache`, un TTL et des hooks optionnels |
-| `OnStaleServed` | Hook declenche lorsqu'une valeur obsolete du cache est servie a la place d'une erreur |
-| `OnCacheRefreshed` | Hook declenche lorsqu'une entree du cache est mise a jour apres un appel reussi |
-| Isolation par cle | Chaque cle a sa propre valeur en cache ; une absence sur une cle n'affecte pas les autres |
+| `OnStaleServed` | Hook déclenché lorsqu'une valeur obsolète du cache est servie à la place d'une erreur |
+| `OnCacheRefreshed` | Hook déclenché lorsqu'une entrée du cache est mise à jour après un appel réussi |
+| Isolation par clé | Chaque clé a sa propre valeur en cache ; une absence sur une clé n'affecte pas les autres |
 
 ## Composition avec Policy
 
 `StaleCache` est autonome. Pour le combiner avec une `Policy`, appelez
-`policy.Do` a l'interieur de `staleCache.Do` :
+`policy.Do` à l'intérieur de `staleCache.Do` :
 
 ```go
 result, err := sc.Do(ctx, key, func(ctx context.Context, k string) (string, error) {
@@ -64,7 +64,7 @@ result, err := sc.Do(ctx, key, func(ctx context.Context, k string) (string, erro
 })
 ```
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/08-stale-cache/

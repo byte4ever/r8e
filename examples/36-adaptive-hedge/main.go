@@ -6,6 +6,13 @@
 // becomes the hard ceiling (the adaptive delay never exceeds it) and the warmup
 // fallback. Pair it with a concurrency budget to cap the redundant load.
 //
+// The problem it solves: a fixed hedge delay is the same guess as a fixed timeout,
+// with a worse failure mode. Set it too low and you double the load on every call,
+// not just the slow ones; set it too high and the hedge fires too late to help.
+// Anchoring it to the live p95 (Google's tail-at-scale rule) means the second
+// attempt races only the genuinely slow tail, so you buy back latency without
+// paying for it on the common fast path.
+//
 //nolint:forbidigo // This is an example program; printing is fine here.
 package main
 
@@ -28,15 +35,25 @@ func main() {
 	policy := r8e.NewPolicy[string](
 		"adaptive-hedge",
 		r8e.WithHedge(
+			// 500ms is the ceiling and warmup fallback — the adaptive delay only
+			// ever pulls the hedge earlier than this, never later.
 			500*time.Millisecond,
 			r8e.AdaptiveHedge(
+				// Fire at the p95: the fastest 95% of calls finish before the
+				// hedge would ever start, so they pay no redundant cost at all.
 				r8e.AdaptiveHedgePercentile(0.95),
+				// ×1.0 means hedge exactly at the p95; raise it to wait deeper
+				// into the tail, lower it to hedge more eagerly.
 				r8e.AdaptiveHedgeMultiplier(1.0),
+				// A floor so a burst of ultra-fast calls can't drive the delay to
+				// near-zero and turn every call into a doubled request.
 				r8e.AdaptiveHedgeFloor(5*time.Millisecond),
 			),
 		),
-		// Cap the extra load the hedges add: at most 25% of in-flight executions,
-		// with a small floor.
+		// A hedge is a redundant request, so it can amplify load exactly when the
+		// backend is already struggling. The budget bounds that blast radius: the
+		// hedges may use at most 25% of in-flight executions, with a small floor
+		// so low-traffic policies can still hedge at all.
 		r8e.WithConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5)),
 	)
 
@@ -57,6 +74,8 @@ func main() {
 		}
 	}
 
+	// Enough calls (300) for the ~4% straggler rate to populate the window and
+	// hold the p95 firmly in the fast band before we sample the adaptive delay.
 	const calls = 300
 
 	fmt.Printf("=== Driving %d calls (mostly ~10ms, some 300ms stragglers) ===\n", calls)
@@ -68,6 +87,8 @@ func main() {
 	}
 
 	// --- Observability ---
+	// AdaptiveHedgeDelay is where the hedge currently fires; comparing it to the
+	// p95 and the triggered/won counters shows the tail being raced, not every call.
 	metrics := policy.Metrics()
 
 	fmt.Println("\n=== After warmup ===")

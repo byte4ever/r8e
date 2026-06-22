@@ -2,49 +2,49 @@
 
 # Exemple 16 — Convenience Do
 
-Montre la fonction utilitaire `r8e.Do` pour des appels resilients ponctuels
-sans creer de policy nommee.
+Montre la fonction utilitaire `r8e.Do` pour des appels résilients ponctuels
+sans créer de policy nommée.
 
-## Ce que cet exemple demontre
+## Ce que cet exemple démontre
 
-`r8e.Do[T]` cree une policy anonyme (sans nom) en interne, execute la
-fonction a travers celle-ci et retourne le resultat. La policy n'est
-enregistree dans aucun `Registry` et est ecartee apres l'appel.
+`r8e.Do[T]` crée une policy anonyme (sans nom) en interne, exécute la
+fonction à travers celle-ci et retourne le résultat. La policy n'est
+enregistrée dans aucun `Registry` et est écartée après l'appel.
 
-Trois scenarios :
+Trois scénarios :
 
-1. **Retry + timeout** — Une fonction qui echoue deux fois avant de reussir
-   est encapsulee avec retry et timeout. Les retries recuperent les erreurs
-   transitoires et le resultat est retourne.
+1. **Retry + timeout** — Une fonction qui échoue deux fois avant de réussir
+   est encapsulée avec retry et timeout. Les retries récupèrent les erreurs
+   transitoires et le résultat est retourné.
 
-2. **Fallback** — Une fonction qui echoue systematiquement est encapsulee
-   avec retry et un fallback statique. Une fois les retries epuises, la
-   valeur de fallback est retournee.
+2. **Fallback** — Une fonction qui échoue systématiquement est encapsulée
+   avec retry et un fallback statique. Une fois les retries épuisés, la
+   valeur de fallback est retournée.
 
-3. **Sans options (pass-through)** — Appeler `Do` sans options cree une
-   policy nue qui transmet l'appel a la fonction. Cela equivaut
-   a appeler la fonction directement.
+3. **Sans options (pass-through)** — Appeler `Do` sans options crée une
+   policy nue qui transmet l'appel à la fonction. Cela équivaut à appeler
+   la fonction directement.
 
 ## Quand l'utiliser
 
-- Appels ponctuels pour lesquels creer et nommer une policy n'est pas
-  justifie.
-- Prototypage rapide ou scripts ou l'on souhaite de la resilience sans
-  configuration prealable.
-- Tests ou benchmarks d'une fonction avec differentes options de resilience.
+- Appels ponctuels pour lesquels créer et nommer une policy n'est pas
+  justifié.
+- Prototypage rapide ou scripts où l'on souhaite de la résilience sans
+  configuration préalable.
+- Tests ou benchmarks d'une fonction avec différentes options de résilience.
 
-Pour les services en production, preferez `NewPolicy` avec un nom afin que la
-policy s'enregistre dans le systeme de health/readiness.
+Pour les services en production, préférez `NewPolicy` avec un nom afin que la
+policy s'enregistre dans le système de health/readiness.
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `r8e.Do[T](ctx, fn, opts...)` | Appel resilient ponctuel sans policy nommee |
-| Policy anonyme | Non enregistree dans un `Registry` ; pas de reporting de sante |
-| Memes options | Accepte les memes options `With*` que `NewPolicy` |
+| `r8e.Do[T](ctx, fn, opts...)` | Appel résilient ponctuel sans policy nommée |
+| Policy anonyme | Non enregistrée dans un `Registry` ; pas de reporting de santé |
+| Mêmes options | Accepte les mêmes options `With*` que `NewPolicy` |
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/16-convenience-do/

@@ -5,6 +5,12 @@
 // to WithTimeout becomes the hard ceiling (the adaptive value never exceeds it)
 // and the warmup fallback used until enough samples accumulate.
 //
+// The problem it solves: a fixed timeout is a guess. Set it too tight and you cut
+// healthy-but-variable calls; set it too loose (the usual reflex) and a genuine
+// straggler ties up a slot for the full duration before failing. Pinning the
+// deadline to the observed p99 keeps it both safe for normal calls and quick to
+// give up on a real outlier — and it follows the backend if its latency drifts.
+//
 //nolint:forbidigo // This is an example program; printing is fine here.
 package main
 
@@ -25,21 +31,34 @@ func main() {
 	policy := r8e.NewPolicy[string](
 		"adaptive-timeout",
 		r8e.WithTimeout(
+			// The 1s here is the safety ceiling and the warmup fallback, not the
+			// operating value — the adaptive logic only ever tightens below it,
+			// so a cold or low-traffic policy still gets the operator's full budget.
 			time.Second,
 			r8e.AdaptiveTimeout(
+				// Size the deadline off the p99 (only the slowest ~1% of healthy
+				// calls is allowed to breach the multiplier-scaled budget).
 				r8e.AdaptiveTimeoutPercentile(0.99),
+				// ×2 leaves headroom above p99 so normal jitter never trips the
+				// timeout; tighten it to cut stragglers sooner at that risk.
 				r8e.AdaptiveTimeoutMultiplier(2.0),
+				// A floor so a momentarily ultra-fast window can't collapse the
+				// timeout to near-zero and start failing legitimate calls.
 				r8e.AdaptiveTimeoutFloor(20*time.Millisecond),
 			),
 		),
 	)
 
+	// A steady ~10ms backend. With no variance the p99 sits right at 10ms, making
+	// the gap between the adapted timeout (~20ms) and the 1s ceiling obvious.
 	backend := func(_ context.Context) (string, error) {
 		time.Sleep(10 * time.Millisecond)
 
 		return "ok", nil
 	}
 
+	// Well past the 20-sample warmup so the window is full and the adaptive value
+	// has fully replaced the 1s fallback before we read it back.
 	const calls = 200
 
 	fmt.Printf("=== Warming up with %d ~10ms calls ===\n", calls)
@@ -51,6 +70,8 @@ func main() {
 	}
 
 	// --- Observability ---
+	// AdaptiveTimeout reports the deadline the policy would apply right now;
+	// comparing it to the observed p99 shows the multiplier headroom at work.
 	m := policy.Metrics()
 
 	fmt.Println("\n=== After warmup ===")

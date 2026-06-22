@@ -2,39 +2,39 @@
 
 # Exemple 09 — Fallback
 
-Illustre le patron fallback — une derniere ligne de defense qui fournit une
-valeur lorsque tout le reste echoue.
+Illustre le patron fallback — une dernière ligne de défense qui fournit une
+valeur lorsque tout le reste a échoué.
 
 ## Ce que cet exemple illustre
 
-Quatre scenarios couvrent tous les comportements du fallback :
+Quatre scénarios couvrent tous les comportements du fallback :
 
 1. **Fallback statique** — `WithFallback("default value")` renvoie une valeur
-   fixe lorsque la fonction encapsulee echoue. L'erreur est absorbee ; l'appelant
-   recoit la valeur de repli avec une erreur `nil`.
+   fixe lorsque la fonction encapsulée échoue. L'erreur est absorbée ; l'appelant
+   reçoit la valeur de repli avec une erreur `nil`.
 
 2. **Fallback par fonction** — `WithFallbackFunc(fn)` appelle une fonction
    fournie par l'utilisateur avec l'erreur d'origine. Cette fonction peut
-   calculer une valeur de repli dynamique ou meme renvoyer sa propre erreur.
+   calculer une valeur de repli dynamique ou même renvoyer sa propre erreur.
 
-3. **Fonction de fallback qui echoue egalement** — Si la fonction de fallback
-   elle-meme renvoie une erreur, celle-ci est propagee a l'appelant. Le fallback
-   est le dernier middleware de la chaine, il n'y a donc plus rien pour
+3. **Fonction de fallback qui échoue elle aussi** — Si la fonction de fallback
+   renvoie elle-même une erreur, celle-ci est propagée à l'appelant. Le fallback
+   est le dernier middleware de la chaîne, il n'y a donc plus rien pour
    l'intercepter.
 
-4. **Appel reussi** — Lorsque la fonction principale reussit, le fallback
-   n'est jamais invoque. Le resultat passe sans aucune modification.
+4. **Appel réussi** — Lorsque la fonction principale réussit, le fallback
+   n'est jamais invoqué. Le résultat passe sans aucune modification.
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `WithFallback[T](val)` | Renvoie une valeur statique de type `T` en cas d'echec |
-| `WithFallbackFunc[T](fn)` | Appelle `func(error) (T, error)` en cas d'echec pour un repli dynamique |
+| `WithFallback[T](val)` | Renvoie une valeur statique de type `T` en cas d'échec |
+| `WithFallbackFunc[T](fn)` | Appelle `func(error) (T, error)` en cas d'échec pour un repli dynamique |
 | Absorption des erreurs | Le fallback statique renvoie toujours une erreur `nil` ; le fallback par fonction peut renvoyer une erreur |
-| Ordre d'execution | Le fallback est le middleware le plus externe — il encapsule timeout, circuit breaker, retry, etc. |
+| Ordre d'exécution | Le fallback est le middleware le plus externe — il encapsule timeout, circuit breaker, retry, etc. |
 
-## Diagramme de decision
+## Diagramme de décision
 
 ```mermaid
 flowchart TD
@@ -49,14 +49,14 @@ flowchart TD
 
 ## Quand l'utiliser
 
-- Renvoyer du contenu en cache ou par defaut lorsque la source principale est
-  indisponible (par exemple, une page "service indisponible").
-- Degradation gracieuse : renvoyer une valeur par defaut sure plutot qu'une
-  erreur a l'utilisateur final.
-- Combiner avec retry : les retentatives tentent de recuperer, le fallback
-  intercepte l'echec final.
+- Renvoyer du contenu en cache ou par défaut lorsque la source principale est
+  indisponible (par exemple, une page « service indisponible »).
+- Dégradation gracieuse : renvoyer une valeur par défaut sûre plutôt qu'une
+  erreur à l'utilisateur final.
+- En combinaison avec le retry : les retentatives tentent de récupérer, le
+  fallback intercepte l'échec final.
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/09-fallback/

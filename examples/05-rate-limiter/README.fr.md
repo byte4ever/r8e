@@ -2,34 +2,34 @@
 
 # Exemple 05 — Rate Limiter
 
-Illustre le limiteur de debit a seau de jetons (token bucket) en modes **rejet** et **bloquant**.
+Illustre le limiteur de débit à seau de jetons (token bucket) en modes **rejet** et **bloquant**.
 
 ## Ce que cet exemple illustre
 
-### Mode rejet (par defaut)
+### Mode rejet (par défaut)
 
-Un limiteur de debit configure a 5 jetons/seconde recoit 8 requetes en rafale.
-Les ~5 premieres reussissent (en consommant les jetons disponibles dans le
-burst), et les requetes restantes sont immediatement rejetees avec
-`ErrRateLimited`. Aucune attente n'a lieu -- le trafic excedentaire est
-elimine instantanement.
+Un limiteur de débit configuré à 5 jetons/seconde reçoit 8 requêtes en rafale.
+Les ~5 premières réussissent (en consommant les jetons disponibles dans le
+burst), et les requêtes restantes sont immédiatement rejetées avec
+`ErrRateLimited`. Aucune attente n'a lieu — le trafic excédentaire est
+éliminé instantanément.
 
 ### Mode bloquant
 
-Le meme debit (5 jetons/seconde) est configure avec `RateLimitBlocking()`.
-Au lieu de rejeter les requetes excedentaires, le limiteur bloque jusqu'a ce
-qu'un jeton devienne disponible. Les ~5 premieres requetes se terminent
-instantanement ; les requetes restantes sont retardees jusqu'au
-reapprovisionnement de nouveaux jetons (un toutes les 200 ms a 5/sec).
+Le même débit (5 jetons/seconde) est configuré avec `RateLimitBlocking()`.
+Au lieu de rejeter les requêtes excédentaires, le limiteur bloque jusqu'à ce
+qu'un jeton devienne disponible. Les ~5 premières requêtes se terminent
+instantanément ; les requêtes restantes sont retardées jusqu'au
+réapprovisionnement en nouveaux jetons (un toutes les 200 ms à 5/sec).
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `WithRateLimit(rate)` | Limiteur a seau de jetons autorisant `rate` requetes par seconde |
+| `WithRateLimit(rate)` | Limiteur à seau de jetons autorisant `rate` requêtes par seconde |
 | `RateLimitBlocking()` | Option pour bloquer (attendre un jeton) au lieu de rejeter |
-| `ErrRateLimited` | Erreur sentinelle renvoyee en mode rejet lorsqu'aucun jeton n'est disponible |
-| Seau de jetons | Les jetons s'accumulent a `rate/sec` ; la capacite de burst est egale au debit |
+| `ErrRateLimited` | Erreur sentinelle renvoyée en mode rejet lorsqu'aucun jeton n'est disponible |
+| Seau de jetons | Les jetons s'accumulent à `rate/sec` ; la capacité de burst est égale au débit |
 
 ## Fonctionnement
 
@@ -47,13 +47,13 @@ flowchart TD
 
 ## Quand utiliser chaque mode
 
-- **Mode rejet** -- Passerelles API, delestage de charge, ou lorsque les
-  appelants peuvent reessayer plus tard. Fournit un retour immediat.
-- **Mode bloquant** -- Workers d'arriere-plan, traitements par lots, ou
-  pipelines internes ou l'on souhaite lisser le debit plutot que de rejeter
-  des requetes.
+- **Mode rejet** — Passerelles API, délestage de charge, ou lorsque les
+  appelants peuvent réessayer plus tard. Il fournit un retour immédiat.
+- **Mode bloquant** — Workers d'arrière-plan, traitements par lots, ou
+  pipelines internes où l'on souhaite lisser le débit plutôt que de rejeter
+  des requêtes.
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/05-rate-limiter/
@@ -61,7 +61,7 @@ go run ./examples/05-rate-limiter/
 
 ## Sortie attendue
 
-Le mode rejet montre certaines requetes qui reussissent et d'autres qui
-recoivent `RATE LIMITED`. Le mode bloquant montre que toutes les requetes
-finissent par reussir, les dernieres etant retardees par l'intervalle de
-reapprovisionnement des jetons.
+Le mode rejet montre certaines requêtes qui réussissent et d'autres qui
+reçoivent `RATE LIMITED`. Le mode bloquant montre que toutes les requêtes
+finissent par réussir, les dernières étant retardées par l'intervalle de
+réapprovisionnement des jetons.

@@ -42,6 +42,16 @@ func main() {
 		return "ok", nil
 	}
 
+	// The 100 passed to WithRateLimit is both the starting rate and the ceiling
+	// AIMD will climb back toward. The AIMD knobs shape the sawtooth:
+	//   - AIMDMinRate(10): a floor so the limiter never throttles to zero and can
+	//     still send the occasional probe that detects recovery.
+	//   - AIMDBackoff(0.5): halve the rate on each overload signal — react hard so
+	//     a struggling backend sheds load fast.
+	//   - AIMDIncrease(5): add only 5/s back per clean interval — recover gently so
+	//     we don't immediately re-overwhelm the backend (additive increase).
+	//   - AIMDInterval(40ms): at most one move per interval, so a burst of
+	//     rejections backs the rate off once instead of collapsing it.
 	policy := r8e.NewPolicy[string]("aimd-demo",
 		r8e.WithRateLimit(100,
 			r8e.AIMD(
@@ -60,6 +70,10 @@ func main() {
 
 	fmt.Println("phase 1: backend overloaded — rate backs off")
 
+	// Every call returns an overload signal, so each one votes to halve the rate.
+	// We sleep 45ms (just over the 40ms interval) between calls so that each
+	// vote lands in a fresh AIMD window and actually moves the rate — bunching
+	// the calls inside one interval would collapse them into a single adjustment.
 	for range 6 {
 		_, _ = policy.Do(ctx, backend) //nolint:errcheck // demo: errors drive AIMD, not handled here
 
@@ -68,10 +82,15 @@ func main() {
 
 	fmt.Printf("  rate after backoff: %.1f tokens/s\n\n", policy.Metrics().RateLimit)
 
+	// Flip the backend healthy. Now every call returns a clean result, which AIMD
+	// reads as "headroom available" and uses to add the rate back, additively.
 	overloaded = false
 
 	fmt.Println("phase 2: backend recovered — rate climbs back")
 
+	// Same cadence: one clean interval per call, each adding AIMDIncrease(5) back
+	// toward the 100/s ceiling. The slow climb is deliberate — it probes for the
+	// safe rate rather than slamming the just-recovered backend at full throughput.
 	for range 6 {
 		_, _ = policy.Do(ctx, backend) //nolint:errcheck // demo: errors drive AIMD, not handled here
 

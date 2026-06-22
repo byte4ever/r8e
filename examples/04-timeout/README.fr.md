@@ -2,25 +2,25 @@
 
 # Exemple 04 — Timeout
 
-Demontre le patron de timeout global et son interaction avec l'annulation de
+Démontre le patron de timeout global et son interaction avec l'annulation de
 contexte.
 
-## Ce que cet exemple demontre
+## Ce que cet exemple démontre
 
-Trois scenarios illustrent le comportement du timeout :
+Trois scénarios illustrent le comportement du timeout :
 
-1. **Appel rapide** — La fonction retourne avant l'echeance de 200ms. Le
-   resultat est retourne normalement ; aucun timeout ne se declenche.
+1. **Appel rapide** — La fonction retourne avant l'échéance de 200ms. Le
+   résultat est renvoyé normalement ; aucun timeout ne se déclenche.
 
-2. **Appel lent** — La fonction prend 1 seconde, depassant le timeout de
-   200ms. Le contexte passe a `fn` est annule et `r8e.ErrTimeout` est
-   retourne. La fonction devrait verifier `ctx.Done()` pour se terminer
+2. **Appel lent** — La fonction prend 1 seconde, dépassant le timeout de
+   200ms. Le contexte passé à `fn` est annulé et `r8e.ErrTimeout` est
+   renvoyé. La fonction devrait surveiller `ctx.Done()` pour se terminer
    rapidement.
 
-3. **Annulation du contexte parent** — Un contexte parent est annule de
-   l'exterieur apres 50ms (avant le timeout de 200ms). L'erreur retournee est
-   `context.Canceled` du parent, et *non* `ErrTimeout`. Cette distinction
-   permet aux appelants de differencier les timeouts imposes par r8e des
+3. **Annulation du contexte parent** — Un contexte parent est annulé depuis
+   l'extérieur après 50ms (avant le timeout de 200ms). L'erreur renvoyée est
+   alors `context.Canceled` du parent, et *non* `ErrTimeout`. Cette distinction
+   permet aux appelants de différencier les timeouts imposés par r8e des
    annulations externes.
 
 ## Fonctionnement
@@ -46,16 +46,16 @@ sequenceDiagram
     end
 ```
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `WithTimeout(d)` | Definit une echeance pour l'ensemble de l'appel ; en cas de depassement, retourne `ErrTimeout` |
-| `ErrTimeout` | Erreur sentinelle distinguant les timeouts imposes par r8e des autres erreurs de contexte |
-| Propagation du contexte | Le contexte derive est passe a `fn`, qui doit respecter `ctx.Done()` |
-| Parent vs timeout | Si le contexte parent est annule en premier, l'erreur du parent est retournee a la place de `ErrTimeout` |
+| `WithTimeout(d)` | Définit une échéance pour l'ensemble de l'appel ; en cas de dépassement, renvoie `ErrTimeout` |
+| `ErrTimeout` | Erreur sentinelle distinguant les timeouts imposés par r8e des autres erreurs de contexte |
+| Propagation du contexte | Le contexte dérivé est passé à `fn`, qui doit respecter `ctx.Done()` |
+| Parent vs timeout | Si le contexte parent est annulé en premier, c'est l'erreur du parent qui est renvoyée à la place d'`ErrTimeout` |
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/04-timeout/
@@ -64,10 +64,10 @@ go run ./examples/04-timeout/
 ## Sortie attendue
 
 ```
-=== Appel rapide (se termine dans le delai imparti) ===
+=== Appel rapide (se termine dans le délai imparti) ===
   result: "fast response", err: <nil>
 
-=== Appel lent (depasse le timeout de 200ms) ===
+=== Appel lent (dépasse le timeout de 200ms) ===
   err: timeout (expiration comme attendu)
 
 === Annulation du contexte parent ===

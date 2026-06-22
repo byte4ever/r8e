@@ -2,10 +2,16 @@
 // injection. WithChaos inserts fault, latency, outcome, and behavior strategies
 // at the innermost point of the chain — simulating a misbehaving downstream — so
 // the policy's OWN resilience patterns get exercised: does the retry catch the
-// injected fault? does the timeout catch the injected latency? Each strategy
-// injects probabilistically and can be gated per call with ChaosEnabled for safe
-// canary chaos in production. Strategies run in order, and a fault short-circuits
-// the rest, so listing the fault first skips the latency wait when it fires.
+// injected fault? does the timeout catch the injected latency?
+//
+// The problem it solves: you can only trust your retry/timeout/fallback config
+// once you have seen it react to real failures, but waiting for production to
+// break is a poor test. Chaos manufactures those failures on demand. Each
+// strategy injects probabilistically and can be gated per call with ChaosEnabled,
+// so you can switch chaos on for a canary cohort in production without a redeploy
+// and without touching the rest of the fleet. The example runs 200 canary calls
+// through retry+timeout+fallback, then 200 gated-off production calls to prove
+// the gate holds.
 //
 //nolint:forbidigo // This is an example program; printing is fine here.
 package main
@@ -19,18 +25,24 @@ import (
 	"github.com/byte4ever/r8e"
 )
 
-// chaosKey gates chaos injection: only calls whose context carries it are
-// subject to chaos, modelling a canary cohort (a header, a feature flag) rather
-// than the whole fleet.
+// ctxKey gates chaos injection: only calls whose context carries it are subject
+// to chaos, modelling a canary cohort (a header, a feature flag) rather than the
+// whole fleet. Using a private struct type as the key avoids collisions with any
+// other value stashed in the context.
 type ctxKey struct{}
 
 func main() {
 	ctx := context.Background()
 
+	// Tally injections per strategy kind from the hook, so we can cross-check the
+	// per-kind counts against the policy's own aggregate ChaosInjected counter.
 	injected := make(map[string]int)
 
 	// A policy that retries transient faults 4 times and bounds each call at
 	// 100ms — then injects chaos at the very bottom to prove those patterns work.
+	// The order of options is the order of the chain (outermost first): timeout
+	// wraps retry wraps fallback wraps chaos, so the patterns get to react to the
+	// faults that chaos manufactures from underneath them.
 	policy := r8e.NewPolicy[string](
 		"chaos-demo",
 		r8e.WithTimeout(100*time.Millisecond),
@@ -53,9 +65,12 @@ func main() {
 		),
 	)
 
+	// The downstream itself is perfectly healthy — every error and stall in this
+	// run is manufactured by chaos, which keeps the demo's cause and effect clean.
 	healthy := func(_ context.Context) (string, error) { return "ok", nil }
 
-	// Canary traffic: subject to chaos.
+	// Canary traffic: the context carries the gate flag, so the ChaosEnabled
+	// predicate lets chaos fire on these calls.
 	canaryCtx := context.WithValue(ctx, ctxKey{}, true)
 
 	const calls = 200
@@ -64,10 +79,14 @@ func main() {
 
 	for range calls {
 		result, err := policy.Do(canaryCtx, healthy)
+		// An error here would mean the config failed to absorb the injected chaos
+		// (retry exhausted AND fallback unavailable) — we expect this to stay zero.
 		if err != nil {
 			faults++
 		}
 
+		// The fallback value is the tell that the timeout caught injected latency
+		// the retry could not re-roll away within the attempt budget.
 		if result == "served-from-fallback" {
 			fallbacks++
 		}

@@ -2,30 +2,30 @@
 
 # Exemple 17 — httpx Basique
 
-Demonstration basique de l'adaptateur `httpx`, montrant comment envelopper un
-client HTTP avec une politique de resilience et classifier les codes de statut
+Démonstration basique de l'adaptateur `httpx`, montrant comment envelopper un
+client HTTP avec une politique de résilience et classifier les codes de statut
 HTTP.
 
-## Ce que cet exemple demontre
+## Ce que cet exemple démontre
 
-- Creation d'un `httpx.Client` avec `NewClient`, combinant un `http.Client`,
+- Création d'un `httpx.Client` avec `NewClient`, combinant un `http.Client`,
   une fonction `Classifier` et des options r8e (timeout).
-- Utilisation de `client.Do` pour executer des requetes a travers la politique
-  de resilience.
+- Utilisation de `client.Do` pour exécuter des requêtes à travers la politique
+  de résilience.
 - Gestion des trois chemins de classification : **Success** (2xx),
   **Permanent** (4xx) et **Transient** (5xx).
-- Extraction du `StatusError` depuis la chaine d'erreurs via `errors.As` pour
-  inspecter la reponse originale et le code de statut.
+- Extraction du `StatusError` depuis la chaîne d'erreurs via `errors.As` pour
+  inspecter la réponse originale et le code de statut.
 
-## Concepts cles
+## Concepts clés
 
-| Concept | Detail |
+| Concept | Détail |
 |---|---|
-| `httpx.NewClient` | Cree un client HTTP resilient avec un nom, un http.Client, un classificateur et des options r8e |
-| `httpx.Classifier` | `func(int) ErrorClass` — associe les codes de statut a `Success`, `Transient` ou `Permanent` |
+| `httpx.NewClient` | Crée un client HTTP résilient avec un nom, un http.Client, un classificateur et des options r8e |
+| `httpx.Classifier` | `func(int) ErrorClass` — associe les codes de statut à `Success`, `Transient` ou `Permanent` |
 | `httpx.StatusError` | Type d'erreur portant le `*http.Response` original pour inspection |
-| `client.Do` | Execute `*http.Request` a travers la politique, retourne `(*http.Response, error)` |
-| `errors.As` | Extrait `*httpx.StatusError` depuis la chaine d'erreurs |
+| `client.Do` | Exécute `*http.Request` à travers la politique, retourne `(*http.Response, error)` |
+| `errors.As` | Extrait `*httpx.StatusError` depuis la chaîne d'erreurs |
 
 ## Flux de classification
 
@@ -38,7 +38,7 @@ flowchart TD
     C -->|Permanent| F["return resp, Permanent(StatusError)"]
 ```
 
-## Execution
+## Exécution
 
 ```bash
 go run ./examples/17-httpx-basic/

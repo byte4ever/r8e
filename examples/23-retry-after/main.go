@@ -1,6 +1,10 @@
-// Example 23-retry-after: Demonstrates honoring an HTTP Retry-After header. When
-// a server answers 429 with "Retry-After: 1", the httpx client waits the second
-// the server asked for (±10% jitter) instead of its own configured backoff.
+// Example 23-retry-after: Demonstrates honoring an HTTP Retry-After header. A
+// rate-limited server knows when it will be ready again; ignoring that hint and
+// retrying on your own backoff either hammers it too early (wasting the retry) or
+// waits longer than needed. When the server answers 429 with "Retry-After: 1",
+// the httpx adapter surfaces that as a RetryAfterProvider error and retry waits
+// the second the server asked for (±10% jitter) instead of its own configured
+// backoff.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -18,8 +22,10 @@ import (
 )
 
 func main() {
-	// The server rate-limits the first call with 429 + Retry-After: 1, then
-	// succeeds.
+	// A stub server that rate-limits the very first call with 429 + Retry-After: 1
+	// and then succeeds — just enough to force exactly one honored wait. The
+	// atomic counter lets the handler branch on call number and lets us assert how
+	// many round-trips actually happened.
 	var calls atomic.Int64
 
 	server := httptest.NewServer(http.HandlerFunc(
@@ -36,7 +42,10 @@ func main() {
 	))
 	defer server.Close()
 
-	// Classify 429 as transient (retriable); everything 2xx is success.
+	// httpx needs to know which status codes are worth retrying. Without a
+	// classifier it can't tell a retriable 429 from a permanent 404, so we map 429
+	// to Transient (retry), other 4xx/5xx to Permanent (give up fast), and 2xx to
+	// Success.
 	classify := func(code int) httpx.ErrorClass {
 		switch {
 		case code == http.StatusTooManyRequests:
@@ -62,6 +71,8 @@ func main() {
 		return
 	}
 
+	// Time the whole exchange so we can compare the wait against the tiny 20ms
+	// backoff: if Retry-After is honored, the elapsed time should be ~1s, not 20ms.
 	start := time.Now()
 
 	resp, err := client.Do(context.Background(), req)
