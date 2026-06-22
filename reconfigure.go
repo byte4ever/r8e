@@ -107,18 +107,12 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		})
 	}
 
-	if cfg.Hedge != nil {
-		if p.hedge == nil {
-			return absentPatternError("hedge")
-		}
-
-		dur, err := time.ParseDuration(*cfg.Hedge)
-		if err != nil {
-			return fmt.Errorf("r8e: reconfigure hedge: %w", err)
-		}
-
-		actions = append(actions, func() { p.hedge.Store(int64(dur)) })
+	hedgeActions, hedgeErr := p.hedgeReconfigureActions(&cfg)
+	if hedgeErr != nil {
+		return hedgeErr
 	}
+
+	actions = append(actions, hedgeActions...)
 
 	if cfg.RateLimit != nil {
 		if p.rateLimiter == nil {
@@ -326,6 +320,71 @@ func (p *Policy[T]) adaptiveTimeoutReconfigureAction(
 	}
 
 	return func() { p.adaptiveTimeout.reconfigure(atOpts...) }, nil
+}
+
+// hedgeReconfigureActions validates the hedge config overlay (the ceiling via Hedge
+// and the adaptive parameters via AdaptiveHedge) and returns the actions that apply
+// it, in chain order. Bundling both keeps [Policy.Reconfigure] under its
+// maintainability budget, mirroring timeoutReconfigureActions.
+func (p *Policy[T]) hedgeReconfigureActions(cfg *PolicyConfig) ([]func(), error) {
+	var actions []func()
+
+	if cfg.Hedge != nil {
+		action, err := p.hedgeReconfigureAction(cfg.Hedge)
+		if err != nil {
+			return nil, err
+		}
+
+		actions = append(actions, action)
+	}
+
+	if cfg.AdaptiveHedge != nil {
+		action, err := p.adaptiveHedgeReconfigureAction(cfg.AdaptiveHedge)
+		if err != nil {
+			return nil, err
+		}
+
+		actions = append(actions, action)
+	}
+
+	return actions, nil
+}
+
+// hedgeReconfigureAction validates a hedge config overlay and returns the action
+// that applies it. It errors when the policy has no hedge pattern or when the
+// duration string fails to parse. For an adaptive hedge this reconfigures the
+// ceiling; the adaptive parameters reconfigure through adaptive_hedge.
+func (p *Policy[T]) hedgeReconfigureAction(raw *string) (func(), error) {
+	if p.hedge == nil {
+		return nil, absentPatternError("hedge")
+	}
+
+	dur, err := time.ParseDuration(*raw)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure hedge: %w", err)
+	}
+
+	return func() { p.hedge.Store(int64(dur)) }, nil
+}
+
+// adaptiveHedgeReconfigureAction validates an adaptive-hedge config overlay and
+// returns the action that applies it. It errors when the policy's hedge was built
+// without [AdaptiveHedge] (adaptation cannot be enabled at runtime) or when the
+// floor string fails to parse. The ceiling itself is reconfigured through the hedge
+// field; this overlay tunes only the adaptive parameters.
+func (p *Policy[T]) adaptiveHedgeReconfigureAction(
+	cfg *AdaptiveHedgeConfig,
+) (func(), error) {
+	if p.adaptiveHedge == nil {
+		return nil, ErrAdaptiveHedgeWithoutHedge
+	}
+
+	ahOpts, err := adaptiveHedgeOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure: %w", err)
+	}
+
+	return func() { p.adaptiveHedge.reconfigure(ahOpts...) }, nil
 }
 
 // retryBudgetReconfigureAction validates a retry-budget config overlay and

@@ -135,6 +135,24 @@ policy := r8e.NewPolicy[string]("adaptive-timeout",
 
 Only successful calls feed the window, so a timeout never inflates the percentile that set it. It is the latency→timeout analogue of [adaptive concurrency](#adaptive-concurrency)'s latency→limit. Observability: `Metrics().AdaptiveTimeout` (the timeout the policy would currently apply) and the `r8e.policy.adaptive_timeout` OpenTelemetry gauge; firings still count toward the `Timeouts` counter and the `OnTimeout` hook. See [`examples/35-adaptive-timeout`](examples/35-adaptive-timeout).
 
+**Adaptive hedge delay (percentile-driven).** By default the hedge fires after a fixed delay. `AdaptiveHedge(...)` instead fires it at a sliding-window percentile of recent **successful primary** latencies — `clamp(percentile × multiplier, floor, ceiling)` — so only genuine stragglers (by default the slowest ~5%, Google's tail-at-scale rule) are raced, keeping the redundant load small. The duration passed to `WithHedge` becomes the hard **ceiling** (the adaptive value can only pull the hedge earlier below it, never later) and the warmup fallback used until enough samples accumulate.
+
+```go
+policy := r8e.NewPolicy[string]("adaptive-hedge",
+    r8e.WithHedge(500*time.Millisecond,        // hard ceiling + warmup fallback
+        r8e.AdaptiveHedge(
+            r8e.AdaptiveHedgePercentile(0.95), // default 0.95
+            r8e.AdaptiveHedgeMultiplier(1.0),  // default 1.0 (fire at p95)
+            r8e.AdaptiveHedgeFloor(5*time.Millisecond), // default: none
+            r8e.AdaptiveHedgeMinSamples(20),   // default 20-sample warmup
+        ),
+    ),
+    r8e.WithConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5)), // cap the extra load
+)
+```
+
+Only the **primary** attempt's own completion feeds the window — a winning hedge cancels the primary, whose censored latency is dropped — so a hedge can never bias down the very percentile that set its delay. It is the latency→hedge-delay analogue of the adaptive timeout's latency→timeout, and pairs with the [concurrency budget](#concurrency-budget) to bound how much extra load the hedges add. Observability: `Metrics().AdaptiveHedgeDelay` (the delay the policy would currently apply) and the `r8e.policy.adaptive_hedge_delay` OpenTelemetry gauge; firings still count toward the `HedgesTriggered`/`HedgesWon` counters and the `OnHedgeTriggered`/`OnHedgeWon` hooks. See [`examples/36-adaptive-hedge`](examples/36-adaptive-hedge).
+
 ### Retry
 
 Retry transient failures with pluggable backoff strategies. Errors wrapped with `r8e.Permanent()` stop retries immediately.

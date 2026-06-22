@@ -158,6 +158,16 @@ var (
 	ErrAdaptiveTimeoutWithoutTimeout error = resilienceError(
 		"adaptive timeout requires a timeout built with the AdaptiveTimeout option",
 	)
+	// ErrAdaptiveHedgeWithoutHedge indicates percentile-driven adaptive hedge delay
+	// was requested where there is no hedge to adapt: an adaptive_hedge config block
+	// without hedge, or a [Policy.Reconfigure] targeting a policy whose hedge was not
+	// built with the [AdaptiveHedge] option. Adaptation cannot be enabled after
+	// construction, so the remedy is to build the hedge with
+	// WithHedge(d, AdaptiveHedge(...)). It is the error [BuildOptions] and
+	// [Policy.Reconfigure] return for that misconfiguration.
+	ErrAdaptiveHedgeWithoutHedge error = resilienceError(
+		"adaptive hedge requires a hedge built with the AdaptiveHedge option",
+	)
 	// ErrRetryMaxAttemptsRequired indicates a [RetryConfig] omitted max_attempts.
 	// It is required: without it the retry would silently collapse to a single
 	// attempt. It is the error [BuildOptions] and [Policy.Reconfigure] return for

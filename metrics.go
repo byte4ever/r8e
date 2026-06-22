@@ -140,6 +140,12 @@ type (
 		// adaptive timeout is off (the latter reported as 0, since the field is only
 		// populated for an adaptive timeout).
 		AdaptiveTimeout time.Duration `json:"adaptive_timeout"`
+		// AdaptiveHedgeDelay is the hedge delay the policy would currently apply when
+		// [AdaptiveHedge] is enabled — clamp(percentile-latency × multiplier, floor,
+		// ceiling). It equals the configured ceiling delay during warmup or when
+		// adaptive hedge is off (the latter reported as 0, since the field is only
+		// populated for an adaptive hedge).
+		AdaptiveHedgeDelay time.Duration `json:"adaptive_hedge_delay"`
 
 		Criticality Criticality `json:"criticality"`
 		Healthy     bool        `json:"healthy"`
@@ -460,6 +466,10 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 
 	if p.adaptiveTimeout != nil {
 		metrics.AdaptiveTimeout = p.adaptiveTimeout.compute(time.Duration(p.timeout.Load()))
+	}
+
+	if p.adaptiveHedge != nil {
+		metrics.AdaptiveHedgeDelay = p.adaptiveHedge.compute(time.Duration(p.hedge.Load()))
 	}
 
 	return metrics

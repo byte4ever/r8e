@@ -35,6 +35,10 @@ type (
 		// Hedge is the delay before launching a hedged request.
 		// Optional. Parsed via time.ParseDuration. Example: "200ms".
 		Hedge *string `json:"hedge,omitempty" yaml:"hedge,omitempty"`
+		// AdaptiveHedge configures percentile-driven adaptive hedge delay (see
+		// [AdaptiveHedge]). Requires Hedge, which becomes the ceiling and warmup
+		// fallback. Optional.
+		AdaptiveHedge *AdaptiveHedgeConfig `json:"adaptive_hedge,omitempty" yaml:"adaptive_hedge,omitempty"`
 		// RateLimit is the maximum requests per second.
 		// Optional. Example: 100.
 		RateLimit *float64 `json:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`
@@ -205,6 +209,25 @@ type (
 		MinSamples *int `json:"min_samples,omitempty" yaml:"min_samples,omitempty"`
 	}
 
+	// AdaptiveHedgeConfig holds the percentile-driven adaptive-hedge tunables. Embed
+	// it (via [PolicyConfig.AdaptiveHedge]) in your own config struct for JSON or
+	// YAML unmarshaling. Every field is optional; an omitted or out-of-range value
+	// falls back to its default.
+	AdaptiveHedgeConfig struct {
+		// Percentile is the latency percentile (in (0, 1]) the hedge delay is
+		// derived from. Optional. Default: 0.95. Example: 0.99.
+		Percentile *float64 `json:"percentile,omitempty" yaml:"percentile,omitempty"`
+		// Multiplier is the headroom applied to the percentile latency; must be
+		// positive. Optional. Default: 1.0. Example: 1.5.
+		Multiplier *float64 `json:"multiplier,omitempty" yaml:"multiplier,omitempty"`
+		// Floor is the lower bound the adaptive hedge delay is never reduced below.
+		// Optional. Parsed via time.ParseDuration. Default: none. Example: "5ms".
+		Floor *string `json:"floor,omitempty" yaml:"floor,omitempty"`
+		// MinSamples is how many successful primaries must be in the window before
+		// the adaptive value is used. Optional. Default: 20. Example: 50.
+		MinSamples *int `json:"min_samples,omitempty" yaml:"min_samples,omitempty"`
+	}
+
 	// RetryBudgetConfig holds retry-budget configuration values. Embed it
 	// (via [PolicyConfig]) in your own config struct for JSON or YAML
 	// unmarshaling.
@@ -352,12 +375,21 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 	}
 
 	if pc.Hedge != nil {
-		d, err := time.ParseDuration(*pc.Hedge)
+		delay, err := time.ParseDuration(*pc.Hedge)
 		if err != nil {
 			return nil, fmt.Errorf("hedge: %w", err)
 		}
 
-		opts = append(opts, WithHedge(d))
+		hOpts, err := hedgeOptionsFromConfig(pc.AdaptiveHedge)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithHedge(delay, hOpts...))
+	} else if pc.AdaptiveHedge != nil {
+		// Adaptive hedge has no fixed hedge to adapt — reject the same input cold
+		// and hot so BuildOptions and Reconfigure agree.
+		return nil, ErrAdaptiveHedgeWithoutHedge
 	}
 
 	if pc.RetryBudget != nil {
@@ -516,6 +548,56 @@ func adaptiveTimeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]AdaptiveTim
 
 	if cfg.MinSamples != nil {
 		opts = append(opts, AdaptiveTimeoutMinSamples(*cfg.MinSamples))
+	}
+
+	return opts, nil
+}
+
+// hedgeOptionsFromConfig converts an [AdaptiveHedgeConfig] into [WithHedge]
+// options, wrapping the tunables in an [AdaptiveHedge] option when a block is
+// present. Shared by [BuildOptions]; the caller guarantees pc.Hedge is set
+// (adaptive hedge without it is rejected there).
+func hedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]HedgeOption, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+
+	ahOpts, err := adaptiveHedgeOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return []HedgeOption{AdaptiveHedge(ahOpts...)}, nil
+}
+
+// adaptiveHedgeOptionsFromConfig converts an [AdaptiveHedgeConfig] into
+// [AdaptiveHedge] options. Shared by [BuildOptions] and [Policy.Reconfigure]. It
+// returns an error only when the floor string fails to parse.
+//
+//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
+// distinct config type to a distinct option type; no shared abstraction without generics.
+func adaptiveHedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]AdaptiveHedgeOption, error) {
+	var opts []AdaptiveHedgeOption
+
+	if cfg.Percentile != nil {
+		opts = append(opts, AdaptiveHedgePercentile(*cfg.Percentile))
+	}
+
+	if cfg.Multiplier != nil {
+		opts = append(opts, AdaptiveHedgeMultiplier(*cfg.Multiplier))
+	}
+
+	if cfg.Floor != nil {
+		floor, err := time.ParseDuration(*cfg.Floor)
+		if err != nil {
+			return nil, fmt.Errorf("adaptive_hedge.floor: %w", err)
+		}
+
+		opts = append(opts, AdaptiveHedgeFloor(floor))
+	}
+
+	if cfg.MinSamples != nil {
+		opts = append(opts, AdaptiveHedgeMinSamples(*cfg.MinSamples))
 	}
 
 	return opts, nil

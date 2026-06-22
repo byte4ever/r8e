@@ -134,6 +134,24 @@ policy := r8e.NewPolicy[string]("adaptive-timeout",
 
 Seuls les appels réussis alimentent la fenêtre, donc un timeout ne gonfle jamais le percentile qui l'a fixé. C'est l'analogue latence→timeout du latence→limite de la [concurrence adaptative](#adaptive-concurrency). Observabilité : `Metrics().AdaptiveTimeout` (le timeout que la policy appliquerait actuellement) et la jauge OpenTelemetry `r8e.policy.adaptive_timeout` ; les déclenchements comptent toujours dans le compteur `Timeouts` et le hook `OnTimeout`. Voir [`examples/35-adaptive-timeout`](examples/35-adaptive-timeout).
 
+**Délai de hedge adaptatif (piloté par les percentiles).** Par défaut le hedge se déclenche après un délai fixe. `AdaptiveHedge(...)` le déclenche à la place à un percentile en fenêtre glissante des latences **du primaire réussi** récentes — `clamp(percentile × multiplicateur, plancher, plafond)` — pour ne hedger que les vrais stragglers (par défaut les ~5 % les plus lents, la règle tail-at-scale de Google), gardant ainsi la charge redondante faible. La durée passée à `WithHedge` devient le **plafond** dur (l'adaptatif ne peut qu'avancer le hedge en dessous, jamais le retarder) et la valeur de repli au démarrage tant que pas assez d'échantillons ne se sont accumulés.
+
+```go
+policy := r8e.NewPolicy[string]("adaptive-hedge",
+    r8e.WithHedge(500*time.Millisecond,        // plafond dur + repli au démarrage
+        r8e.AdaptiveHedge(
+            r8e.AdaptiveHedgePercentile(0.95), // défaut 0.95
+            r8e.AdaptiveHedgeMultiplier(1.0),  // défaut 1.0 (déclenche au p95)
+            r8e.AdaptiveHedgeFloor(5*time.Millisecond), // défaut : aucun
+            r8e.AdaptiveHedgeMinSamples(20),   // défaut : démarrage à 20 échantillons
+        ),
+    ),
+    r8e.WithConcurrencyBudget(r8e.MaxRatio(0.25), r8e.MinConcurrency(5)), // plafonne la charge ajoutée
+)
+```
+
+Seule la complétion du **primaire** lui-même alimente la fenêtre — un hedge gagnant annule le primaire, dont la latence censurée est ignorée — donc un hedge ne peut jamais faire baisser le percentile qui a fixé son délai. C'est l'analogue latence→délai-de-hedge du latence→timeout du timeout adaptatif, et il se combine avec le [budget de concurrence](#budget-de-concurrence) pour borner la charge supplémentaire des hedges. Observabilité : `Metrics().AdaptiveHedgeDelay` (le délai que la policy appliquerait actuellement) et la jauge OpenTelemetry `r8e.policy.adaptive_hedge_delay` ; les déclenchements comptent toujours dans les compteurs `HedgesTriggered`/`HedgesWon` et les hooks `OnHedgeTriggered`/`OnHedgeWon`. Voir [`examples/36-adaptive-hedge`](examples/36-adaptive-hedge).
+
 ### Retry
 
 Réessaie les erreurs transitoires avec des stratégies de backoff configurables. Les erreurs encapsulées avec `r8e.Permanent()` arrêtent immédiatement les retries.

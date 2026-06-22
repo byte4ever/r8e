@@ -2,8 +2,6 @@ package r8e
 
 import (
 	"context"
-	"math"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -43,32 +41,22 @@ type (
 	}
 
 	// adaptiveTimeout is the live percentile-driven timeout controller: a dedicated
-	// sliding-window DDSketch of the bounded call's SUCCESSFUL latencies plus the
-	// hot-swappable tunables. Each call's timeout is clamp(percentile-latency ×
-	// multiplier, floor, ceiling), where ceiling is the [WithTimeout] duration (a
-	// hard maximum the adaptive value never exceeds).
-	//
-	// Reading a percentile merges the window's whole ring, an allocation too costly
-	// to repeat on every call, so the estimate is memoized per window epoch and
-	// refreshed at most once per bucket-sized slice. Both the window and the
-	// refresh cadence are driven by the injected [Clock], so the adaptive timeout is
-	// deterministic under a fake clock in tests. Safe for concurrent use.
+	// sliding-window DDSketch of the bounded call's SUCCESSFUL latencies (the
+	// embedded [windowedPercentile]) plus the hot-swappable tunables. Each call's
+	// timeout is clamp(percentile-latency × multiplier, floor, ceiling), where
+	// ceiling is the [WithTimeout] duration (a hard maximum the adaptive value never
+	// exceeds). The percentile read is memoized per window epoch by the embedded
+	// estimator, and both window and refresh cadence are driven by the injected
+	// [Clock], so the adaptive timeout is deterministic under a fake clock in tests.
+	// Safe for concurrent use.
 	//
 	// Pattern: Adaptive Timeout — a controller sizes the call deadline from live
 	// latency feedback (its own success-latency percentile) instead of a fixed
 	// duration, the latency→timeout analogue of the [AdaptiveLimiter]'s
 	// latency→concurrency.
 	adaptiveTimeout struct {
-		clock  Clock
-		window *latencyWindow
-		cfg    atomic.Pointer[adaptiveTimeoutConfig]
-		// cachedValue, cachedSamples and cachedEpoch memoize the percentile estimate
-		// for one window epoch so the per-call path skips the ring merge; refreshMu
-		// elects a single refresher at each epoch boundary to avoid a thundering herd.
-		cachedValue   atomic.Int64 // the percentile latency, in nanoseconds
-		cachedSamples atomic.Int64
-		cachedEpoch   atomic.Int64
-		refreshMu     sync.Mutex
+		*windowedPercentile
+		cfg atomic.Pointer[adaptiveTimeoutConfig]
 	}
 )
 
@@ -224,17 +212,15 @@ func (c *adaptiveTimeoutConfig) resolve() {
 }
 
 // newAdaptiveTimeout builds the live controller from a resolved config, driven by
-// clock (the policy's clock, shared with every pattern). The cached epoch is
-// seeded to a sentinel no real epoch equals so the first compute always refreshes.
+// clock (the policy's clock, shared with every pattern). The embedded estimator
+// seeds its cached epoch to a sentinel so the first compute always refreshes.
 func newAdaptiveTimeout(cfg *adaptiveTimeoutConfig, clock Clock) *adaptiveTimeout {
 	cfg.resolve()
 
 	adaptive := &adaptiveTimeout{
-		clock:  clock,
-		window: newLatencyWindow(clock),
+		windowedPercentile: newWindowedPercentile(clock),
 	}
 	adaptive.cfg.Store(cfg)
-	adaptive.cachedEpoch.Store(math.MinInt64)
 
 	return adaptive
 }
@@ -265,33 +251,6 @@ func (at *adaptiveTimeout) compute(ceiling time.Duration) time.Duration {
 	return time.Duration(target)
 }
 
-// estimate returns the q-th percentile of recent successful latencies and the
-// sample count behind it, memoized per window epoch. The percentile read merges
-// the window's whole ring, so refreshing it on every call would dominate a fast
-// policy's latency; instead it is refreshed at most once per bucket-sized epoch,
-// elected under refreshMu so a burst at the epoch boundary merges once.
-func (at *adaptiveTimeout) estimate(percentile float64) (latency time.Duration, samples int64) {
-	epoch := at.window.epochOf(at.clock.Now())
-	if at.cachedEpoch.Load() == epoch {
-		return time.Duration(at.cachedValue.Load()), at.cachedSamples.Load()
-	}
-
-	at.refreshMu.Lock()
-	defer at.refreshMu.Unlock()
-
-	// Re-check under the lock: a racing caller may have refreshed this epoch.
-	if at.cachedEpoch.Load() == epoch {
-		return time.Duration(at.cachedValue.Load()), at.cachedSamples.Load()
-	}
-
-	latency, samples = at.window.quantileSnapshot(percentile)
-	at.cachedValue.Store(int64(latency))
-	at.cachedSamples.Store(samples)
-	at.cachedEpoch.Store(epoch)
-
-	return latency, samples
-}
-
 // record feeds a completed call's latency into the percentile window, but only on
 // success: a failed or timed-out call is not representative of healthy service
 // time, and a timeout's latency (≈ the timeout itself) would feed back into the
@@ -301,7 +260,7 @@ func (at *adaptiveTimeout) record(elapsed time.Duration, err error) {
 		return
 	}
 
-	at.window.observe(elapsed)
+	at.observe(elapsed)
 }
 
 // reconfigure overlays new adaptive tunables at runtime: an option left unset keeps
@@ -310,12 +269,9 @@ func (at *adaptiveTimeout) record(elapsed time.Duration, err error) {
 // copy-overlay-store cannot race another reconfigure; a concurrent compute reads
 // the config pointer atomically and sees either the old or the new value whole.
 //
-// The per-epoch estimate cache is invalidated (cachedEpoch reset to the sentinel)
-// so a percentile change takes effect on the next call rather than lagging until
-// the current epoch rolls over — the cache is keyed on the epoch alone, not on the
-// driving percentile. The reset is taken under refreshMu so it cannot be clobbered
-// by an in-flight refresher republishing the current epoch, which would otherwise
-// silently restore the one-epoch staleness this invalidation removes.
+// The embedded estimator's per-epoch cache is invalidated so a percentile change
+// takes effect on the next call rather than lagging until the current epoch rolls
+// over — the cache is keyed on the epoch alone, not on the driving percentile.
 func (at *adaptiveTimeout) reconfigure(opts ...AdaptiveTimeoutOption) {
 	cfg := *at.cfg.Load()
 	for _, o := range opts {
@@ -324,8 +280,5 @@ func (at *adaptiveTimeout) reconfigure(opts ...AdaptiveTimeoutOption) {
 
 	cfg.resolve()
 	at.cfg.Store(&cfg)
-
-	at.refreshMu.Lock()
-	at.cachedEpoch.Store(math.MinInt64)
-	at.refreshMu.Unlock()
+	at.invalidate()
 }

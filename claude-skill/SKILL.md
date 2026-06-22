@@ -58,6 +58,24 @@ the tunables via `adaptive_timeout`). Observability: `Metrics().AdaptiveTimeout`
 gauge + `r8e.policy.adaptive_timeout` OTel gauge; reuses the `Timeouts` counter /
 `OnTimeout` hook. Example: `examples/35-adaptive-timeout`.
 
+**Adaptive hedge delay (percentile-driven):** `r8e.AdaptiveHedge(opts...)` (a
+`HedgeOption`) fires the hedge at a sliding-window percentile of recent successful
+**primary** latencies: `clamp(percentile × multiplier, floor, ceiling)`, so only
+genuine stragglers (default p95 ≈ slowest 5%) are raced. The `WithHedge` duration
+is the hard **ceiling** (adaptive only pulls the hedge *earlier* below it) and the
+warmup fallback until `MinSamples` successes accumulate. Only the **primary**'s own
+completion feeds the window — a winning hedge cancels the primary, whose censored
+(non-nil-error) latency is dropped — so a hedge never biases down its own delay.
+Sub-options: `AdaptiveHedgePercentile` (default 0.95), `AdaptiveHedgeMultiplier`
+(default 1.0, must be >0), `AdaptiveHedgeFloor` (default none),
+`AdaptiveHedgeMinSamples` (default 20). Shares the `windowedPercentile` estimator
+with adaptive timeout. Config-expressible (`AdaptiveHedgeConfig`, requires `hedge`
+→ `ErrAdaptiveHedgeWithoutHedge`) + reconfigurable (the ceiling via `hedge`, the
+tunables via `adaptive_hedge`). Observability: `Metrics().AdaptiveHedgeDelay` gauge
++ `r8e.policy.adaptive_hedge_delay` OTel gauge; reuses the `HedgesTriggered`/
+`HedgesWon` counters and `OnHedgeTriggered`/`OnHedgeWon` hooks. Pairs with
+`WithConcurrencyBudget` to cap the extra load. Example: `examples/36-adaptive-hedge`.
+
 ### Time Budget
 
 ```go
@@ -287,7 +305,7 @@ throttler reads the stamp; other patterns ignore it. Example:
 ### Hedge
 
 ```go
-r8e.WithHedge(delay time.Duration)
+r8e.WithHedge(delay time.Duration, opts ...HedgeOption) // opts: AdaptiveHedge(...)
 ```
 
 Fires a second concurrent call after `delay`. Returns first success, cancels the other.
@@ -444,7 +462,7 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 (`CircuitState`, `SlowCallRate`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `AdaptiveTimeout`,
-`Saturated`, `Healthy`, `Criticality`).
+`AdaptiveHedgeDelay`, `Saturated`, `Healthy`, `Criticality`).
 
 **Latency percentiles (always on, no option):** every `Do()` duration feeds a
 sliding-window DDSketch; `PolicyMetrics` exposes `LatencyP50`, `LatencyP95`,

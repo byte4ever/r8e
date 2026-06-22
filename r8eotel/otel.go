@@ -158,6 +158,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.LatencyP99.Seconds() })
 	builder.gaugeFloat64("r8e.policy.adaptive_timeout", "Current adaptive timeout, in seconds",
 		func(m *r8e.PolicyMetrics) float64 { return m.AdaptiveTimeout.Seconds() })
+	builder.gaugeFloat64("r8e.policy.adaptive_hedge_delay", "Current adaptive hedge delay, in seconds",
+		func(m *r8e.PolicyMetrics) float64 { return m.AdaptiveHedgeDelay.Seconds() })
 
 	if builder.err != nil {
 		return nil, builder.err

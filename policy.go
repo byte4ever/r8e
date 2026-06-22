@@ -43,6 +43,10 @@ type (
 		// success-latency percentiles (see WithTimeout + AdaptiveTimeout); the
 		// timeout cell below then holds the ceiling rather than the fixed timeout.
 		adaptiveTimeout *adaptiveTimeout
+		// adaptiveHedge, when non-nil, sizes the hedge delay from observed
+		// primary-latency percentiles (see WithHedge + AdaptiveHedge); the hedge
+		// cell below then holds the ceiling rather than the fixed delay.
+		adaptiveHedge *adaptiveHedge
 		// Reloadable cells for the stateless patterns; nil when the pattern is
 		// absent. The middleware reads them per call so Reconfigure takes
 		// effect without rebuilding the chain.
@@ -105,6 +109,7 @@ type (
 		adaptive          *adaptiveDesc
 		throttle          *throttleDesc
 		hedge             *time.Duration
+		hedgeAdaptive     *adaptiveHedgeConfig
 		fallbackValue     *staticFallback
 		fallbackFunc      *funcFallback
 		retryBudget       *RetryBudget
@@ -438,10 +443,18 @@ func WithAdaptiveThrottle(opts ...ThrottleOption) Option {
 }
 
 // WithHedge adds a hedged request that fires a second concurrent call after
-// delay.
-func WithHedge(delay time.Duration) Option {
+// delay. Pass [AdaptiveHedge] to instead fire at an observed latency percentile,
+// using the duration as the hard ceiling and warmup fallback so only genuine
+// stragglers are hedged.
+func WithHedge(delay time.Duration, opts ...HedgeOption) Option {
+	var cfg hedgeConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	return optionFunc(func(s *policySetup) {
 		s.hedge = &delay
+		s.hedgeAdaptive = cfg.adaptive
 	})
 }
 
@@ -601,6 +614,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		adaptiveTimeout *adaptiveTimeout
 		timeBudgetCell  *atomic.Pointer[timeBudgetState]
 		hedgeCell      *atomic.Int64
+		adaptiveHedge  *adaptiveHedge
 		retryCell      *atomic.Pointer[retryRuntime]
 	)
 
@@ -682,10 +696,19 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	if setup.hedge != nil {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
-		entries = append(
-			entries,
-			newHedgeEntry[T](hedgeCell, &hooks, clock, setup.concurrencyBudget),
-		)
+
+		if setup.hedgeAdaptive != nil {
+			adaptiveHedge = newAdaptiveHedge(setup.hedgeAdaptive, clock)
+			entries = append(
+				entries,
+				newAdaptiveHedgeEntry[T](hedgeCell, adaptiveHedge, &hooks, setup.concurrencyBudget),
+			)
+		} else {
+			entries = append(
+				entries,
+				newHedgeEntry[T](hedgeCell, &hooks, clock, setup.concurrencyBudget),
+			)
+		}
 	}
 
 	if setup.panicRecover {
@@ -740,6 +763,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		timeout:           timeoutCell,
 		timeBudget:        timeBudgetCell,
 		hedge:             hedgeCell,
+		adaptiveHedge:     adaptiveHedge,
 		retry:             retryCell,
 		deps:              setup.deps,
 		affectsReadiness:  setup.affectsReadiness,
@@ -1066,6 +1090,37 @@ func newHedgeEntry[T any](
 					Hooks:  hooks,
 					Clock:  clock,
 					Budget: budget,
+				})
+			}
+		},
+	}
+}
+
+// newAdaptiveHedgeEntry builds the hedge middleware in adaptive mode: the hedge
+// fires after ah.compute(ceiling) where ceiling is the reloadable cell, and each
+// primary attempt's completion latency is recorded back into the controller's
+// percentile window (success-only — a winning hedge cancels the primary, whose
+// censored latency the recorder then drops). The controller carries the policy
+// clock (ah.clock), so it need not be threaded in separately.
+func newAdaptiveHedgeEntry[T any](
+	cell *atomic.Int64,
+	ah *adaptiveHedge,
+	hooks *Hooks,
+	budget *ConcurrencyBudget,
+) PatternEntry[T] {
+	return PatternEntry[T]{
+		Priority: priorityHedge,
+		Name:     "hedge",
+		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			return func(ctx context.Context) (T, error) {
+				ceiling := time.Duration(cell.Load())
+
+				return DoHedge[T](ctx, next, HedgeParams{
+					Delay:         ah.compute(ceiling),
+					Hooks:         hooks,
+					Clock:         ah.clock,
+					Budget:        budget,
+					RecordPrimary: ah.record,
 				})
 			}
 		},
