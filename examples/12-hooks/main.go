@@ -1,5 +1,12 @@
-// Example 12-hooks: Demonstrates observability with lifecycle hooks.
-// Shows all hook types firing during a policy execution.
+// Example 12-hooks: Observability via lifecycle hooks.
+//
+// A resilience policy makes decisions you can't see from the outside: it
+// retries, opens a circuit, sheds a rate-limited request, falls back. Without
+// visibility, that's a black box — you can't feed those events into metrics,
+// logs, or alerts. r8e's Hooks struct exposes a callback for every such
+// transition, letting you observe the machinery without altering its behaviour.
+// This example registers all 12 hooks once, then runs three small policies to
+// trip retry, bulkhead, and fallback hooks so you can see them fire.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -16,6 +23,11 @@ import (
 func main() {
 	ctx := context.Background()
 
+	// Wire up every hook the library offers. In production these callbacks would
+	// increment Prometheus counters or emit structured logs; here they just
+	// print, so each scenario below visibly announces which transitions it hit.
+	// The same hooks struct is shared by all three policies — hooks are just
+	// observers, so reusing one set across policies is perfectly fine.
 	hooks := r8e.Hooks{
 		OnRetry: func(attempt int, err error) {
 			fmt.Printf(
@@ -37,7 +49,10 @@ func main() {
 		OnFallbackUsed:     func(err error) { fmt.Printf("  [OnFallbackUsed]     error=%v\n", err) },
 	}
 
-	// --- Retry hooks ---
+	// Scenario 1: a function that fails twice before succeeding. We expect
+	// OnRetry to fire on each of the two retries (carrying the attempt number
+	// and the triggering error), and no fallback — the third attempt succeeds,
+	// so the safety net is never needed.
 	fmt.Println("=== Retry Hooks ===")
 
 	p := r8e.NewPolicy[string]("retry-hooks",
@@ -59,7 +74,10 @@ func main() {
 	)
 	fmt.Printf("  result: %q\n\n", result)
 
-	// --- Bulkhead hooks ---
+	// Scenario 2: a single call through a bulkhead. Even on the happy path the
+	// bulkhead emits a matched pair of lifecycle events — OnBulkheadAcquired when
+	// the concurrency slot is taken and OnBulkheadReleased when it's handed back.
+	// Seeing both confirms slots are released and not leaked.
 	fmt.Println("=== Bulkhead Hooks ===")
 
 	bhPolicy := r8e.NewPolicy[string]("bh-hooks",
@@ -74,7 +92,10 @@ func main() {
 	)
 	fmt.Printf("  result: %q\n\n", result)
 
-	// --- Fallback hooks ---
+	// Scenario 3: a function that always fails. Retries run out, then
+	// OnFallbackUsed fires with the final error just before the fallback value is
+	// substituted. This is the hook you'd alert on — repeated fallback usage
+	// means the real dependency is unhealthy.
 	fmt.Println("=== Fallback Hooks ===")
 
 	fbPolicy := r8e.NewPolicy[string]("fb-hooks",

@@ -1,5 +1,12 @@
-// Example 11-error-classification: Demonstrates Transient vs Permanent error
-// classification and how it affects retry behavior.
+// Example 11-error-classification: Transient vs Permanent errors and retries.
+//
+// Blindly retrying every error is wasteful and sometimes harmful: retrying a
+// "connection reset" is sensible, but retrying an "invalid API key" just burns
+// the attempt budget (and time) on something that will never succeed. r8e lets
+// you tag an error's nature at the point you know it best — Transient(err) for
+// "try again" and Permanent(err) for "give up now" — and the retry loop honours
+// that tag. This example walks through all three cases (transient, permanent,
+// and unclassified) plus the IsTransient/IsPermanent inspection helpers.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -16,11 +23,17 @@ import (
 func main() {
 	ctx := context.Background()
 
+	// One generous retry budget (5 attempts) reused across all three scenarios,
+	// so the only thing that changes the outcome is how each error is classified
+	// — not the policy configuration.
 	policy := r8e.NewPolicy[string]("error-class-demo",
 		r8e.WithRetry(5, r8e.ConstantBackoff(50*time.Millisecond)),
 	)
 
-	// --- Transient error: retried until success ---
+	// Transient case: the function fails twice with errors we explicitly wrap in
+	// Transient(...), signalling "this is worth retrying". The retry loop keeps
+	// going and the third attempt succeeds — exactly what we want for a flaky
+	// network blip.
 	fmt.Println("=== Transient Error (retried) ===")
 
 	attempt := 0
@@ -36,7 +49,10 @@ func main() {
 	})
 	fmt.Printf("  result: %q, err: %v\n\n", result, err)
 
-	// --- Permanent error: stops retries immediately ---
+	// Permanent case: an "invalid API key" will never fix itself, so we wrap it
+	// in Permanent(...). Even though 4 retries remain in the budget, the loop
+	// short-circuits after the very first attempt — no point hammering a
+	// downstream that has already told us "no".
 	fmt.Println("=== Permanent Error (stops retries) ===")
 
 	attempt = 0
@@ -48,7 +64,10 @@ func main() {
 	})
 	fmt.Printf("  err: %v\n\n", err)
 
-	// --- Unclassified error: treated as transient by default ---
+	// Unclassified case: a plain errors.New(...) carries no tag. r8e's default
+	// is optimistic — it assumes an unknown error might be transient — so all 5
+	// attempts get consumed. The lesson: reach for Permanent(...) when you *know*
+	// an error is fatal, otherwise the retry budget is spent on lost causes.
 	fmt.Println("=== Unclassified Error (treated as transient) ===")
 
 	attempt = 0
@@ -60,7 +79,11 @@ func main() {
 	})
 	fmt.Printf("  err: %v (retried all 5 attempts)\n\n", err)
 
-	// --- Classification checks ---
+	// Beyond driving retries, the classification is queryable. IsTransient and
+	// IsPermanent let your own code branch on an error's nature — e.g. to decide
+	// whether to surface a "try again later" message to a user. Note the
+	// asymmetry confirmed below: unclassified errors report IsTransient=true
+	// (the default) but IsPermanent=false (only an explicit tag makes it true).
 	fmt.Println("=== Classification Checks ===")
 
 	transientErr := r8e.Transient(errors.New("timeout"))
