@@ -699,9 +699,13 @@ Deux ponts sans configuration les exposent :
 // Endpoint JSON de debug (stdlib uniquement).
 http.Handle("/metrics", r8ehttp.MetricsHandler(r8e.DefaultRegistry()))
 
-// OpenTelemetry — compteurs + gauges observables par policy, étiquetés par nom.
+// OpenTelemetry métriques — compteurs + gauges observables par policy, étiquetés par nom.
 // Dans le module séparé r8eotel pour garder le cœur sans dépendance.
 _, err := r8eotel.Register(meter, r8e.DefaultRegistry())
+
+// Traces OpenTelemetry — span root par appel Do() + span enfant par invocation fn.
+// Les chaînes de retry et les races de hedge apparaissent comme enfants dans Jaeger/Tempo.
+traced := r8eotel.Trace(policy, otel.GetTracerProvider())
 ```
 
 ## Hot reload

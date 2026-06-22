@@ -1,6 +1,14 @@
-// Package r8eotel bridges r8e policy metrics to OpenTelemetry. It registers
-// observable instruments that report, per registered policy (labelled by the
-// "policy" attribute), the counters and live gauges from r8e.Registry.Snapshot.
+// Package r8eotel bridges r8e policies to OpenTelemetry.
+//
+// Metrics: Register creates observable instruments that report, per policy
+// (labelled by the "policy" attribute), the counters and live gauges from
+// r8e.Registry.Snapshot.
+//
+// Tracing: Trace wraps an r8e.Policy[T] with trace spans — a root span per
+// Do call (named after the policy) and a child span per fn invocation (initial
+// attempt, each retry, each hedge fork), so retry chains and hedge races are
+// visible in any OTel-compatible backend (Jaeger, Tempo, …).
+//
 // Keeping the OpenTelemetry dependency in this separate module lets the core
 // r8e package stay dependency-free.
 package r8eotel
