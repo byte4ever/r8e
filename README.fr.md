@@ -340,7 +340,7 @@ import (
 )
 
 // Créer le backend de cache
-cache := otteradapter.New[string, string](r8e.CacheConfig{MaxSize: 10_000})
+cache := otteradapter.MustNew[string, string](r8e.CacheConfig{MaxSize: 10_000})
 
 // Créer le stale cache avec hooks
 sc := r8e.NewStaleCache(cache, 5*time.Minute,
@@ -372,16 +372,16 @@ Les sous-packages adaptateurs implémentent `Cache[K, V]` pour les bibliothèque
 
 | Adaptateur | Installation | Description |
 |---|---|---|
-| **Otter** | `go get github.com/byte4ever/r8e/otter` | Cache haute performance, sans contention, avec TTL par entrée |
-| **Ristretto** | `go get github.com/byte4ever/r8e/ristretto` | Cache à admission de Dgraph avec éviction basée sur le coût |
+| **[Otter](otter/README.fr.md)** | `go get github.com/byte4ever/r8e/otter` | Cache haute performance, sans contention, avec TTL par entrée |
+| **[Ristretto](ristretto/README.fr.md)** | `go get github.com/byte4ever/r8e/ristretto` | Cache à admission de Dgraph avec éviction basée sur le coût |
 
 Les deux adaptateurs acceptent un `r8e.CacheConfig` pour configurer la capacité :
 
 ```go
 cfg := r8e.CacheConfig{MaxSize: 50_000}
 
-otterCache := otteradapter.New[string, string](cfg)
-risCache   := ristrettoadapter.New[string, string](cfg)
+otterCache := otteradapter.MustNew[string, string](cfg)
+risCache   := ristrettoadapter.MustNew[string, string](cfg)
 ```
 
 La configuration du cache peut aussi être chargée depuis un fichier JSON (voir [Configuration](#configuration)).
@@ -978,6 +978,8 @@ _, err := r8eotel.Register(meter, r8e.DefaultRegistry())
 traced := r8eotel.Trace(policy, otel.GetTracerProvider())
 ```
 
+Voir [`r8eotel/README.fr.md`](r8eotel/README.fr.md) pour la documentation complète du pont OpenTelemetry et ses exemples.
+
 ## Hot reload
 
 Réglez les paramètres des patterns qu'une policy possède déjà — à l'exécution, sans redéploiement. `Policy.Reconfigure` applique chaque champ non-nil d'un `PolicyConfig` au pattern live ; les champs nil sont laissés inchangés :
@@ -1098,7 +1100,7 @@ cfg, err := r8econf.LoadCacheConfig("caches.json", "pricing")
 if err != nil {
     log.Fatal(err)
 }
-cache := otteradapter.New[string, string](cfg)
+cache := otteradapter.MustNew[string, string](cfg)
 sc := r8e.NewStaleCache(cache, cfg.TTL)
 ```
 

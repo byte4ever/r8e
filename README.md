@@ -341,7 +341,7 @@ import (
 )
 
 // Create cache backend
-cache := otteradapter.New[string, string](r8e.CacheConfig{MaxSize: 10_000})
+cache := otteradapter.MustNew[string, string](r8e.CacheConfig{MaxSize: 10_000})
 
 // Create stale cache with hooks
 sc := r8e.NewStaleCache(cache, 5*time.Minute,
@@ -373,16 +373,16 @@ Adapter sub-packages implement `Cache[K, V]` for popular cache libraries. Each i
 
 | Adapter | Install | Description |
 |---|---|---|
-| **Otter** | `go get github.com/byte4ever/r8e/otter` | High-performance, contention-free cache with per-entry TTL |
-| **Ristretto** | `go get github.com/byte4ever/r8e/ristretto` | Admission-based cache from Dgraph with cost-aware eviction |
+| **[Otter](otter/README.md)** | `go get github.com/byte4ever/r8e/otter` | High-performance, contention-free cache with per-entry TTL |
+| **[Ristretto](ristretto/README.md)** | `go get github.com/byte4ever/r8e/ristretto` | Admission-based cache from Dgraph with cost-aware eviction |
 
 Both adapters accept an `r8e.CacheConfig` to configure capacity:
 
 ```go
 cfg := r8e.CacheConfig{MaxSize: 50_000}
 
-otterCache := otteradapter.New[string, string](cfg)
-risCache   := ristrettoadapter.New[string, string](cfg)
+otterCache := otteradapter.MustNew[string, string](cfg)
+risCache   := ristrettoadapter.MustNew[string, string](cfg)
 ```
 
 Cache configuration can also be loaded from JSON (see [Configuration](#configuration)).
@@ -960,6 +960,8 @@ _, err := r8eotel.Register(meter, r8e.DefaultRegistry())
 traced := r8eotel.Trace(policy, otel.GetTracerProvider())
 ```
 
+See [`r8eotel/README.md`](r8eotel/README.md) for the full OpenTelemetry bridge documentation and examples.
+
 ## Hot Reload
 
 Tune the parameters of patterns a policy already has — at runtime, without a redeploy. `Policy.Reconfigure` applies every non-nil field of a `PolicyConfig` to the live pattern; nil fields are left unchanged:
@@ -1080,7 +1082,7 @@ cfg, err := r8econf.LoadCacheConfig("caches.json", "pricing")
 if err != nil {
     log.Fatal(err)
 }
-cache := otteradapter.New[string, string](cfg)
+cache := otteradapter.MustNew[string, string](cfg)
 sc := r8e.NewStaleCache(cache, cfg.TTL)
 ```
 
