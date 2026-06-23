@@ -868,3 +868,288 @@ func TestReconfigurePropagateDeadlineAbsent(t *testing.T) {
 	err := policy.Reconfigure(PolicyConfig{PropagateDeadline: &yes})
 	require.ErrorIs(t, err, ErrDeadlinePropagationWithoutBudget)
 }
+
+// ---------------------------------------------------------------------------
+// RespectInboundDeadline — the ingress half of cross-service propagation: the
+// budget honors a deadline already on the incoming context as a ceiling.
+// ---------------------------------------------------------------------------
+
+// inboundDeadlineCtx reports a fixed deadline but, like context.Background,
+// never cancels — letting tests drive the inbound-deadline clamp against a
+// frozen budgetClock without the wall-clock firing of context.WithDeadline. It
+// stores no parent context, so it never trips the containedctx linter.
+type inboundDeadlineCtx struct {
+	deadline time.Time
+}
+
+func (c inboundDeadlineCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+func (inboundDeadlineCtx) Done() <-chan struct{}         { return nil }
+func (inboundDeadlineCtx) Err() error                    { return nil }
+func (inboundDeadlineCtx) Value(any) any                 { return nil }
+
+func TestTightenToInbound(t *testing.T) {
+	t.Parallel()
+
+	base := time.Unix(1_700_000_000, 0)
+	budget := base.Add(time.Hour)
+
+	t.Run("sooner inbound wins", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := inboundDeadlineCtx{deadline: base.Add(time.Minute)}
+		assert.Equal(t, base.Add(time.Minute), tightenToInbound(ctx, budget))
+	})
+
+	t.Run("later inbound is ignored", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := inboundDeadlineCtx{deadline: base.Add(2 * time.Hour)}
+		assert.Equal(t, budget, tightenToInbound(ctx, budget))
+	})
+
+	t.Run("equal inbound is not tightened", func(t *testing.T) {
+		t.Parallel()
+
+		// Before is strict: an inbound deadline equal to the budget leaves it
+		// unchanged. Pins the boundary against a `<`->`<=` regression.
+		ctx := inboundDeadlineCtx{deadline: budget}
+		assert.Equal(t, budget, tightenToInbound(ctx, budget))
+	})
+
+	t.Run("no inbound deadline", func(t *testing.T) {
+		t.Parallel()
+
+		assert.Equal(t, budget, tightenToInbound(context.Background(), budget))
+	})
+}
+
+func TestWithTimeBudgetRespectInboundClampsCooperativeGate(t *testing.T) {
+	t.Parallel()
+
+	clk := newBudgetClock()
+	exceeded := 0
+
+	// The configured budget is an hour, but the inbound deadline leaves only
+	// 500ms — less than the 1s backoff — so the first retry is suppressed.
+	policy := NewPolicy[string]("respect-inbound",
+		WithClock(clk),
+		WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded++ }}),
+		WithRetry(5, ConstantBackoff(time.Second)),
+		WithTimeBudget(time.Hour, RespectInboundDeadline()),
+	)
+
+	ctx := inboundDeadlineCtx{deadline: clk.Now().Add(500 * time.Millisecond)}
+
+	attempts := 0
+	_, err := policy.Do(ctx, func(_ context.Context) (string, error) {
+		attempts++
+
+		return "", Transient(errors.New("down"))
+	})
+
+	require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+	assert.Equal(t, 1, attempts,
+		"an inbound deadline shorter than the backoff stops the retry")
+	assert.Equal(t, 1, exceeded)
+}
+
+func TestWithTimeBudgetRespectInboundClampsHardMode(t *testing.T) {
+	t.Parallel()
+
+	clk := newTestClock()
+	exceeded := 0
+
+	// Both halves on: honor the inbound deadline (ingress) AND propagate a hard
+	// deadline (egress) — the headline cross-service use. The inbound 100ms window
+	// is shorter than the 1s backoff, so the cooperative gate (fed the SAME
+	// clamped deadline as the hard context) suppresses the retry before the hard
+	// deadline ever fires.
+	policy := NewPolicy[string]("respect-inbound-hard",
+		WithClock(clk),
+		WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded++ }}),
+		WithRetry(5, ConstantBackoff(time.Second)),
+		WithTimeBudget(time.Hour, RespectInboundDeadline(), PropagateDeadline()),
+	)
+
+	ctx := inboundDeadlineCtx{deadline: clk.Now().Add(100 * time.Millisecond)}
+
+	attempts := 0
+	_, err := policy.Do(ctx, func(_ context.Context) (string, error) {
+		attempts++
+
+		return "", Transient(errors.New("down"))
+	})
+
+	require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+	assert.Equal(t, 1, attempts)
+	assert.Equal(t, 1, exceeded, "the budget-exceeded path fires exactly once")
+}
+
+func TestWithTimeBudgetRespectInboundIgnoredWhenOff(t *testing.T) {
+	t.Parallel()
+
+	clk := newBudgetClock()
+	exceeded := 0
+
+	// Same inbound deadline, but WITHOUT RespectInboundDeadline the gate ignores
+	// it: the hour-long configured budget governs, so every attempt runs.
+	policy := NewPolicy[string]("ignore-inbound",
+		WithClock(clk),
+		WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded++ }}),
+		WithRetry(2, ConstantBackoff(time.Second)),
+		WithTimeBudget(time.Hour),
+	)
+
+	ctx := inboundDeadlineCtx{deadline: clk.Now().Add(500 * time.Millisecond)}
+
+	attempts := 0
+	_, err := policy.Do(ctx, func(_ context.Context) (string, error) {
+		attempts++
+
+		return "", Transient(errors.New("down"))
+	})
+
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.NotErrorIs(t, err, ErrTimeBudgetExceeded)
+	assert.Equal(t, 2, attempts,
+		"without RespectInboundDeadline the inbound deadline is ignored")
+	assert.Zero(t, exceeded)
+}
+
+func TestWithTimeBudgetRespectInboundIgnoresLaterInbound(t *testing.T) {
+	t.Parallel()
+
+	clk := newBudgetClock()
+
+	// RespectInboundDeadline is ON, but the inbound deadline (an hour out) is
+	// LATER than the 500ms budget, so it never tightens anything: the 1ms backoff
+	// fits the budget and all attempts run. Proves the clamp only ever shortens.
+	policy := NewPolicy[string]("later-inbound",
+		WithClock(clk),
+		WithRetry(3, ConstantBackoff(time.Millisecond)),
+		WithTimeBudget(500*time.Millisecond, RespectInboundDeadline()),
+	)
+
+	ctx := inboundDeadlineCtx{deadline: clk.Now().Add(time.Hour)}
+
+	attempts := 0
+	_, err := policy.Do(ctx, func(_ context.Context) (string, error) {
+		attempts++
+
+		return "", Transient(errors.New("down"))
+	})
+
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Equal(t, 3, attempts)
+}
+
+func TestBuildOptionsRespectInboundDeadline(t *testing.T) {
+	t.Parallel()
+
+	budget := "5s"
+	backoff := "constant"
+	baseDelay := "10ms"
+	maxAttempts := 5
+	on := true
+
+	t.Run("with budget builds a honoring policy", func(t *testing.T) {
+		t.Parallel()
+
+		opts, err := BuildOptions(&PolicyConfig{
+			TimeBudget:             &budget,
+			RespectInboundDeadline: &on,
+			Retry: &RetryConfig{
+				Backoff:     &backoff,
+				BaseDelay:   &baseDelay,
+				MaxAttempts: &maxAttempts,
+			},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, opts)
+
+		// The built option must actually honor an inbound deadline: a 5ms inbound
+		// window is shorter than the 10ms backoff, so the retry is suppressed. A
+		// config path that dropped RespectInboundDeadline() would run both
+		// attempts and never raise the sentinel.
+		clk := newBudgetClock()
+		p := NewPolicy[string]("built-inbound", append(opts, WithClock(clk))...)
+
+		ctx := inboundDeadlineCtx{deadline: clk.Now().Add(5 * time.Millisecond)}
+
+		attempts := 0
+		_, err = p.Do(ctx, func(_ context.Context) (string, error) {
+			attempts++
+
+			return "", Transient(errors.New("down"))
+		})
+		require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+		assert.Equal(t, 1, attempts)
+	})
+
+	t.Run("without budget is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := BuildOptions(&PolicyConfig{RespectInboundDeadline: &on})
+		require.ErrorIs(t, err, ErrInboundDeadlineWithoutBudget)
+	})
+}
+
+func TestReconfigureRespectInboundDeadline(t *testing.T) {
+	t.Parallel()
+
+	clk := newBudgetClock()
+	exceeded := 0
+
+	policy := NewPolicy[string]("reconf-inbound",
+		WithClock(clk),
+		WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded++ }}),
+		WithRetry(3, ConstantBackoff(time.Second)),
+		WithTimeBudget(time.Hour), // RespectInboundDeadline starts OFF
+	)
+
+	run := func() (int, error) {
+		ctx := inboundDeadlineCtx{deadline: clk.Now().Add(500 * time.Millisecond)}
+
+		attempts := 0
+		_, err := policy.Do(ctx, func(_ context.Context) (string, error) {
+			attempts++
+
+			return "", Transient(errors.New("down"))
+		})
+
+		return attempts, err
+	}
+
+	// OFF: the inbound deadline is ignored, retries run to exhaustion.
+	attempts, err := run()
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Equal(t, 3, attempts)
+
+	// Turn it ON via Reconfigure — the inbound deadline now gates the retry.
+	on := true
+	require.NoError(t, policy.Reconfigure(PolicyConfig{RespectInboundDeadline: &on}))
+
+	attempts, err = run()
+	require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+	assert.Equal(t, 1, attempts)
+	assert.Positive(t, exceeded)
+
+	// Turn it back OFF — the inbound deadline is ignored again.
+	off := false
+	require.NoError(t, policy.Reconfigure(PolicyConfig{RespectInboundDeadline: &off}))
+
+	attempts, err = run()
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Equal(t, 3, attempts)
+}
+
+func TestReconfigureRespectInboundDeadlineAbsent(t *testing.T) {
+	t.Parallel()
+
+	// No time budget: there is no budget to tighten, so the flag is rejected.
+	policy := NewPolicy[string]("no-budget-inbound", WithBulkhead(5))
+
+	on := true
+	err := policy.Reconfigure(PolicyConfig{RespectInboundDeadline: &on})
+	require.ErrorIs(t, err, ErrInboundDeadlineWithoutBudget)
+}

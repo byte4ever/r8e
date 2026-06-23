@@ -16,7 +16,8 @@ import (
 type (
 	// timeBudgetConfig holds the optional configuration for the time budget.
 	timeBudgetConfig struct {
-		propagateDeadline bool
+		propagateDeadline      bool
+		respectInboundDeadline bool
 	}
 
 	// TimeBudgetOption configures the time budget passed to [WithTimeBudget].
@@ -26,19 +27,23 @@ type (
 	TimeBudgetOption func(*timeBudgetConfig)
 
 	// timeBudgetState is the reloadable time-budget configuration. It is swapped
-	// atomically as one value so a call reads budget and propagateDeadline as a
-	// single consistent snapshot, and so the two settings cannot fall out of sync.
+	// atomically as one value so a call reads budget, propagateDeadline, and
+	// respectInboundDeadline as a single consistent snapshot, and so the
+	// settings cannot fall out of sync.
 	timeBudgetState struct {
-		budget            time.Duration
-		propagateDeadline bool
+		budget                 time.Duration
+		propagateDeadline      bool
+		respectInboundDeadline bool
 	}
 
 	// hardDeadlineParams groups the per-call inputs threaded into the
-	// hard-deadline budget path (an unexported parameter bundle).
+	// hard-deadline budget path (an unexported parameter bundle). deadline is
+	// the budget instant already computed (and, with [RespectInboundDeadline],
+	// clamped to any inbound deadline) by the budget middleware.
 	hardDeadlineParams struct {
-		clock  Clock
-		hooks  *Hooks
-		budget time.Duration
+		clock    Clock
+		hooks    *Hooks
+		deadline time.Time
 	}
 
 	// timeBudgetKey is the unexported context key carrying the budget deadline.
@@ -83,6 +88,42 @@ func PropagateDeadline() TimeBudgetOption {
 	}
 }
 
+// RespectInboundDeadline makes the time budget honor a deadline already present
+// on the incoming context as a ceiling: the effective budget becomes the SOONER
+// of clock.Now()+budget and that inbound deadline. This is the ingress half of
+// cross-service deadline propagation — a server that received a deadline from
+// its caller never lets its own budget run past it ("the smallest deadline
+// wins", as in gRPC). Without it the budget is a fixed duration regardless of
+// any inbound deadline.
+//
+// It tightens the budget that retry and hedge consult (the cooperative gate),
+// so a doomed attempt is not started once the inbound deadline leaves too
+// little time; it never extends the budget beyond the configured duration.
+// Pair it with [PropagateDeadline] (egress) so a middle service both honors the
+// upstream deadline and re-emits the tightened value to its own downstream
+// callees. Like the budget itself the inbound deadline is read against the
+// policy's [Clock], so it is meaningful to a real downstream caller only on
+// [RealClock]; see [PropagateDeadline] for the same fake-clock caveat.
+func RespectInboundDeadline() TimeBudgetOption {
+	return func(cfg *timeBudgetConfig) {
+		cfg.respectInboundDeadline = true
+	}
+}
+
+// tightenToInbound returns the SOONER of deadline and any deadline already
+// present on ctx, implementing the ingress half of cross-service propagation —
+// a server never runs its budget past the deadline its caller propagated (see
+// [RespectInboundDeadline]). A ctx with no deadline, or one later than
+// deadline, returns deadline unchanged, so the result can only ever be sooner,
+// never later.
+func tightenToInbound(ctx context.Context, deadline time.Time) time.Time {
+	if inbound, ok := ctx.Deadline(); ok && inbound.Before(deadline) {
+		return inbound
+	}
+
+	return deadline
+}
+
 // attachTimeBudget returns ctx carrying an absolute deadline that retry and hedge
 // honor as a single total budget for the whole call. The deadline is derived
 // from the policy's [Clock] (not a real context deadline), so the budget stays
@@ -120,10 +161,9 @@ func applyHardDeadline[T any](
 	next func(context.Context) (T, error),
 	params hardDeadlineParams,
 ) (T, error) {
-	deadline := params.clock.Now().Add(params.budget)
-	budgetCtx := attachTimeBudget(ctx, deadline)
+	budgetCtx := attachTimeBudget(ctx, params.deadline)
 
-	hardCtx, cancel := newBudgetDeadlineCtx(budgetCtx, params.clock, deadline)
+	hardCtx, cancel := newBudgetDeadlineCtx(budgetCtx, params.clock, params.deadline)
 	defer cancel()
 
 	val, err := next(hardCtx)

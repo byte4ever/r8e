@@ -130,6 +130,39 @@ if errors.As(err, &statusErr) {
 | Tentatives epuisees | `nil` | `ErrRetriesExhausted` | extractible (derniere tentative) |
 | Erreur de transport | `nil` | erreur de transport | absent |
 
+## Propagation de deadline
+
+gRPC propage une deadline à travers une frontière de service automatiquement ; le
+HTTP simple, non. `httpx` fournit les deux moitiés pour qu'un budget de temps r8e
+voyage sur le fil sous forme d'un header relatif insensible au clock-skew
+(`X-R8e-Timeout-Ms`, à l'image du `grpc-timeout` de gRPC) :
+
+| Helper | Rôle | Détail |
+|---|---|---|
+| `InjectDeadline(req, clock)` | **Egress** | Écrit le budget restant du contexte de `req` en header ms relatif. Renvoie `false` si le contexte n'a pas de deadline. Plancher à 1ms pour un budget épuisé afin qu'il se propage quand même. |
+| `ExtractDeadline(ctx, req)` | **Ingress** | Reconstruit `now + restant` depuis le header en contexte borné (et `cancel`). Renvoie le parent inchangé pour un header absent, invalide ou non positif ; plafonne une valeur débordante. |
+
+```go
+// Appelant (egress) : transforme le budget de la policy en vraie ctx.Deadline,
+// puis inscrit le temps restant sur la requête sortante.
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+httpx.InjectDeadline(req, r8e.RealClock{})
+
+// Appelé (ingress) : adopte la deadline de l'appelant, puis exécute le travail
+// sous un budget resserré à celle-ci.
+ctx, cancel := httpx.ExtractDeadline(r.Context(), r)
+defer cancel()
+policy := r8e.NewPolicy[T]("svc",
+    r8e.WithRetry(5, r8e.ConstantBackoff(50*time.Millisecond)),
+    r8e.WithTimeBudget(10*time.Second, r8e.RespectInboundDeadline()),
+)
+```
+
+Associez `InjectDeadline` à `r8e.PropagateDeadline()` côté appelant et
+`ExtractDeadline` à `r8e.RespectInboundDeadline()` côté appelé pour une chaîne
+cross-service complète. Voir
+[`examples/43-deadline-propagation-cross-service`](../examples/43-deadline-propagation-cross-service).
+
 ## Installation
 
 ```bash

@@ -516,6 +516,40 @@ test ; comme une vraie deadline de contexte est intrinsèquement wall-clock, la
 sinon `ErrDeadlinePropagationWithoutBudget`) et rechargeable à chaud via
 `Reconfigure`. Voir [`examples/28-deadline-propagation`](examples/28-deadline-propagation).
 
+### Propagation de deadline cross-service (ingress)
+
+`PropagateDeadline` est la moitié **egress** — émettre le budget en aval. La
+moitié **ingress** est `RespectInboundDeadline` : elle resserre le budget à une
+deadline *déjà présente sur le contexte entrant*, de sorte qu'un service ayant
+reçu une deadline de son appelant ne fasse jamais tourner son propre budget
+au-delà (« le plus petit deadline gagne », comme en gRPC). Le budget effectif
+devient `min(clock.Now()+budget, entrant)` ; le clamp ne peut que **raccourcir**
+le budget, jamais l'étendre au-delà du plafond configuré.
+
+```go
+policy := r8e.NewPolicy[Response]("middle-tier",
+    r8e.WithRetry(5, r8e.ConstantBackoff(50*time.Millisecond)),
+    // Plafond local généreux, mais sans jamais survivre à la deadline de l'appelant.
+    r8e.WithTimeBudget(10*time.Second,
+        r8e.RespectInboundDeadline(), // ingress : honore l'amont
+        r8e.PropagateDeadline(),      // egress : ré-émet la valeur resserrée
+    ),
+)
+```
+
+Elle resserre le gate coopératif que consultent retry et hedge : une tentative
+vouée à l'échec n'est pas lancée dès que la deadline entrante laisse trop peu de
+temps. Exprimable en config via `respect_inbound_deadline` (exige `time_budget`,
+sinon `ErrInboundDeadlineWithoutBudget`) et rechargeable à chaud via `Reconfigure`.
+
+Pour HTTP, où (contrairement à gRPC) la deadline n'est pas propagée
+automatiquement, le package [`httpx`](httpx) fournit la paire réseau :
+`httpx.InjectDeadline(req, clock)` écrit le budget restant en header millisecondes
+relatif et insensible au clock-skew sur une requête sortante (egress), et
+`httpx.ExtractDeadline(ctx, req)` reconstruit un contexte borné à la réception
+(ingress). Voir
+[`examples/43-deadline-propagation-cross-service`](examples/43-deadline-propagation-cross-service).
+
 ## Retry Budget
 
 Un retry budget plafonne le nombre de retries relativement au taux d'échec, pour
@@ -1332,6 +1366,7 @@ go run ./examples/39-ramp-recovery/
 go run ./examples/40-slo-governor/
 go run ./examples/41-codel-queue/
 go run ./examples/42-nested-retry-budget/
+go run ./examples/43-deadline-propagation-cross-service/
 ```
 
 ## Licence

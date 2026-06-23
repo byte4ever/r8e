@@ -105,6 +105,18 @@ propagated value is only meaningful to real callees on `RealClock`.
 Config-expressible via `propagate_deadline` (requires `time_budget`, else
 `r8e.ErrDeadlinePropagationWithoutBudget`), hot-reloadable via `Reconfigure`.
 
+Add `r8e.RespectInboundDeadline()` — the **ingress** half of cross-service
+propagation — to tighten the budget to a deadline already on the incoming
+context: the effective budget becomes `min(clock.Now()+d, ctx.Deadline())`, so a
+service never runs its budget past the deadline its caller propagated ("smallest
+deadline wins"). It only ever shortens the budget. Config-expressible via
+`respect_inbound_deadline` (requires `time_budget`, else
+`r8e.ErrInboundDeadlineWithoutBudget`), hot-reloadable via `Reconfigure`. For HTTP
+(gRPC propagates automatically), the `httpx` package carries it on the wire as a
+relative, clock-skew-safe header: `httpx.InjectDeadline(req, clock)` (egress, pair
+with `PropagateDeadline`) and `httpx.ExtractDeadline(ctx, req)` (ingress, pair with
+`RespectInboundDeadline`).
+
 ### Retry
 
 ```go

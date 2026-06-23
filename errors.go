@@ -145,6 +145,15 @@ var (
 	ErrDeadlinePropagationWithoutBudget error = resilienceError(
 		"deadline propagation requires a time budget",
 	)
+	// ErrInboundDeadlineWithoutBudget indicates inbound-deadline honoring was
+	// requested (a respect_inbound_deadline config field) on a policy with no
+	// time budget to tighten. The code API cannot express this — the flag is an
+	// option of [WithTimeBudget] — so it surfaces only from config: it is the
+	// error [BuildOptions] and [Policy.Reconfigure] return for that
+	// misconfiguration. See [RespectInboundDeadline].
+	ErrInboundDeadlineWithoutBudget error = resilienceError(
+		"inbound deadline honoring requires a time budget",
+	)
 	// ErrSlowCallConfigIncomplete indicates a [CircuitBreakerConfig] set only one
 	// of slow_call_duration / slow_call_rate_threshold. Both are required to
 	// enable slow-call-rate tripping (see [SlowCallRate]); supplying one alone is

@@ -125,6 +125,9 @@ type (
 		// propagateDeadline requests a hard clock-driven deadline derived from
 		// the time budget (see PropagateDeadline); ignored without timeBudget.
 		propagateDeadline bool
+		// respectInboundDeadline tightens the time budget to an inbound context
+		// deadline (see RespectInboundDeadline); ignored without timeBudget.
+		respectInboundDeadline bool
 		// panicRecover, when true, adds the innermost recover middleware that
 		// catches panics and converts them to *PanicError (see WithRecover).
 		panicRecover bool
@@ -292,7 +295,11 @@ func WithTimeout(timeout time.Duration, opts ...TimeoutOption) Option {
 //
 // Pass [PropagateDeadline] to additionally expose the budget as a hard,
 // clock-driven [context.Context] deadline that downstream callees observe and
-// that cancels an in-flight attempt when the budget expires.
+// that cancels an in-flight attempt when the budget expires. Pass
+// [RespectInboundDeadline] to tighten the budget to a deadline already present
+// on the incoming context — together they make this policy a faithful link in
+// a cross-service deadline-propagation chain (honor upstream, re-emit
+// downstream).
 func WithTimeBudget(budget time.Duration, opts ...TimeBudgetOption) Option {
 	var cfg timeBudgetConfig
 	for _, opt := range opts {
@@ -302,6 +309,7 @@ func WithTimeBudget(budget time.Duration, opts ...TimeBudgetOption) Option {
 	return optionFunc(func(s *policySetup) {
 		s.timeBudget = &budget
 		s.propagateDeadline = cfg.propagateDeadline
+		s.respectInboundDeadline = cfg.respectInboundDeadline
 	})
 }
 
@@ -675,10 +683,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 
 	if setup.timeBudget != nil {
 		timeBudgetCell = new(atomic.Pointer[timeBudgetState])
-		timeBudgetCell.Store(&timeBudgetState{
-			budget:            *setup.timeBudget,
-			propagateDeadline: setup.propagateDeadline,
-		})
+		timeBudgetCell.Store(newTimeBudgetState(&setup))
 		entries = append(
 			entries,
 			newTimeBudgetEntry[T](timeBudgetCell, clock, &hooks),
@@ -944,6 +949,17 @@ func newAdaptiveTimeoutEntry[T any](
 	}
 }
 
+// newTimeBudgetState builds the initial reloadable time-budget state from the
+// policy setup. The budget is required (the caller guards on setup.timeBudget);
+// the deadline flags default to false when their options were not supplied.
+func newTimeBudgetState(setup *policySetup) *timeBudgetState {
+	return &timeBudgetState{
+		budget:                 *setup.timeBudget,
+		propagateDeadline:      setup.propagateDeadline,
+		respectInboundDeadline: setup.respectInboundDeadline,
+	}
+}
+
 func newTimeBudgetEntry[T any](
 	cell *atomic.Pointer[timeBudgetState],
 	clock Clock,
@@ -956,17 +972,25 @@ func newTimeBudgetEntry[T any](
 			return func(ctx context.Context) (T, error) {
 				state := cell.Load()
 
+				// Compute the budget instant once, tightened to an inbound
+				// deadline when RespectInboundDeadline is set, so the cooperative
+				// gate and the hard context share one consistent deadline.
+				deadline := clock.Now().Add(state.budget)
+				if state.respectInboundDeadline {
+					deadline = tightenToInbound(ctx, deadline)
+				}
+
 				// Cooperative-only: attach the budget value retry/hedge consult.
 				if !state.propagateDeadline {
-					return next(attachTimeBudget(ctx, clock.Now().Add(state.budget)))
+					return next(attachTimeBudget(ctx, deadline))
 				}
 
 				// Hard mode: additionally derive a clock-driven context deadline
 				// that downstream callees observe (see PropagateDeadline).
 				return applyHardDeadline[T](ctx, next, hardDeadlineParams{
-					clock:  clock,
-					hooks:  hooks,
-					budget: state.budget,
+					clock:    clock,
+					hooks:    hooks,
+					deadline: deadline,
 				})
 			}
 		},

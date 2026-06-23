@@ -32,6 +32,11 @@ type (
 		// cancels an in-flight attempt once the budget expires (see
 		// [PropagateDeadline]). Optional; requires TimeBudget.
 		PropagateDeadline *bool `json:"propagate_deadline,omitempty" yaml:"propagate_deadline,omitempty"`
+		// RespectInboundDeadline, when true, tightens the time budget to a
+		// deadline already present on the incoming context (the ingress half of
+		// cross-service deadline propagation; see [RespectInboundDeadline]).
+		// Optional; requires TimeBudget.
+		RespectInboundDeadline *bool `json:"respect_inbound_deadline,omitempty" yaml:"respect_inbound_deadline,omitempty"`
 		// Hedge is the delay before launching a hedged request.
 		// Optional. Parsed via time.ParseDuration. Example: "200ms".
 		Hedge *string `json:"hedge,omitempty" yaml:"hedge,omitempty"`
@@ -334,32 +339,12 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		return nil, ErrAdaptiveTimeoutWithoutTimeout
 	}
 
-	if pc.TimeBudget != nil {
-		// The budget gates only retry and hedge; without one it would panic in
-		// NewPolicy. Surface the misconfiguration as an error here instead.
-		if pc.Retry == nil && pc.Hedge == nil {
-			return nil, fmt.Errorf("time_budget: %w", ErrTimeBudgetWithoutConsumer)
-		}
-
-		budget, err := time.ParseDuration(*pc.TimeBudget)
-		if err != nil {
-			return nil, fmt.Errorf("time_budget: %w", err)
-		}
-
-		var tbOpts []TimeBudgetOption
-		if pc.PropagateDeadline != nil && *pc.PropagateDeadline {
-			tbOpts = append(tbOpts, PropagateDeadline())
-		}
-
-		opts = append(opts, WithTimeBudget(budget, tbOpts...))
-	} else if pc.PropagateDeadline != nil && *pc.PropagateDeadline {
-		// Propagation has no budget to derive a deadline from — reject the same
-		// input cold and hot so BuildOptions and Reconfigure agree.
-		return nil, fmt.Errorf(
-			"propagate_deadline: %w",
-			ErrDeadlinePropagationWithoutBudget,
-		)
+	budgetOpts, budgetErr := timeBudgetOptionsFromConfig(pc)
+	if budgetErr != nil {
+		return nil, budgetErr
 	}
+
+	opts = append(opts, budgetOpts...)
 
 	if pc.CircuitBreaker != nil {
 		cbOpts, err := cbOptionsFromConfig(pc.CircuitBreaker)
@@ -632,6 +617,50 @@ func sloOptionsFromConfig(cfg *SLOConfig) ([]SLOOption, error) {
 	}
 
 	return opts, nil
+}
+
+// timeBudgetOptionsFromConfig translates the time-budget config fields into
+// options. The budget gates only retry and hedge, so without one it would panic
+// in NewPolicy and any budget-derived flag (PropagateDeadline /
+// RespectInboundDeadline) has nothing to attach to; each such misconfiguration
+// is rejected here — the same input cold and hot so BuildOptions and
+// Reconfigure agree. With no budget and no flag it returns no options.
+func timeBudgetOptionsFromConfig(pc *PolicyConfig) ([]Option, error) {
+	if pc.TimeBudget == nil {
+		if pc.PropagateDeadline != nil && *pc.PropagateDeadline {
+			return nil, fmt.Errorf(
+				"propagate_deadline: %w", ErrDeadlinePropagationWithoutBudget,
+			)
+		}
+
+		if pc.RespectInboundDeadline != nil && *pc.RespectInboundDeadline {
+			return nil, fmt.Errorf(
+				"respect_inbound_deadline: %w", ErrInboundDeadlineWithoutBudget,
+			)
+		}
+
+		return nil, nil
+	}
+
+	if pc.Retry == nil && pc.Hedge == nil {
+		return nil, fmt.Errorf("time_budget: %w", ErrTimeBudgetWithoutConsumer)
+	}
+
+	budget, err := time.ParseDuration(*pc.TimeBudget)
+	if err != nil {
+		return nil, fmt.Errorf("time_budget: %w", err)
+	}
+
+	var tbOpts []TimeBudgetOption
+	if pc.PropagateDeadline != nil && *pc.PropagateDeadline {
+		tbOpts = append(tbOpts, PropagateDeadline())
+	}
+
+	if pc.RespectInboundDeadline != nil && *pc.RespectInboundDeadline {
+		tbOpts = append(tbOpts, RespectInboundDeadline())
+	}
+
+	return []Option{WithTimeBudget(budget, tbOpts...)}, nil
 }
 
 // timeoutOptionsFromConfig converts an [AdaptiveTimeoutConfig] into [WithTimeout]

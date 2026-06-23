@@ -73,39 +73,12 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 
 	actions = append(actions, timeoutActions...)
 
-	if cfg.TimeBudget != nil {
-		if p.timeBudget == nil {
-			return absentPatternError("time_budget")
-		}
-
-		dur, err := time.ParseDuration(*cfg.TimeBudget)
-		if err != nil {
-			return fmt.Errorf("r8e: reconfigure time_budget: %w", err)
-		}
-
-		actions = append(actions, func() {
-			state := *p.timeBudget.Load()
-			state.budget = dur
-			p.timeBudget.Store(&state)
-		})
+	budgetActions, budgetErr := p.timeBudgetReconfigureActions(&cfg)
+	if budgetErr != nil {
+		return budgetErr
 	}
 
-	if cfg.PropagateDeadline != nil {
-		// The time-budget cell exists iff the policy has a time budget; without
-		// one there is no deadline to derive, so reject the same input
-		// BuildOptions rejects rather than silently dropping it.
-		if p.timeBudget == nil {
-			return ErrDeadlinePropagationWithoutBudget
-		}
-
-		propagate := *cfg.PropagateDeadline
-
-		actions = append(actions, func() {
-			state := *p.timeBudget.Load()
-			state.propagateDeadline = propagate
-			p.timeBudget.Store(&state)
-		})
-	}
+	actions = append(actions, budgetActions...)
 
 	hedgeActions, hedgeErr := p.hedgeReconfigureActions(&cfg)
 	if hedgeErr != nil {
@@ -352,6 +325,67 @@ func (p *Policy[T]) adaptiveTimeoutReconfigureAction(
 	}
 
 	return func() { p.adaptiveTimeout.reconfigure(atOpts...) }, nil
+}
+
+// timeBudgetReconfigureActions validates the time-budget config overlay (the
+// budget duration plus the PropagateDeadline and RespectInboundDeadline flags)
+// and returns the actions that apply it. Each field requires the policy to have
+// a time budget; a flag without one is rejected with the same error
+// BuildOptions returns rather than silently dropped. It mutates nothing — the
+// caller applies the actions once the whole config validates. Bundling the
+// three keeps [Policy.Reconfigure] under its maintainability budget, mirroring
+// timeoutReconfigureActions.
+func (p *Policy[T]) timeBudgetReconfigureActions(
+	cfg *PolicyConfig,
+) ([]func(), error) {
+	var actions []func()
+
+	if cfg.TimeBudget != nil {
+		if p.timeBudget == nil {
+			return nil, absentPatternError("time_budget")
+		}
+
+		dur, err := time.ParseDuration(*cfg.TimeBudget)
+		if err != nil {
+			return nil, fmt.Errorf("r8e: reconfigure time_budget: %w", err)
+		}
+
+		actions = append(actions, func() {
+			state := *p.timeBudget.Load()
+			state.budget = dur
+			p.timeBudget.Store(&state)
+		})
+	}
+
+	if cfg.PropagateDeadline != nil {
+		if p.timeBudget == nil {
+			return nil, ErrDeadlinePropagationWithoutBudget
+		}
+
+		propagate := *cfg.PropagateDeadline
+
+		actions = append(actions, func() {
+			state := *p.timeBudget.Load()
+			state.propagateDeadline = propagate
+			p.timeBudget.Store(&state)
+		})
+	}
+
+	if cfg.RespectInboundDeadline != nil {
+		if p.timeBudget == nil {
+			return nil, ErrInboundDeadlineWithoutBudget
+		}
+
+		respect := *cfg.RespectInboundDeadline
+
+		actions = append(actions, func() {
+			state := *p.timeBudget.Load()
+			state.respectInboundDeadline = respect
+			p.timeBudget.Store(&state)
+		})
+	}
+
+	return actions, nil
 }
 
 // hedgeReconfigureActions validates the hedge config overlay (the ceiling via Hedge

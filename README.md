@@ -516,6 +516,39 @@ meaningful to real callees on `RealClock` (production). Config-expressible via
 `ErrDeadlinePropagationWithoutBudget`) and hot-reloadable via `Reconfigure`. See
 [`examples/28-deadline-propagation`](examples/28-deadline-propagation).
 
+### Cross-service deadline propagation (ingress)
+
+`PropagateDeadline` is the **egress** half — emitting the budget downstream. The
+**ingress** half is `RespectInboundDeadline`: it tightens the budget to a
+deadline *already on the incoming context*, so a service that received a deadline
+from its caller never runs its own budget past it ("the smallest deadline wins",
+as in gRPC). The effective budget becomes `min(clock.Now()+budget, inbound)`; the
+clamp can only ever **shorten** the budget, never extend it past the configured
+ceiling.
+
+```go
+policy := r8e.NewPolicy[Response]("middle-tier",
+    r8e.WithRetry(5, r8e.ConstantBackoff(50*time.Millisecond)),
+    // Generous local ceiling, but never outlive the caller's deadline.
+    r8e.WithTimeBudget(10*time.Second,
+        r8e.RespectInboundDeadline(), // ingress: honor upstream
+        r8e.PropagateDeadline(),      // egress: re-emit the tightened value
+    ),
+)
+```
+
+It tightens the cooperative gate retry and hedge consult, so a doomed attempt is
+not started once the inbound deadline leaves too little time. Config-expressible
+via `respect_inbound_deadline` (requires `time_budget`, else
+`ErrInboundDeadlineWithoutBudget`) and hot-reloadable via `Reconfigure`.
+
+For HTTP, where (unlike gRPC) the deadline is not propagated automatically, the
+[`httpx`](httpx) package ships the wire pair: `httpx.InjectDeadline(req, clock)`
+writes the remaining budget as a relative, clock-skew-safe millisecond header on
+an outgoing request (egress), and `httpx.ExtractDeadline(ctx, req)` reconstructs a
+bounded context from it on receipt (ingress). See
+[`examples/43-deadline-propagation-cross-service`](examples/43-deadline-propagation-cross-service).
+
 ## Retry Budget
 
 A retry budget caps how many retries fire relative to the failure rate, so a
@@ -1312,6 +1345,7 @@ go run ./examples/39-ramp-recovery/
 go run ./examples/40-slo-governor/
 go run ./examples/41-codel-queue/
 go run ./examples/42-nested-retry-budget/
+go run ./examples/43-deadline-propagation-cross-service/
 ```
 
 ## License
