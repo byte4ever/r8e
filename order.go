@@ -21,20 +21,21 @@ type PatternEntry[T any] struct {
 // internal convention (see [PatternEntry]): only their relative order is
 // meaningful, and they are renumbered when a pattern is inserted.
 const (
-	priorityFallback          = 0 // outermost — last resort
-	priorityCache             = 1 // read-through hit short-circuits the whole chain
-	priorityCoalesce          = 2 // collapse duplicate concurrent calls before any work
-	priorityTimeout           = 3 // global timeout (hard cancel)
-	priorityTimeBudget        = 4 // total time budget shared across retry + hedge
-	priorityThrottle          = 5 // proportional load shed before the breaker trips
-	priorityCircuitBreaker    = 6
-	priorityRateLimiter       = 7
-	priorityBulkhead          = 8
-	priorityConcurrencyBudget = 9 // tracks in-flight executions for the retry/hedge concurrency budget
-	priorityRetry             = 10
-	priorityHedge             = 11 // closest to user function among the durable patterns
-	priorityRecover           = 12 // inside hedge so each hedge goroutine also recovers panics
-	priorityChaos             = 13 // innermost — simulated downstream every pattern wraps and reacts to
+	priorityFallback          = 0  // outermost — last resort
+	priorityCache             = 1  // read-through hit short-circuits the whole chain
+	priorityCoalesce          = 2  // collapse duplicate concurrent calls before any work
+	priorityTimeout           = 3  // global timeout (hard cancel)
+	priorityTimeBudget        = 4  // total time budget shared across retry + hedge
+	prioritySLO               = 5  // shed to protect the SLO error budget before any backend-health shed
+	priorityThrottle          = 6  // proportional load shed before the breaker trips
+	priorityCircuitBreaker    = 7  // fast-fail while the breaker is open
+	priorityRateLimiter       = 8  // throttle throughput
+	priorityBulkhead          = 9  // limit concurrency (fixed, or adaptive)
+	priorityConcurrencyBudget = 10 // tracks in-flight executions for the retry/hedge concurrency budget
+	priorityRetry             = 11 // retry transient failures, gated by the retry budget
+	priorityHedge             = 12 // closest to user function among the durable patterns
+	priorityRecover           = 13 // inside hedge so each hedge goroutine also recovers panics
+	priorityChaos             = 14 // innermost — simulated downstream every pattern wraps and reacts to
 )
 
 // SortPatterns sorts pattern entries by priority (lowest first = outermost).

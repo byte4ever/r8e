@@ -108,6 +108,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyRejected })
 	builder.counter("r8e.policy.throttled", "Calls shed locally by the adaptive throttler",
 		func(m *r8e.PolicyMetrics) int64 { return m.Throttled })
+	builder.counter("r8e.policy.slo_shed", "Calls shed locally by the SLO burn-rate governor",
+		func(m *r8e.PolicyMetrics) int64 { return m.SLOShed })
 	builder.counter("r8e.policy.rate_adaptations", "AIMD adjustments to the rate limiter's refill rate",
 		func(m *r8e.PolicyMetrics) int64 { return m.RateAdaptations })
 	builder.counter("r8e.policy.slow_call_rate_exceeded", "Circuit-breaker opens triggered by the slow-call rate",
@@ -153,6 +155,10 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.RetryBudgetTokens })
 	builder.gaugeFloat64("r8e.policy.throttle_probability", "Adaptive throttler's current local-rejection probability",
 		func(m *r8e.PolicyMetrics) float64 { return m.ThrottleProbability })
+	builder.gaugeFloat64("r8e.policy.slo_burn_rate", "SLO governor's current error-budget burn rate (long window)",
+		func(m *r8e.PolicyMetrics) float64 { return m.SLOBurnRate })
+	builder.gaugeFloat64("r8e.policy.slo_shed_probability", "SLO governor's current local-shed probability",
+		func(m *r8e.PolicyMetrics) float64 { return m.SLOShedProbability })
 	builder.gaugeFloat64("r8e.policy.rate_limit", "Rate limiter's current refill rate in tokens per second",
 		func(m *r8e.PolicyMetrics) float64 { return m.RateLimit })
 	builder.gaugeFloat64("r8e.policy.slow_call_rate", "Current fraction of slow calls in the circuit-breaker window",

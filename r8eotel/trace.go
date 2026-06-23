@@ -138,6 +138,8 @@ func rejectionReason(err error) string {
 		return "concurrency_limited"
 	case errors.Is(err, r8e.ErrThrottled):
 		return "throttled"
+	case errors.Is(err, r8e.ErrSLOShed):
+		return "slo_shed"
 	case errors.Is(err, r8e.ErrTimeout):
 		return "timeout"
 	case errors.Is(err, r8e.ErrTimeBudgetExceeded):

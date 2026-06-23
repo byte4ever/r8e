@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 30 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 33 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -63,6 +63,7 @@ health reporting, and configuration hot-reload.
 | **Bulkhead** | Semaphore-based concurrency limiting (fixed limit) |
 | **Adaptive Concurrency** | Self-tuning concurrency limit from observed latency (Netflix Gradient2) |
 | **Adaptive Throttle** | Probabilistic client-side load shedding by the live accept/request ratio (Google SRE), before the breaker trips |
+| **SLO Burn-Rate Governor** | Probabilistic load shedding driven by how fast an SLO error budget is burning (multiwindow burn rate), sheds sheddable work first to protect the budget for critical traffic |
 | **Hedged Requests** | Fire a second call after a delay to reduce tail latency |
 | **Request Coalescing** | Collapse concurrent identical calls into one shared execution (singleflight), killing cache stampede |
 | **Read-Through Cache** | Memoize successful results per key in the chain; fresh hits skip the chain, with refresh-ahead, stale-if-error and negative caching |
@@ -433,13 +434,14 @@ Request
       → Coalesce      (collapse duplicate concurrent calls)
         → Timeout         (global deadline — hard cancel)
           → Time Budget    (total cooperative budget for retry + hedge)
-            → Adaptive Throttle  (proportional load shed before the breaker trips)
-              → Circuit Breaker  (fast-fail if open)
-                → Rate Limiter   (throttle throughput)
-                  → Bulkhead     (limit concurrency — fixed, or adaptive)
-                    → Retry       (retry transient failures, gated by the retry budget)
-                      → Hedge     (innermost — races redundant calls)
-                        → fn()    (your function)
+            → SLO Governor   (shed to protect the SLO error budget)
+              → Adaptive Throttle  (proportional load shed before the breaker trips)
+                → Circuit Breaker  (fast-fail if open)
+                  → Rate Limiter   (throttle throughput)
+                    → Bulkhead     (limit concurrency — fixed, or adaptive)
+                      → Retry       (retry transient failures, gated by the retry budget)
+                        → Hedge     (innermost — races redundant calls)
+                          → fn()    (your function)
 ```
 
 The retry budget is not a separate stage: it lives inside Retry, throttling
@@ -805,9 +807,63 @@ result, err := policy.Do(ctx, fn)
 
 The three levels are: `SheddabilityNever` (bypass — critical traffic),
 `SheddabilityDefault` (zero value — normal SRE probability), and
-`SheddabilityAlways` (shed first — background or speculative work). Only the
-adaptive throttler reads the stamp; other patterns are unaffected. See
+`SheddabilityAlways` (shed first — background or speculative work). Both the
+adaptive throttler and the [SLO burn-rate governor](#slo-burn-rate-governor) read
+the stamp; other patterns are unaffected. See
 [`examples/29-sheddability`](examples/29-sheddability).
+
+## SLO Burn-Rate Governor
+
+`WithSLO(target)` adds an **SLO error-budget burn-rate load shedder**: where the
+adaptive throttler sheds by the backend's live accept/request ratio, the governor
+sheds by how fast the service is spending the error budget of a *stated*
+objective. A target success rate (e.g. `0.999`) implies an error budget of
+`1 − target`; the **burn rate** is the observed served error rate divided by that
+budget — `1` spends the budget exactly at the sustainable pace, `14.4` is the
+Google-SRE "fast burn" page threshold. A shed call returns `ErrSLOShed` without
+running any inner stage.
+
+```go
+policy := r8e.NewPolicy[Response]("checkout",
+    r8e.WithSLO(0.999,                          // 99.9% objective → 0.1% error budget
+        r8e.SLOLongWindow(time.Minute),         // steady, sustained-burn window
+        r8e.SLOShortWindow(5*time.Second),      // responsive, current-burn window
+        r8e.BurnThreshold(2.0),                 // shed once burning >2x sustainable
+        r8e.MaxShedRate(0.9),                   // always let ≥10% through to probe
+        r8e.SLOMinRequests(20),                 // need some traffic before shedding
+    ),
+)
+```
+
+**Multiwindow burn rate (Google SRE).** The governor measures the burn rate over
+two sliding windows — a short, responsive one and a long, steady one — and sheds
+only when **both** exceed `BurnThreshold`. The long window catches a sustained
+burn; the short window confirms it is still happening now, so shedding engages
+quickly on a real burn yet ignores a brief spike that shows in only one window,
+and disengages promptly when the burn stops.
+
+**Proportional, sheddability-aware shedding.** When engaged, a call is shed with
+probability `max(0, 1 − BurnThreshold/burnRate)` capped at `MaxShedRate`, scaled
+by the short window's burn rate. The probability is applied through the call's
+[sheddability](#request-sheddability): `SheddabilityNever` is always admitted,
+`SheddabilityAlways` is shed as soon as any shedding is active, and
+`SheddabilityDefault` is shed with the probability — so the remaining budget is
+spent on the calls that matter. A locally shed call is **never recorded**, so
+shedding sheddable traffic does not itself burn budget.
+
+It sits just outside the adaptive throttler in the chain (the SLO objective is the
+higher-level concern). By default every non-nil error burns budget; narrow that
+with `SLOClassifier(func(error) bool)` so only genuine objective failures do (a
+404 or validation error is then treated as a served success). An out-of-range
+target is clamped to a default rather than rejected. The numeric parameters are
+configurable via JSON (`SLOConfig`, with the required `target`) and hot-reloadable;
+the classifier is code-only.
+
+Observability: the `OnSLOShed` hook, the `SLOShed` counter, and the `SLOBurnRate`
+and `SLOShedProbability` gauges. Shedding surfaces as a degraded `slo_burning`
+health condition (it never gates readiness). An `SLOGovernor` can also be used
+standalone with `NewSLOGovernor`, `Allow`, and `Record`. See
+[`examples/40-slo-governor`](examples/40-slo-governor).
 
 ## Recover (panic → error)
 
@@ -1221,6 +1277,13 @@ go run ./examples/30-recovery-backoff/
 go run ./examples/31-recover/
 go run ./examples/32-aimd-rate-limit/
 go run ./examples/33-concurrency-budget/
+go run ./examples/34-latency-percentiles/
+go run ./examples/35-adaptive-timeout/
+go run ./examples/36-adaptive-hedge/
+go run ./examples/37-chaos-injection/
+go run ./examples/38-cache-refresh-ahead/
+go run ./examples/39-ramp-recovery/
+go run ./examples/40-slo-governor/
 ```
 
 ## License

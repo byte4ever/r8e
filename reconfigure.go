@@ -184,6 +184,15 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		)
 	}
 
+	if cfg.SLO != nil {
+		action, err := p.sloReconfigureAction(cfg.SLO)
+		if err != nil {
+			return err
+		}
+
+		actions = append(actions, action)
+	}
+
 	if cfg.CircuitBreaker != nil {
 		if p.circuitBreaker == nil {
 			return absentPatternError("circuit_breaker")
@@ -255,6 +264,29 @@ func (p *Policy[T]) aimdReconfigureAction(cfg *AIMDConfig) (func(), error) {
 	}
 
 	return func() { p.rateLimiter.aimd.reconfigure(aimdOpts...) }, nil
+}
+
+// sloReconfigureAction validates the SLO governor config overlay and returns the
+// action that applies it. The target is replaced positionally (it has no
+// default), so a block that omits it is rejected. Extracted from
+// [Policy.Reconfigure] to keep that function under its maintainability budget.
+func (p *Policy[T]) sloReconfigureAction(cfg *SLOConfig) (func(), error) {
+	if p.slo == nil {
+		return nil, absentPatternError("slo")
+	}
+
+	if cfg.Target == nil {
+		return nil, ErrSLOTargetRequired
+	}
+
+	sloOpts, err := sloOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure: %w", err)
+	}
+
+	target := *cfg.Target
+
+	return func() { p.slo.Reconfigure(target, sloOpts...) }, nil
 }
 
 // timeoutReconfigureActions validates the timeout config overlay (the ceiling via

@@ -42,7 +42,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 - **Une policy, tous les patterns** — composez n'importe quelle combinaison ; r8e les ordonne pour vous
 - **Concurrence** — rate limiter et bulkhead lock-free ; un circuit breaker linéarisable gardé par mutex
 - **Reporting de santé** — intégration Kubernetes `/readyz` optionnelle avec dépendances hiérarchiques (`r8ehttp`)
-- **Observabilité** — 30 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
+- **Observabilité** — 33 hooks de cycle de vie, métriques par policy (compteurs + gauges live), un endpoint JSON et un pont OpenTelemetry (`r8eotel`)
 - **Réglage à l'exécution** — hot-reload des paramètres des patterns (seuils de circuit breaker, limites de débit, timeouts…) sans redéploiement
 - **Testable** — une interface `Clock` pour contrôler le temps dans les tests, sans `time.Sleep` instables
 - **Configurable** — définissez les policies en code, JSON (`r8econf`), ou avec des presets
@@ -62,6 +62,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Bulkhead** | Limitation de concurrence par sémaphore (limite fixe) |
 | **Concurrence adaptative** | Limite de concurrence auto-ajustée depuis la latence observée (Gradient2 de Netflix) |
 | **Throttle adaptatif** | Délestage probabiliste côté client selon le ratio accepts/requests observé (Google SRE), avant que le breaker ne déclenche |
+| **Gouverneur de burn-rate SLO** | Délestage probabiliste piloté par la vitesse de consommation de l'error budget d'un SLO (burn rate multi-fenêtre) ; déleste d'abord le trafic sheddable pour préserver le budget du trafic critique |
 | **Requêtes spéculatives** | Lance un second appel après un délai pour réduire la latence de queue |
 | **Coalescing de requêtes** | Fusionne les appels identiques concurrents en une seule exécution partagée (singleflight), éliminant le cache stampede |
 | **Cache read-through** | Mémoïse les résultats réussis par clé dans la chaîne ; les hits frais court-circuitent la chaîne, avec refresh-ahead, stale-if-error et negative caching |
@@ -432,13 +433,14 @@ Requête
       → Coalesce      (fusionne les appels concurrents dupliqués)
         → Timeout         (deadline globale — annulation dure)
           → Budget temps   (budget total coopératif pour retry + hedge)
-            → Throttle adaptatif  (délestage proportionnel avant le déclenchement du breaker)
-              → Circuit Breaker  (échec rapide si ouvert)
-                → Rate Limiter   (contrôle du débit)
-                  → Bulkhead     (limite la concurrence — fixe, ou adaptative)
-                    → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
-                      → Hedge     (le plus interne — lance des appels redondants)
-                        → fn()    (votre fonction)
+            → Gouverneur SLO (délestage pour préserver l'error budget du SLO)
+              → Throttle adaptatif  (délestage proportionnel avant le déclenchement du breaker)
+                → Circuit Breaker  (échec rapide si ouvert)
+                  → Rate Limiter   (contrôle du débit)
+                    → Bulkhead     (limite la concurrence — fixe, ou adaptative)
+                      → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
+                        → Hedge     (le plus interne — lance des appels redondants)
+                          → fn()    (votre fonction)
 ```
 
 Le retry budget n'est pas une étape séparée : il vit à l'intérieur de Retry et
@@ -820,9 +822,65 @@ result, err := policy.Do(ctx, fn)
 Les trois niveaux sont : `SheddabilityNever` (bypass — trafic critique),
 `SheddabilityDefault` (valeur zéro — probabilité SRE normale) et
 `SheddabilityAlways` (délestage prioritaire — travail en arrière-plan ou
-spéculatif). Seul le throttler adaptatif lit l'annotation ; les autres patterns
-ne sont pas affectés. Voir
+spéculatif). Le throttler adaptatif et le
+[gouverneur de burn-rate SLO](#gouverneur-de-burn-rate-slo) lisent tous deux
+l'annotation ; les autres patterns ne sont pas affectés. Voir
 [`examples/29-sheddability`](examples/29-sheddability).
+
+## Gouverneur de burn-rate SLO
+
+`WithSLO(target)` ajoute un **délesteur piloté par le burn-rate de l'error budget
+d'un SLO** : là où le throttle adaptatif déleste selon le ratio accepts/requests
+courant du backend, le gouverneur déleste selon la vitesse à laquelle le service
+consomme l'error budget d'un objectif *déclaré*. Un taux de succès cible (ex.
+`0.999`) implique un error budget de `1 − target` ; le **burn rate** est le taux
+d'erreur servi observé divisé par ce budget — `1` consomme le budget exactement au
+rythme soutenable, `14.4` est le seuil « fast burn » de Google SRE. Un appel
+délesté renvoie `ErrSLOShed` sans exécuter aucune étape interne.
+
+```go
+policy := r8e.NewPolicy[Response]("checkout",
+    r8e.WithSLO(0.999,                          // objectif 99,9% → budget d'erreur 0,1%
+        r8e.SLOLongWindow(time.Minute),         // fenêtre longue, stable (burn soutenu)
+        r8e.SLOShortWindow(5*time.Second),      // fenêtre courte, réactive (burn courant)
+        r8e.BurnThreshold(2.0),                 // déleste dès >2x le rythme soutenable
+        r8e.MaxShedRate(0.9),                   // laisse toujours ≥10% passer pour sonder
+        r8e.SLOMinRequests(20),                 // un minimum de trafic avant tout délestage
+    ),
+)
+```
+
+**Burn rate multi-fenêtre (Google SRE).** Le gouverneur mesure le burn rate sur
+deux fenêtres glissantes — une courte et réactive, une longue et stable — et ne
+déleste que lorsque les **deux** dépassent `BurnThreshold`. La longue détecte un
+burn soutenu ; la courte confirme qu'il est toujours en cours, donc le délestage
+s'engage vite sur un vrai burn mais ignore un pic bref visible dans une seule
+fenêtre, et se désengage rapidement quand le burn cesse.
+
+**Délestage proportionnel et sheddability-aware.** Une fois engagé, un appel est
+délesté avec une probabilité `max(0, 1 − BurnThreshold/burnRate)` plafonnée à
+`MaxShedRate`, à l'échelle du burn rate de la fenêtre courte. La probabilité est
+appliquée via la [sheddabilité](#sheddabilité-des-requêtes) de l'appel :
+`SheddabilityNever` est toujours admis, `SheddabilityAlways` est délesté dès qu'un
+délestage est actif, et `SheddabilityDefault` est délesté avec la probabilité — le
+budget restant est ainsi dépensé sur les appels qui comptent. Un appel délesté
+localement n'est **jamais enregistré**, donc délester le trafic sheddable ne
+consomme pas lui-même de budget.
+
+Il se place juste à l'extérieur du throttle adaptatif dans la chaîne (l'objectif
+SLO est le souci de plus haut niveau). Par défaut toute erreur non-nil consomme du
+budget ; restreignez via `SLOClassifier(func(error) bool)` pour ne compter que les
+vraies erreurs de l'objectif (un 404 ou une erreur de validation est alors traité
+comme un succès servi). Une cible hors plage est ramenée à une valeur par défaut
+plutôt que rejetée. Les paramètres numériques sont configurables en JSON
+(`SLOConfig`, avec le `target` requis) et rechargeables à chaud ; le classifier est
+code-only.
+
+Observabilité : le hook `OnSLOShed`, le compteur `SLOShed`, et les gauges
+`SLOBurnRate` et `SLOShedProbability`. Le délestage se traduit par une condition de
+santé dégradée `slo_burning` (qui ne bloque jamais la readiness). Un `SLOGovernor`
+peut aussi être utilisé seul avec `NewSLOGovernor`, `Allow` et `Record`. Voir
+[`examples/40-slo-governor`](examples/40-slo-governor).
 
 ## Récupération de panic (panic → error)
 
@@ -1203,7 +1261,7 @@ Une fois installe, Claude Code appliquera automatiquement ses connaissances r8e 
 
 ## Exemples
 
-Voir le repertoire [`examples/`](examples/) pour des exemples executables demontrant chaque fonctionnalite :
+Voir le répertoire [`examples/`](examples/) pour des exemples exécutables démontrant chaque fonctionnalité :
 
 ```bash
 go run ./examples/01-quickstart/
@@ -1239,6 +1297,13 @@ go run ./examples/30-recovery-backoff/
 go run ./examples/31-recover/
 go run ./examples/32-aimd-rate-limit/
 go run ./examples/33-concurrency-budget/
+go run ./examples/34-latency-percentiles/
+go run ./examples/35-adaptive-timeout/
+go run ./examples/36-adaptive-hedge/
+go run ./examples/37-chaos-injection/
+go run ./examples/38-cache-refresh-ahead/
+go run ./examples/39-ramp-recovery/
+go run ./examples/40-slo-governor/
 ```
 
 ## Licence

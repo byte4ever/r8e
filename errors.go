@@ -48,6 +48,11 @@ var (
 	// ErrThrottled is returned when the adaptive throttler sheds a call locally
 	// to protect a struggling backend (see [WithAdaptiveThrottle]).
 	ErrThrottled error = resilienceError("adaptively throttled")
+	// ErrSLOShed is returned when the SLO burn-rate governor sheds a call locally
+	// because the service-level objective's error budget is burning too fast (see
+	// [WithSLO]). It is distinct from [ErrThrottled] so callers can tell a
+	// budget-protection shed apart from a backend-health shed.
+	ErrSLOShed error = resilienceError("shed to protect the SLO error budget")
 	// ErrTimeout is returned when an operation exceeds its deadline.
 	ErrTimeout error = resilienceError("timeout")
 	// ErrTimeBudgetExceeded is returned (wrapping the last downstream error) when
@@ -192,6 +197,15 @@ var (
 	// that misconfiguration.
 	ErrRetryMaxAttemptsRequired error = resilienceError(
 		"retry max_attempts is required",
+	)
+	// ErrSLOTargetRequired indicates an [SLOConfig] block was supplied without a
+	// target success rate. The target has no sensible default (it is the whole
+	// objective), so it is required whenever the config requests an SLO governor.
+	// It is the error [BuildOptions] and [Policy.Reconfigure] return for that
+	// misconfiguration. The code API takes the target positionally
+	// ([WithSLO]), so it cannot express this.
+	ErrSLOTargetRequired error = resilienceError(
+		"slo target is required",
 	)
 	// ErrPanic is matched by errors.Is when a panic was recovered by [WithRecover].
 	// To inspect the original panic value and goroutine stack trace, use errors.As

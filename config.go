@@ -65,6 +65,10 @@ type (
 		// AdaptiveThrottle configures the Google-SRE adaptive throttler.
 		// Optional. Example: {"overload_ratio": 2.0, "window": "10s"}.
 		AdaptiveThrottle *AdaptiveThrottleConfig `json:"adaptive_throttle,omitempty" yaml:"adaptive_throttle,omitempty"`
+		// SLO configures the SLO error-budget burn-rate load shedder. The target
+		// success rate is required when this block is present.
+		// Optional. Example: {"target": 0.999, "burn_threshold": 2.0}.
+		SLO *SLOConfig `json:"slo,omitempty" yaml:"slo,omitempty"`
 		// RetryBudget configures the adaptive retry budget. Requires Retry.
 		// Optional. Example: {"max_tokens": 10, "token_ratio": 0.1}.
 		RetryBudget *RetryBudgetConfig `json:"retry_budget,omitempty" yaml:"retry_budget,omitempty"`
@@ -177,6 +181,33 @@ type (
 		Window *string `json:"window,omitempty" yaml:"window,omitempty"`
 		// MinRequests is the minimum windowed requests before any call is shed.
 		// Optional. Example: 10.
+		MinRequests *int `json:"min_requests,omitempty" yaml:"min_requests,omitempty"`
+	}
+
+	// SLOConfig holds SLO burn-rate governor configuration values. Embed it (via
+	// [PolicyConfig]) in your own config struct for JSON or YAML unmarshaling.
+	// The error classifier (see [SLOClassifier]) is code, so it is not
+	// configurable here.
+	SLOConfig struct {
+		// Target is the SLO success-rate objective in (0, 1) — e.g. 0.999. It is
+		// required when this block is present (it is the whole objective and has
+		// no default); see [ErrSLOTargetRequired]. Example: 0.999.
+		Target *float64 `json:"target,omitempty" yaml:"target,omitempty"`
+		// LongWindow is the steady sliding window over which the burn rate is
+		// summed. Optional. Parsed via time.ParseDuration. Example: "1m".
+		LongWindow *string `json:"long_window,omitempty" yaml:"long_window,omitempty"`
+		// ShortWindow is the responsive sliding window; the governor sheds only
+		// when both windows exceed the burn threshold. Optional. Parsed via
+		// time.ParseDuration. Example: "5s".
+		ShortWindow *string `json:"short_window,omitempty" yaml:"short_window,omitempty"`
+		// BurnThreshold is the error-budget burn rate above which shedding ramps.
+		// Optional. Example: 2.0.
+		BurnThreshold *float64 `json:"burn_threshold,omitempty" yaml:"burn_threshold,omitempty"`
+		// MaxShedRate caps the local shed probability in (0, 1].
+		// Optional. Example: 0.9.
+		MaxShedRate *float64 `json:"max_shed_rate,omitempty" yaml:"max_shed_rate,omitempty"`
+		// MinRequests is the minimum short-window samples before any call is shed.
+		// Optional. Example: 20.
 		MinRequests *int `json:"min_requests,omitempty" yaml:"min_requests,omitempty"`
 	}
 
@@ -378,14 +409,12 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		)
 	}
 
-	if pc.AdaptiveThrottle != nil {
-		throttleOpts, err := throttleOptionsFromConfig(pc.AdaptiveThrottle)
-		if err != nil {
-			return nil, err
-		}
-
-		opts = append(opts, WithAdaptiveThrottle(throttleOpts...))
+	shedderOpts, shedErr := loadShedderOptions(pc)
+	if shedErr != nil {
+		return nil, shedErr
 	}
+
+	opts = append(opts, shedderOpts...)
 
 	if pc.Hedge != nil {
 		delay, err := time.ParseDuration(*pc.Hedge)
@@ -511,6 +540,83 @@ func throttleOptionsFromConfig(
 
 	if cfg.MinRequests != nil {
 		opts = append(opts, MinRequests(*cfg.MinRequests))
+	}
+
+	return opts, nil
+}
+
+// loadShedderOptions translates the two client-side load-shedder config blocks —
+// the adaptive throttler and the SLO burn-rate governor — into their options.
+// Both are proportional shedders, so grouping their translation keeps the two
+// related blocks together and keeps [BuildOptions] under its maintainability
+// budget. Shared only by [BuildOptions]; each block is independent and either,
+// both, or neither may be present.
+func loadShedderOptions(pc *PolicyConfig) ([]Option, error) {
+	var opts []Option
+
+	if pc.AdaptiveThrottle != nil {
+		throttleOpts, err := throttleOptionsFromConfig(pc.AdaptiveThrottle)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithAdaptiveThrottle(throttleOpts...))
+	}
+
+	if pc.SLO != nil {
+		// The target is the whole objective and has no default, so config that
+		// asks for a governor without one is rejected (the code API takes it
+		// positionally, so it cannot reach this).
+		if pc.SLO.Target == nil {
+			return nil, ErrSLOTargetRequired
+		}
+
+		sloOpts, err := sloOptionsFromConfig(pc.SLO)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithSLO(*pc.SLO.Target, sloOpts...))
+	}
+
+	return opts, nil
+}
+
+// sloOptionsFromConfig converts an [SLOConfig] into SLO governor options (every
+// tunable except the target, which is passed positionally to [WithSLO] /
+// [SLOGovernor.Reconfigure]). Shared by [BuildOptions] and [Policy.Reconfigure].
+// It returns an error only when a window string fails to parse.
+func sloOptionsFromConfig(cfg *SLOConfig) ([]SLOOption, error) {
+	var opts []SLOOption
+
+	if cfg.LongWindow != nil {
+		window, err := time.ParseDuration(*cfg.LongWindow)
+		if err != nil {
+			return nil, fmt.Errorf("slo.long_window: %w", err)
+		}
+
+		opts = append(opts, SLOLongWindow(window))
+	}
+
+	if cfg.ShortWindow != nil {
+		window, err := time.ParseDuration(*cfg.ShortWindow)
+		if err != nil {
+			return nil, fmt.Errorf("slo.short_window: %w", err)
+		}
+
+		opts = append(opts, SLOShortWindow(window))
+	}
+
+	if cfg.BurnThreshold != nil {
+		opts = append(opts, BurnThreshold(*cfg.BurnThreshold))
+	}
+
+	if cfg.MaxShedRate != nil {
+		opts = append(opts, MaxShedRate(*cfg.MaxShedRate))
+	}
+
+	if cfg.MinRequests != nil {
+		opts = append(opts, SLOMinRequests(*cfg.MinRequests))
 	}
 
 	return opts, nil

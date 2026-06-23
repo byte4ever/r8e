@@ -26,7 +26,7 @@ result, err := r8e.Do[T](ctx, fn, opts...)
 Options are `any`-typed to support both generic (`WithFallback[T]`) and non-generic options in the same variadic.
 
 Patterns are **auto-sorted** by priority (outermost to innermost):
-Fallback > Cache > Coalesce > Timeout > TimeBudget > AdaptiveThrottle > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge > Recover > Chaos.
+Fallback > Cache > Coalesce > Timeout > TimeBudget > SLO > AdaptiveThrottle > CircuitBreaker > RateLimiter > Bulkhead/AdaptiveConcurrency > Retry > Hedge > Recover > Chaos.
 The retry budget is not a stage; it gates retries from within Retry. The
 concurrency budget is likewise not a visible stage; a thin tracker just outside
 Retry counts in-flight executions, and Retry/Hedge gate against it. The time
@@ -315,9 +315,41 @@ health condition (never gates readiness). Standalone:
 `r8e.WithSheddability(ctx, s)` / `r8e.SheddabilityFromCtx(ctx)`.
 Three levels: `SheddabilityNever` (bypass — critical, always admitted even at max
 load), `SheddabilityDefault` (zero value — normal SRE formula),
-`SheddabilityAlways` (shed first — as soon as probability > 0). Only the adaptive
-throttler reads the stamp; other patterns ignore it. Example:
+`SheddabilityAlways` (shed first — as soon as probability > 0). Both the adaptive
+throttler and the SLO governor read the stamp; other patterns ignore it. Example:
 `examples/29-sheddability`.
+
+### SLO Burn-Rate Governor
+
+```go
+r8e.WithSLO(target float64, opts ...SLOOption)
+```
+
+**SLO error-budget burn-rate load shedder**: sheds by how fast a *stated*
+objective's error budget is burning, not by backend health. `target` is the
+success-rate objective (e.g. 0.999 → error budget `1−target`); **burn rate** =
+served error rate / error budget (1 = sustainable pace, 14.4 = SRE "fast burn").
+Measures the burn rate over a **short and a long sliding window** and sheds only
+when **both** exceed `BurnThreshold` (Google-SRE multiwindow rule — fast on a real
+burn, ignores a one-window spike). When engaged, sheds with `max(0, 1 −
+BurnThreshold/burnRate)` capped at `MaxShedRate`, scaled by the short window;
+returns `r8e.ErrSLOShed`. Shedding is **sheddability-aware** (reuses the
+`Sheddability` stamp): `Never` always admitted, `Always` shed once active,
+`Default` shed with the probability. A shed call is **never recorded**, so shedding
+sheddable traffic does not burn budget. **Options**: `r8e.SLOLongWindow(d)`
+(default 1m), `r8e.SLOShortWindow(d)` (default 5s, must be < long), `r8e.BurnThreshold(r)`
+(default 2.0), `r8e.MaxShedRate(r)` (cap, default 0.9), `r8e.SLOMinRequests(n)`
+(default 20, gates the short window), `r8e.SLOClassifier(func(error) bool)` (which
+errors burn budget; default **all**). Sits just **outside the adaptive throttler**
+(priority `prioritySLO`). An out-of-range target is clamped (not rejected). Numeric
+params are config-expressible (`SLOConfig`, with the **required** `target` →
+`ErrSLOTargetRequired`) + reconfigurable; the classifier is code-only. Windows are
+`Clock`-driven (deterministic). Observability: `OnSLOShed` hook, `SLOShed` counter,
+`SLOBurnRate` + `SLOShedProbability` gauges, degraded `slo_burning` health
+condition (never gates readiness). Standalone: `r8e.NewSLOGovernor(target, clock,
+hooks, opts...)` + `Allow(ctx) error` (returns `ErrSLOShed` or nil) /
+`Record(err error)`; `BurnRate()` / `ShedProbability()` / `Shedding()` snapshots;
+`Reconfigure(target, opts...)`. Example: `examples/40-slo-governor`.
 
 ### Hedge
 
@@ -454,7 +486,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
+`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
 
 ## Hooks
 
@@ -485,6 +517,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnConcurrencyRejected:     func() {},     // adaptive limiter shed a call
     OnConcurrencyLimitChanged: func(limit int) {}, // adaptive limit retuned
     OnThrottled:   func() {},  // adaptive throttler shed a call locally
+    OnSLOShed:     func() {},  // SLO governor shed a call to protect the error budget
     OnCacheHit:    func() {},  // served from cache (fresh value or negative entry)
     OnCacheMiss:   func() {},  // no fresh value; downstream executed
     OnCacheStored: func() {},  // successful result written to cache
@@ -511,13 +544,14 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 `CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `RateLimited`, `BulkheadRejected`,
 `BulkheadTimeouts`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
-`CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `RateAdaptations`,
+`CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `SLOShed`, `RateAdaptations`,
 `SlowCallRateExceeded`, `CacheHits`, `CacheMisses`, `CacheStores`,
 `CacheStaleServed`, `CacheRefreshes`, `PanicsRecovered`,
 `ConcurrencyBudgetExceeded`, `ChaosInjected`) and gauges
 (`CircuitState`, `SlowCallRate`, `RampRecoveryFraction`, `BulkheadInUse`, `BulkheadCap`,
 `BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
-`ConcurrencyInFlight`, `ThrottleProbability`, `RateLimit`, `AdaptiveTimeout`,
+`ConcurrencyInFlight`, `ThrottleProbability`, `SLOBurnRate`, `SLOShedProbability`,
+`RateLimit`, `AdaptiveTimeout`,
 `AdaptiveHedgeDelay`, `Saturated`, `Healthy`, `Criticality`).
 
 **Latency percentiles (always on, no option):** every `Do()` duration feeds a

@@ -54,6 +54,9 @@ type (
 		// Throttled counts calls shed locally by the adaptive throttler to
 		// protect a struggling backend (see [WithAdaptiveThrottle]).
 		Throttled int64 `json:"throttled"`
+		// SLOShed counts calls shed locally by the SLO burn-rate governor to
+		// preserve the error budget while it burns too fast (see [WithSLO]).
+		SLOShed int64 `json:"slo_shed"`
 		// RateAdaptations counts AIMD adjustments to the rate limiter's refill
 		// rate — both backoffs and recoveries (see [AIMD]); read it with RateLimit
 		// (the resulting live rate) to tell which direction dominates.
@@ -107,6 +110,15 @@ type (
 		// shedding a call, in [0, MaxRejectionRate]; 0 when the policy has no
 		// throttler or it is forwarding all traffic.
 		ThrottleProbability float64 `json:"throttle_probability"`
+		// SLOBurnRate is the SLO governor's current error-budget burn rate over
+		// its long window: 1 means the budget is being spent at the sustainable
+		// pace, above 1 faster, 0 when the policy has no governor or no call has
+		// been recorded in the window (see [WithSLO]).
+		SLOBurnRate float64 `json:"slo_burn_rate"`
+		// SLOShedProbability is the SLO governor's current probability of shedding
+		// a [SheddabilityDefault] call, in [0, MaxShedRate]; 0 when the policy has
+		// no governor or it is admitting all traffic.
+		SLOShedProbability float64 `json:"slo_shed_probability"`
 		// RateLimit is the rate limiter's current refill rate in tokens per
 		// second; 0 when the policy has no rate limiter. With [AIMD] it is the live
 		// adapted rate (moving within [AIMDMinRate, AIMDMaxRate]); otherwise the
@@ -194,6 +206,7 @@ type (
 		coalesceFollowers    atomic.Int64
 		concurrencyRejected  atomic.Int64
 		throttled            atomic.Int64
+		sloShed              atomic.Int64
 		rateAdaptations      atomic.Int64
 		slowCallRateExceeded atomic.Int64
 		timeBudgetExceeded   atomic.Int64
@@ -350,6 +363,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnThrottled()
 			}
 		},
+		OnSLOShed: func() {
+			m.sloShed.Add(1)
+
+			if user.OnSLOShed != nil {
+				user.OnSLOShed()
+			}
+		},
 		OnRateAdapted: func(rate float64) {
 			m.rateAdaptations.Add(1)
 
@@ -454,6 +474,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CoalesceFollowers:         p.metrics.coalesceFollowers.Load(),
 		ConcurrencyRejected:       p.metrics.concurrencyRejected.Load(),
 		Throttled:                 p.metrics.throttled.Load(),
+		SLOShed:                   p.metrics.sloShed.Load(),
 		RateAdaptations:           p.metrics.rateAdaptations.Load(),
 		SlowCallRateExceeded:      p.metrics.slowCallRateExceeded.Load(),
 		TimeBudgetExceeded:        p.metrics.timeBudgetExceeded.Load(),
@@ -505,6 +526,11 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 
 	if p.throttler != nil {
 		metrics.ThrottleProbability = p.throttler.RejectionProbability()
+	}
+
+	if p.slo != nil {
+		metrics.SLOBurnRate = p.slo.BurnRate()
+		metrics.SLOShedProbability = p.slo.ShedProbability()
 	}
 
 	latency := p.latency.snapshot()

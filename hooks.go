@@ -78,6 +78,10 @@ type Hooks struct {
 	// of forwarding it to a struggling backend (see [WithAdaptiveThrottle]).
 	OnThrottled func()
 
+	// OnSLOShed fires when the SLO burn-rate governor sheds a call locally to
+	// preserve the error budget while it is burning too fast (see [WithSLO]).
+	OnSLOShed func()
+
 	// OnRateAdapted fires when the AIMD rate controller moves the rate limiter's
 	// refill rate, with the new rate in tokens per second (see [AIMD]). A new
 	// rate below the previous one signals server pushback (a multiplicative
@@ -268,6 +272,12 @@ func (h *Hooks) emitConcurrencyLimitChanged(limit int) {
 func (h *Hooks) emitThrottled() {
 	if h != nil && h.OnThrottled != nil {
 		h.OnThrottled()
+	}
+}
+
+func (h *Hooks) emitSLOShed() {
+	if h != nil && h.OnSLOShed != nil {
+		h.OnSLOShed()
 	}
 }
 

@@ -77,6 +77,10 @@ const (
 	// ConditionThrottling means the adaptive throttler is shedding load
 	// (degraded); it is rejecting a fraction of calls to protect the backend.
 	ConditionThrottling Condition = "throttling"
+	// ConditionSLOBurning means the SLO burn-rate governor is shedding load
+	// (degraded); the error budget is burning fast enough that it is rejecting a
+	// fraction of calls to preserve the budget for critical traffic.
+	ConditionSLOBurning Condition = "slo_burning"
 	// ConditionConcurrencyBudgetExhausted means the concurrency budget is at its
 	// ceiling (degraded); retries/hedges are being shed but first attempts flow.
 	ConditionConcurrencyBudgetExhausted Condition = "concurrency_budget_exhausted"
@@ -99,6 +103,7 @@ var conditionSeverity = []struct {
 	{ConditionBulkheadFull, CriticalityDegraded},
 	{ConditionConcurrencyLimited, CriticalityDegraded},
 	{ConditionThrottling, CriticalityDegraded},
+	{ConditionSLOBurning, CriticalityDegraded},
 	{ConditionRetryBudgetExhausted, CriticalityDegraded},
 	{ConditionConcurrencyBudgetExhausted, CriticalityDegraded},
 	{ConditionDependencyDegraded, CriticalityDegraded},
@@ -178,6 +183,11 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// Adaptive throttler — degraded while it is shedding load.
 	if p.throttler != nil && p.throttler.Throttling() {
 		conditions = append(conditions, ConditionThrottling)
+	}
+
+	// SLO burn-rate governor — degraded while it is shedding to protect budget.
+	if p.slo != nil && p.slo.Shedding() {
+		conditions = append(conditions, ConditionSLOBurning)
 	}
 
 	// Retry budget — degraded; retries are throttled but first attempts flow.

@@ -28,6 +28,7 @@ type (
 		bulkhead          *Bulkhead
 		adaptive          *AdaptiveLimiter
 		throttler         *Throttler
+		slo               *SLOGovernor
 		retryBudget       *RetryBudget
 		concurrencyBudget *ConcurrencyBudget
 		coalescer         *Coalescer[T]
@@ -108,6 +109,7 @@ type (
 		bulkhead          *bulkheadDesc
 		adaptive          *adaptiveDesc
 		throttle          *throttleDesc
+		slo               *sloDesc
 		hedge             *time.Duration
 		hedgeAdaptive     *adaptiveHedgeConfig
 		fallbackValue     *staticFallback
@@ -167,6 +169,12 @@ type (
 	// throttleDesc holds deferred adaptive-throttler configuration.
 	throttleDesc struct {
 		opts []ThrottleOption
+	}
+
+	// sloDesc holds deferred SLO burn-rate governor configuration.
+	sloDesc struct {
+		opts   []SLOOption
+		target float64
 	}
 
 	// cacheDesc holds deferred read-through-cache configuration. The cache is
@@ -443,6 +451,29 @@ func WithAdaptiveThrottle(opts ...ThrottleOption) Option {
 	})
 }
 
+// WithSLO adds an SLO error-budget burn-rate load shedder for the given target
+// success rate (e.g. 0.999): a probabilistic shedder that rejects calls locally,
+// with [ErrSLOShed], in proportion to how fast the objective's error budget is
+// burning. See [SLOGovernor] for the multiwindow burn-rate rule, the
+// proportional sheddability-aware shed math, and the tunables ([SLOLongWindow],
+// [SLOShortWindow], [BurnThreshold], [MaxShedRate], [SLOMinRequests],
+// [SLOClassifier]); an out-of-range target is clamped, not rejected.
+//
+// Chain placement: it sits just outside the adaptive throttler — the SLO
+// objective is the higher-level concern, so a budget shed happens before any
+// backend-health shed. A shed call never reaches the inner patterns and is never
+// recorded, so shedding sheddable traffic does not itself burn budget; it
+// preserves budget for the critical traffic that keeps flowing.
+//
+// Observability: the OnSLOShed hook, the SLOShed counter, the SLOBurnRate and
+// SLOShedProbability gauges, and the degraded health condition
+// [ConditionSLOBurning] while it sheds.
+func WithSLO(target float64, opts ...SLOOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.slo = &sloDesc{target: target, opts: opts}
+	})
+}
+
 // WithHedge adds a hedged request that fires a second concurrent call after
 // delay. Pass [AdaptiveHedge] to instead fire at an observed latency percentile,
 // using the duration as the hard ceiling and warmup fallback so only genuine
@@ -615,6 +646,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		bulkhead        *Bulkhead
 		adaptive        *AdaptiveLimiter
 		throttler       *Throttler
+		slo             *SLOGovernor
 		coalescer       *Coalescer[T]
 		timeoutCell     *atomic.Int64
 		adaptiveTimeout *adaptiveTimeout
@@ -699,6 +731,11 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		entries = append(entries, newThrottleEntry[T](throttler))
 	}
 
+	if setup.slo != nil {
+		slo = NewSLOGovernor(setup.slo.target, clock, &hooks, setup.slo.opts...)
+		entries = append(entries, newSLOEntry[T](slo))
+	}
+
 	if setup.hedge != nil {
 		hedgeCell = new(atomic.Int64)
 		hedgeCell.Store(int64(*setup.hedge))
@@ -763,6 +800,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		bulkhead:          bulkhead,
 		adaptive:          adaptive,
 		throttler:         throttler,
+		slo:               slo,
 		retryBudget:       setup.retryBudget,
 		concurrencyBudget: setup.concurrencyBudget,
 		coalescer:         coalescer,
@@ -1087,6 +1125,12 @@ func newAdaptiveEntry[T any](limiter *AdaptiveLimiter) PatternEntry[T] {
 func newThrottleEntry[T any](throttler *Throttler) PatternEntry[T] {
 	return admitRecordEntry[T](
 		priorityThrottle, "adaptive_throttle", throttler.Allow, throttler.Record,
+	)
+}
+
+func newSLOEntry[T any](gov *SLOGovernor) PatternEntry[T] {
+	return admitRecordEntry[T](
+		prioritySLO, "slo", gov.Allow, gov.Record,
 	)
 }
 
