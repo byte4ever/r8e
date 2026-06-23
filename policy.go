@@ -334,7 +334,9 @@ func WithRetryBudget(opts ...RetryBudgetOption) Option {
 
 // WithSharedRetryBudget attaches an existing RetryBudget, letting several
 // policies share one bucket so their retries are throttled in concert. Like
-// WithRetryBudget it requires WithRetry. A nil budget is ignored.
+// WithRetryBudget it requires WithRetry. A nil budget is ignored. The budget may
+// be a child in a tree (see [Parent]), in which case this policy's retries also
+// roll up into the parent's aggregate budget.
 func WithSharedRetryBudget(budget *RetryBudget) Option {
 	return optionFunc(func(s *policySetup) {
 		s.retryBudget = budget

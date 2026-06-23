@@ -543,6 +543,22 @@ a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedRetryB
 b := r8e.NewPolicy[string]("b", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
 ```
 
+**Nested (tree) budgets.** `Parent(*RetryBudget)` nests a budget under another,
+so a gateway-wide budget can cap the *aggregate* retry pressure across a whole
+call graph, not just per-service. A child's outcomes roll up into its parent (and
+every ancestor), and a retry is permitted only when the child **and** every
+ancestor still have tokens — so a storm in one leaf drains the shared parent and
+throttles its siblings too, stopping amplification from cascading up the tree.
+`Exhausted()` stays *local* (it reports whether *that* bucket is drained), so the
+exhausted level pinpoints the bottleneck. The parent link is code-only (a runtime
+object graph, like `WithSharedRetryBudget`).
+
+```go
+gateway := r8e.NewRetryBudget(r8e.MaxTokens(20))                                    // aggregate ceiling
+svcA    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))               // rolls up into gateway
+svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
+```
+
 A budget requires `WithRetry` — configuring one without a retry pattern panics
 in `NewPolicy` (or, for config-driven construction, `BuildOptions` returns
 `ErrRetryBudgetWithoutRetry`). Throttling is observable via the
@@ -551,7 +567,8 @@ metrics, and a degraded `retry_budget_exhausted` health condition (it never
 gates readiness — first attempts still flow). A *shared* budget reports the same
 token level and exhausted condition under every sharing policy's name, so
 aggregate its gauge with `max`/`avg`, not `sum`. See
-[`examples/19-retry-budget`](examples/19-retry-budget).
+[`examples/19-retry-budget`](examples/19-retry-budget) and
+[`examples/42-nested-retry-budget`](examples/42-nested-retry-budget).
 
 ## Concurrency Budget
 
@@ -1294,6 +1311,7 @@ go run ./examples/38-cache-refresh-ahead/
 go run ./examples/39-ramp-recovery/
 go run ./examples/40-slo-governor/
 go run ./examples/41-codel-queue/
+go run ./examples/42-nested-retry-budget/
 ```
 
 ## License

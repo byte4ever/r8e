@@ -543,6 +543,22 @@ a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedRetryB
 b := r8e.NewPolicy[string]("b", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
 ```
 
+**Budgets imbriqués (en arbre).** `Parent(*RetryBudget)` imbrique un budget sous
+un autre : un budget commun de gateway peut ainsi plafonner la pression de retry
+*agrégée* sur tout un graphe d'appels, pas seulement par service. Les résultats
+d'un enfant remontent dans son parent (et chaque ancêtre), et un retry n'est
+permis que si l'enfant **et** chaque ancêtre ont encore des tokens — une tempête
+dans une feuille draine donc le parent partagé et bride ses frères, empêchant
+l'amplification de remonter l'arbre. `Exhausted()` reste *local* (il dit si *ce*
+bucket est vidé), donc le niveau épuisé pointe le goulot. Le lien parent est
+code-only (un graphe d'objets runtime, comme `WithSharedRetryBudget`).
+
+```go
+gateway := r8e.NewRetryBudget(r8e.MaxTokens(20))                        // plafond agrégé
+svcA    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))   // remonte dans gateway
+svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
+```
+
 Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
 `NewPolicy` (ou, en construction par config, `BuildOptions` renvoie
 `ErrRetryBudgetWithoutRetry`). Le throttling est observable via le hook
@@ -551,7 +567,8 @@ Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
 (elle ne bloque jamais la readiness — les tentatives initiales passent toujours).
 Un budget *partagé* reporte le même niveau de tokens et la même condition sous le
 nom de chaque policy qui le partage : agrégez sa jauge avec `max`/`avg`, pas
-`sum`. Voir [`examples/19-retry-budget`](examples/19-retry-budget).
+`sum`. Voir [`examples/19-retry-budget`](examples/19-retry-budget) et
+[`examples/42-nested-retry-budget`](examples/42-nested-retry-budget).
 
 ## Budget de concurrence
 
@@ -1314,6 +1331,7 @@ go run ./examples/38-cache-refresh-ahead/
 go run ./examples/39-ramp-recovery/
 go run ./examples/40-slo-governor/
 go run ./examples/41-codel-queue/
+go run ./examples/42-nested-retry-budget/
 ```
 
 ## Licence

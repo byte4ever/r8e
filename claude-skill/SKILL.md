@@ -142,11 +142,22 @@ panics in `NewPolicy` (or `BuildOptions` returns `r8e.ErrRetryBudgetWithoutRetry
 for config-driven construction). A shared budget reports the same tokens/exhausted
 state under each sharing policy's name (aggregate gauge with max/avg, not sum).
 **Options**: `r8e.MaxTokens(n)` (default 10),
-`r8e.TokenRatio(r)` (default 0.1). When exhausted it suppresses the retry and
+`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree).
+When exhausted it suppresses the retry and
 returns the **real downstream error** (not a sentinel); first attempts always
 proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,
 `RetryBudgetExceeded`/`RetryBudgetTokens` metrics, `retry_budget_exhausted`
 health condition (degraded).
+
+**Nested (tree) budgets** (`r8e.Parent(*RetryBudget)`): a budget can nest under a
+parent — a child's outcomes also roll up into the parent and every ancestor
+(parent = subtree aggregate, each level credits a success by its own ratio), and a
+retry is permitted only when the child AND every ancestor allow it (short-circuited
+up the tree). So a gateway-wide parent caps aggregate retry pressure: a storm in
+one leaf drains the shared parent and throttles its siblings. `Exhausted()` stays
+LOCAL (this bucket only) so it pinpoints the bottleneck. Parent link is set at
+construction, immutable (Reconfigure ignores it), code-only (like
+WithSharedRetryBudget). Acyclic by construction. See `examples/42-nested-retry-budget`.
 
 ### Concurrency Budget
 
