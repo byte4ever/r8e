@@ -270,6 +270,19 @@ hot-reloadable. Observability: `OnBulkheadQueued` / `OnBulkheadTimeout` hooks,
 `Bulkhead.Acquire(ctx) error` (takes a ctx — may block on the wait) + `Release()`
 + `Queued()`.
 
+**Controlled-delay queue (CoDel + adaptive LIFO)** (opt-in): `r8e.BulkheadCoDel(target, interval)`
+disciplines the wait queue by observed dwell (RFC 8289 / folly), instead of (or
+alongside) the fixed max-wait. It watches the standing queue delay (oldest
+waiter's dwell): healthy (≤ target) → serve FIFO, no shedding; once the delay
+stays above `target` for a full `interval` → **overloaded**: shed callers past the
+slough timeout (`2 × target`) with `r8e.ErrCoDelShed` and serve the **newest**
+first (adaptive LIFO); one sample ≤ target clears it. Enables the wait on its own;
+folly defaults target 5ms / interval 100ms. Config-expressible (`bulkhead_codel_target`
++ `bulkhead_codel_interval`, both required together → `ErrBulkheadCoDelConfigIncomplete`,
+both requiring `bulkhead` → `ErrBulkheadWaitWithoutBulkhead`), hot-reloadable.
+Observability: `OnCoDelShed` hook, `CoDelShed` counter, `CoDelLoad` gauge ([0,1]),
+`Bulkhead.Overloaded()` predicate, `bulkhead_overloaded` health condition (degraded).
+
 ### Adaptive Concurrency
 
 ```go
@@ -486,7 +499,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
+`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
 
 ## Hooks
 
@@ -505,6 +518,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnBulkheadReleased: func() {},
     OnBulkheadQueued:   func() {},  // full bulkhead enqueued a caller (bounded wait)
     OnBulkheadTimeout:  func() {},  // queued caller gave up after max-wait
+    OnCoDelShed:        func() {},  // controlled-delay queue shed a stale caller under overload
     OnTimeout:          func() {},
     OnHedgeTriggered:   func() {},
     OnHedgeWon:         func() {},
@@ -542,14 +556,14 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `RateLimited`, `BulkheadRejected`,
-`BulkheadTimeouts`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
+`BulkheadTimeouts`, `CoDelShed`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
 `CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `SLOShed`, `RateAdaptations`,
 `SlowCallRateExceeded`, `CacheHits`, `CacheMisses`, `CacheStores`,
 `CacheStaleServed`, `CacheRefreshes`, `PanicsRecovered`,
 `ConcurrencyBudgetExceeded`, `ChaosInjected`) and gauges
 (`CircuitState`, `SlowCallRate`, `RampRecoveryFraction`, `BulkheadInUse`, `BulkheadCap`,
-`BulkheadQueued`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
+`BulkheadQueued`, `CoDelLoad`, `RetryBudgetTokens`, `CoalesceInFlight`, `ConcurrencyLimit`,
 `ConcurrencyInFlight`, `ThrottleProbability`, `SLOBurnRate`, `SLOShedProbability`,
 `RateLimit`, `AdaptiveTimeout`,
 `AdaptiveHedgeDelay`, `Saturated`, `Healthy`, `Criticality`).

@@ -28,10 +28,14 @@ type Hooks struct {
 	// OnBulkheadTimeout fires when a queued caller gives up after waiting the full
 	// max-wait without a slot, returning [ErrBulkheadTimeout].
 	OnBulkheadTimeout func()
-	OnTimeout         func()
-	OnHedgeTriggered  func()
-	OnHedgeWon        func()
-	OnFallbackUsed    func(err error)
+	// OnCoDelShed fires when the bulkhead's controlled-delay discipline sheds a
+	// queued caller because the wait queue was overloaded and the caller had waited
+	// past the slough timeout (see [BulkheadCoDel]), returning [ErrCoDelShed].
+	OnCoDelShed      func()
+	OnTimeout        func()
+	OnHedgeTriggered func()
+	OnHedgeWon       func()
+	OnFallbackUsed   func(err error)
 
 	// OnRetryBudgetExceeded fires when a retry is suppressed because the retry
 	// budget is exhausted. The underlying downstream error is still returned by
@@ -176,6 +180,12 @@ func (h *Hooks) emitBulkheadQueued() {
 func (h *Hooks) emitBulkheadTimeout() {
 	if h != nil && h.OnBulkheadTimeout != nil {
 		h.OnBulkheadTimeout()
+	}
+}
+
+func (h *Hooks) emitCoDelShed() {
+	if h != nil && h.OnCoDelShed != nil {
+		h.OnCoDelShed()
 	}
 }
 

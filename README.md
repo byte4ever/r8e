@@ -43,7 +43,7 @@ health reporting, and configuration hot-reload.
 - **One policy, all patterns** — compose any combination; r8e orders them for you
 - **Concurrency** — lock-free rate limiter and bulkhead; a mutex-guarded, linearizable circuit breaker
 - **Health reporting** — optional Kubernetes `/readyz` integration with hierarchical dependencies (`r8ehttp`)
-- **Observability** — 33 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
+- **Observability** — 34 lifecycle hooks, per-policy metrics (counters + live gauges), a JSON endpoint, and an OpenTelemetry bridge (`r8eotel`)
 - **Runtime tuning** — hot-reload pattern parameters (circuit-breaker thresholds, rate limits, timeouts…) without a redeploy
 - **Testable** — a `Clock` interface to control time in tests, avoiding `time.Sleep` flakiness
 - **Configurable** — define policies in code, JSON (`r8econf`), or with presets
@@ -306,6 +306,15 @@ r8e.WithBulkhead(10,
 ```
 
 > The standalone `Bulkhead.Acquire(ctx)` takes a context (it may block on the bounded wait), aligning with `RateLimiter.Allow(ctx)`.
+
+**Controlled-delay queue (CoDel + adaptive LIFO).** Instead of (or alongside) the fixed `BulkheadMaxWait` deadline, `BulkheadCoDel(target, interval)` disciplines the wait queue by the *observed* dwell, after RFC 8289 and Facebook's folly executor. It watches the standing queue delay (the dwell of the oldest waiter): while that stays at or below `target` the queue is healthy and serves FIFO; once it has stayed above `target` for a full `interval` the queue is **overloaded**, and from then on callers that have waited past the slough timeout (`2 × target`) are shed with `ErrCoDelShed` while the freed slot goes to the **newest** waiter (adaptive LIFO) — keeping the freshest, likeliest-still-wanted work moving and dropping the stale callers whose clients have probably given up. A single sample back at or below `target` clears the overload and restores FIFO. CoDel enables the wait on its own (a bulkhead with only `BulkheadCoDel` still queues); the folly defaults are `target` 5ms, `interval` 100ms. Observability: the `OnCoDelShed` hook, the `CoDelShed` counter, the `CoDelLoad` gauge ([0,1], standing delay over slough), the `Bulkhead.Overloaded()` predicate, and the `bulkhead_overloaded` health condition (degraded). See [`examples/41-codel-queue`](examples/41-codel-queue).
+
+```go
+r8e.WithBulkhead(10,
+    r8e.BulkheadCoDel(5*time.Millisecond, 100*time.Millisecond), // shed by dwell, serve LIFO under overload
+    r8e.BulkheadQueueDepth(32),
+)
+```
 
 ### Hedged Request
 
@@ -977,7 +986,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (32): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Available hooks on `Hooks` (34): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
@@ -1284,6 +1293,7 @@ go run ./examples/37-chaos-injection/
 go run ./examples/38-cache-refresh-ahead/
 go run ./examples/39-ramp-recovery/
 go run ./examples/40-slo-governor/
+go run ./examples/41-codel-queue/
 ```
 
 ## License

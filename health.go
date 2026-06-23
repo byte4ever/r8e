@@ -64,6 +64,10 @@ const (
 	ConditionRateLimited Condition = "rate_limited"
 	// ConditionBulkheadFull means the bulkhead is at capacity (degraded).
 	ConditionBulkheadFull Condition = "bulkhead_full"
+	// ConditionBulkheadOverloaded means the bulkhead's controlled-delay discipline
+	// sees the wait queue persistently backed up (degraded); it is shedding stale
+	// callers and serving newest-first (see [BulkheadCoDel]).
+	ConditionBulkheadOverloaded Condition = "bulkhead_overloaded"
 	// ConditionDependencyDegraded means a critical dependency is unhealthy.
 	ConditionDependencyDegraded Condition = "dependency_degraded"
 	// ConditionCircuitHalfOpen means the breaker is probing recovery.
@@ -101,6 +105,7 @@ var conditionSeverity = []struct {
 	{ConditionCircuitOpen, CriticalityCritical},
 	{ConditionRateLimited, CriticalityDegraded},
 	{ConditionBulkheadFull, CriticalityDegraded},
+	{ConditionBulkheadOverloaded, CriticalityDegraded},
 	{ConditionConcurrencyLimited, CriticalityDegraded},
 	{ConditionThrottling, CriticalityDegraded},
 	{ConditionSLOBurning, CriticalityDegraded},
@@ -173,6 +178,12 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// Bulkhead — degraded (not unhealthy on its own).
 	if p.bulkhead != nil && p.bulkhead.Full() {
 		conditions = append(conditions, ConditionBulkheadFull)
+	}
+
+	// Bulkhead controlled-delay queue — degraded while the wait queue is
+	// persistently backed up and shedding (see [BulkheadCoDel]).
+	if p.bulkhead != nil && p.bulkhead.Overloaded() {
+		conditions = append(conditions, ConditionBulkheadOverloaded)
 	}
 
 	// Adaptive concurrency limiter — degraded when saturated (shedding load).

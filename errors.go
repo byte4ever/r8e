@@ -42,6 +42,13 @@ var (
 	// [ErrBulkheadFull] (an immediate rejection) so callers can tell a shed-on-
 	// arrival apart from a shed-after-waiting.
 	ErrBulkheadTimeout error = resilienceError("bulkhead wait timeout")
+	// ErrCoDelShed is returned when the bulkhead's controlled-delay discipline
+	// (see [BulkheadCoDel]) sheds a queued caller because the wait queue was
+	// overloaded — its standing delay stayed above target for a full interval —
+	// and the caller had already waited past the slough timeout. It is distinct
+	// from [ErrBulkheadTimeout] (a fixed max-wait elapsing) so callers can tell an
+	// adaptive controlled-delay drop apart from a deadline timeout.
+	ErrCoDelShed error = resilienceError("shed by controlled-delay queue")
 	// ErrConcurrencyLimited is returned when the adaptive concurrency limiter is
 	// at its current limit and rejects a call.
 	ErrConcurrencyLimited error = resilienceError("concurrency limited")
@@ -147,19 +154,29 @@ var (
 		"circuit breaker slow_call_duration and slow_call_rate_threshold " +
 			"must be set together",
 	)
-	// ErrBulkheadWaitWithoutBulkhead indicates a [PolicyConfig] set
-	// bulkhead_max_wait or bulkhead_queue_depth without bulkhead; the wait
-	// settings have no bulkhead to apply to. It is the error [BuildOptions]
-	// returns for that misconfiguration.
+	// ErrBulkheadWaitWithoutBulkhead indicates a [PolicyConfig] set a bulkhead
+	// wait setting (bulkhead_max_wait, bulkhead_queue_depth, or one of the
+	// bulkhead_codel_* fields) without bulkhead; the wait settings have no
+	// bulkhead to apply to. It is the error [BuildOptions] and [Policy.Reconfigure]
+	// return for that misconfiguration.
 	ErrBulkheadWaitWithoutBulkhead error = resilienceError(
 		"bulkhead wait settings require a bulkhead",
 	)
 	// ErrBulkheadQueueWithoutWait indicates a [PolicyConfig] set
-	// bulkhead_queue_depth without bulkhead_max_wait; the queue is only used
-	// while waiting. It is the error [BuildOptions] returns for that
-	// misconfiguration.
+	// bulkhead_queue_depth without a wait to bound; the queue is only used while
+	// waiting, so it needs either bulkhead_max_wait or the controlled-delay
+	// discipline (bulkhead_codel_target/interval) enabled. It is the error
+	// [BuildOptions] returns for that misconfiguration.
 	ErrBulkheadQueueWithoutWait error = resilienceError(
-		"bulkhead_queue_depth requires bulkhead_max_wait",
+		"bulkhead_queue_depth requires a wait (bulkhead_max_wait or bulkhead_codel)",
+	)
+	// ErrBulkheadCoDelConfigIncomplete indicates a [PolicyConfig] set only one of
+	// bulkhead_codel_target / bulkhead_codel_interval. Both are required to enable
+	// the controlled-delay discipline (see [BulkheadCoDel]); supplying one alone is
+	// ambiguous. It is the error [BuildOptions] and [Policy.Reconfigure] return for
+	// that misconfiguration.
+	ErrBulkheadCoDelConfigIncomplete error = resilienceError(
+		"bulkhead_codel_target and bulkhead_codel_interval must be set together",
 	)
 	// ErrAIMDWithoutRateLimit indicates AIMD adaptation was requested where it is
 	// not available: an aimd config block without rate_limit, a [Policy.Reconfigure]

@@ -34,9 +34,15 @@ type (
 		// without a slot and gave up with [ErrBulkheadTimeout]; with
 		// BulkheadRejected (immediate rejections) it splits the two shed modes.
 		BulkheadTimeouts int64 `json:"bulkhead_timeouts"`
-		HedgesTriggered  int64 `json:"hedges_triggered"`
-		HedgesWon        int64 `json:"hedges_won"`
-		FallbacksUsed    int64 `json:"fallbacks_used"`
+		// CoDelShed counts queued callers shed by the bulkhead's controlled-delay
+		// discipline because the wait queue was overloaded and they had waited past
+		// the slough timeout (see [BulkheadCoDel]). It is a third shed mode beside
+		// BulkheadRejected (full on arrival) and BulkheadTimeouts (max-wait elapsed).
+		//nolint:tagliatelle // "CoDel" is one coined word on the wire (codel_shed)
+		CoDelShed       int64 `json:"codel_shed"`
+		HedgesTriggered int64 `json:"hedges_triggered"`
+		HedgesWon       int64 `json:"hedges_won"`
+		FallbacksUsed   int64 `json:"fallbacks_used"`
 		// RetryBudgetExceeded counts retries suppressed by the retry budget.
 		RetryBudgetExceeded int64 `json:"retry_budget_exceeded"`
 		// TimeBudgetExceeded counts retries stopped early by the time budget.
@@ -87,8 +93,15 @@ type (
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
 		BulkheadCap   int64 `json:"bulkhead_cap"`    // configured slot capacity
 		// BulkheadQueued is the number of callers currently waiting for a bulkhead
-		// slot; 0 unless a max-wait is configured (see [BulkheadMaxWait]).
+		// slot; 0 unless a wait is enabled (see [BulkheadMaxWait], [BulkheadCoDel]).
 		BulkheadQueued int64 `json:"bulkhead_queued"`
+		// CoDelLoad is how close the bulkhead wait queue is to shedding under the
+		// controlled-delay discipline, in [0, 1]: the standing queue delay as a
+		// fraction of the slough timeout. 0 when the policy has no bulkhead, CoDel
+		// is off, or the queue is empty; near 1 means callers are about to be shed
+		// (see [BulkheadCoDel]).
+		//nolint:tagliatelle // "CoDel" is one coined word on the wire (codel_load)
+		CoDelLoad float64 `json:"codel_load"`
 		// RetryBudgetTokens is the retry budget's current token level. It is 0
 		// both for a policy with no retry budget and for one whose budget has
 		// fully drained; read it together with whether the policy has a budget
@@ -198,6 +211,7 @@ type (
 		rateLimited          atomic.Int64
 		bulkheadRejected     atomic.Int64
 		bulkheadTimeouts     atomic.Int64
+		codelShed            atomic.Int64
 		hedgesTriggered      atomic.Int64
 		hedgesWon            atomic.Int64
 		fallbacksUsed        atomic.Int64
@@ -231,6 +245,19 @@ type (
 	}
 )
 
+// countingHook returns a no-argument hook that increments counter and then,
+// if set, forwards to the caller's hook. It collapses the count-then-forward
+// boilerplate so [policyMetrics.instrument] stays a single readable literal.
+func countingHook(counter *atomic.Int64, user func()) func() {
+	return func() {
+		counter.Add(1)
+
+		if user != nil {
+			user()
+		}
+	}
+}
+
 // instrument wraps the caller's hooks so each lifecycle event also increments
 // the matching counter. The returned Hooks has non-nil fields for every
 // counted event; uncounted events pass through unchanged.
@@ -247,79 +274,20 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnRetry(attempt, err)
 			}
 		},
-		OnCircuitOpen: func() {
-			m.circuitOpens.Add(1)
-
-			if user.OnCircuitOpen != nil {
-				user.OnCircuitOpen()
-			}
-		},
-		OnCircuitClose: func() {
-			m.circuitCloses.Add(1)
-
-			if user.OnCircuitClose != nil {
-				user.OnCircuitClose()
-			}
-		},
-		OnCircuitHalfOpen: func() {
-			m.circuitHalfOpens.Add(1)
-
-			if user.OnCircuitHalfOpen != nil {
-				user.OnCircuitHalfOpen()
-			}
-		},
-		OnCircuitRamping: func() {
-			m.circuitRamps.Add(1)
-
-			if user.OnCircuitRamping != nil {
-				user.OnCircuitRamping()
-			}
-		},
-		OnRateLimited: func() {
-			m.rateLimited.Add(1)
-
-			if user.OnRateLimited != nil {
-				user.OnRateLimited()
-			}
-		},
-		OnBulkheadFull: func() {
-			m.bulkheadRejected.Add(1)
-
-			if user.OnBulkheadFull != nil {
-				user.OnBulkheadFull()
-			}
-		},
+		OnCircuitOpen:      countingHook(&m.circuitOpens, user.OnCircuitOpen),
+		OnCircuitClose:     countingHook(&m.circuitCloses, user.OnCircuitClose),
+		OnCircuitHalfOpen:  countingHook(&m.circuitHalfOpens, user.OnCircuitHalfOpen),
+		OnCircuitRamping:   countingHook(&m.circuitRamps, user.OnCircuitRamping),
+		OnRateLimited:      countingHook(&m.rateLimited, user.OnRateLimited),
+		OnBulkheadFull:     countingHook(&m.bulkheadRejected, user.OnBulkheadFull),
 		OnBulkheadAcquired: user.OnBulkheadAcquired,
 		OnBulkheadReleased: user.OnBulkheadReleased,
 		OnBulkheadQueued:   user.OnBulkheadQueued,
-		OnBulkheadTimeout: func() {
-			m.bulkheadTimeouts.Add(1)
-
-			if user.OnBulkheadTimeout != nil {
-				user.OnBulkheadTimeout()
-			}
-		},
-		OnTimeout: func() {
-			m.timeouts.Add(1)
-
-			if user.OnTimeout != nil {
-				user.OnTimeout()
-			}
-		},
-		OnHedgeTriggered: func() {
-			m.hedgesTriggered.Add(1)
-
-			if user.OnHedgeTriggered != nil {
-				user.OnHedgeTriggered()
-			}
-		},
-		OnHedgeWon: func() {
-			m.hedgesWon.Add(1)
-
-			if user.OnHedgeWon != nil {
-				user.OnHedgeWon()
-			}
-		},
+		OnBulkheadTimeout:  countingHook(&m.bulkheadTimeouts, user.OnBulkheadTimeout),
+		OnCoDelShed:        countingHook(&m.codelShed, user.OnCoDelShed),
+		OnTimeout:          countingHook(&m.timeouts, user.OnTimeout),
+		OnHedgeTriggered:   countingHook(&m.hedgesTriggered, user.OnHedgeTriggered),
+		OnHedgeWon:         countingHook(&m.hedgesWon, user.OnHedgeWon),
 		OnFallbackUsed: func(err error) {
 			m.fallbacksUsed.Add(1)
 
@@ -327,49 +295,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnFallbackUsed(err)
 			}
 		},
-		OnRetryBudgetExceeded: func() {
-			m.retryBudgetExceeded.Add(1)
-
-			if user.OnRetryBudgetExceeded != nil {
-				user.OnRetryBudgetExceeded()
-			}
-		},
-		OnCoalesceLeader: func() {
-			m.coalesceLeaders.Add(1)
-
-			if user.OnCoalesceLeader != nil {
-				user.OnCoalesceLeader()
-			}
-		},
-		OnCoalesceFollower: func() {
-			m.coalesceFollowers.Add(1)
-
-			if user.OnCoalesceFollower != nil {
-				user.OnCoalesceFollower()
-			}
-		},
-		OnConcurrencyRejected: func() {
-			m.concurrencyRejected.Add(1)
-
-			if user.OnConcurrencyRejected != nil {
-				user.OnConcurrencyRejected()
-			}
-		},
+		OnRetryBudgetExceeded:     countingHook(&m.retryBudgetExceeded, user.OnRetryBudgetExceeded),
+		OnCoalesceLeader:          countingHook(&m.coalesceLeaders, user.OnCoalesceLeader),
+		OnCoalesceFollower:        countingHook(&m.coalesceFollowers, user.OnCoalesceFollower),
+		OnConcurrencyRejected:     countingHook(&m.concurrencyRejected, user.OnConcurrencyRejected),
 		OnConcurrencyLimitChanged: user.OnConcurrencyLimitChanged,
-		OnThrottled: func() {
-			m.throttled.Add(1)
-
-			if user.OnThrottled != nil {
-				user.OnThrottled()
-			}
-		},
-		OnSLOShed: func() {
-			m.sloShed.Add(1)
-
-			if user.OnSLOShed != nil {
-				user.OnSLOShed()
-			}
-		},
+		OnThrottled:               countingHook(&m.throttled, user.OnThrottled),
+		OnSLOShed:                 countingHook(&m.sloShed, user.OnSLOShed),
 		OnRateAdapted: func(rate float64) {
 			m.rateAdaptations.Add(1)
 
@@ -377,55 +309,8 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnRateAdapted(rate)
 			}
 		},
-		OnSlowCallRateExceeded: func() {
-			m.slowCallRateExceeded.Add(1)
-
-			if user.OnSlowCallRateExceeded != nil {
-				user.OnSlowCallRateExceeded()
-			}
-		},
-		OnCacheHit: func() {
-			m.cacheHits.Add(1)
-
-			if user.OnCacheHit != nil {
-				user.OnCacheHit()
-			}
-		},
-		OnCacheMiss: func() {
-			m.cacheMisses.Add(1)
-
-			if user.OnCacheMiss != nil {
-				user.OnCacheMiss()
-			}
-		},
-		OnCacheStored: func() {
-			m.cacheStores.Add(1)
-
-			if user.OnCacheStored != nil {
-				user.OnCacheStored()
-			}
-		},
-		OnStaleServed: func() {
-			m.cacheStaleServed.Add(1)
-
-			if user.OnStaleServed != nil {
-				user.OnStaleServed()
-			}
-		},
-		OnCacheRefreshed: func() {
-			m.cacheRefreshes.Add(1)
-
-			if user.OnCacheRefreshed != nil {
-				user.OnCacheRefreshed()
-			}
-		},
-		OnTimeBudgetExceeded: func() {
-			m.timeBudgetExceeded.Add(1)
-
-			if user.OnTimeBudgetExceeded != nil {
-				user.OnTimeBudgetExceeded()
-			}
-		},
+		OnSlowCallRateExceeded: countingHook(&m.slowCallRateExceeded, user.OnSlowCallRateExceeded),
+		OnTimeBudgetExceeded:   countingHook(&m.timeBudgetExceeded, user.OnTimeBudgetExceeded),
 		OnPanic: func(value any) {
 			m.panicsRecovered.Add(1)
 
@@ -433,13 +318,7 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnPanic(value)
 			}
 		},
-		OnConcurrencyBudgetExceeded: func() {
-			m.concBudgetExceeded.Add(1)
-
-			if user.OnConcurrencyBudgetExceeded != nil {
-				user.OnConcurrencyBudgetExceeded()
-			}
-		},
+		OnConcurrencyBudgetExceeded: countingHook(&m.concBudgetExceeded, user.OnConcurrencyBudgetExceeded),
 		OnChaosInjected: func(kind string) {
 			m.chaosInjected.Add(1)
 
@@ -447,6 +326,11 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnChaosInjected(kind)
 			}
 		},
+		OnCacheHit:       countingHook(&m.cacheHits, user.OnCacheHit),
+		OnCacheMiss:      countingHook(&m.cacheMisses, user.OnCacheMiss),
+		OnCacheStored:    countingHook(&m.cacheStores, user.OnCacheStored),
+		OnStaleServed:    countingHook(&m.cacheStaleServed, user.OnStaleServed),
+		OnCacheRefreshed: countingHook(&m.cacheRefreshes, user.OnCacheRefreshed),
 	}
 }
 
@@ -466,6 +350,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		RateLimited:               p.metrics.rateLimited.Load(),
 		BulkheadRejected:          p.metrics.bulkheadRejected.Load(),
 		BulkheadTimeouts:          p.metrics.bulkheadTimeouts.Load(),
+		CoDelShed:                 p.metrics.codelShed.Load(),
 		HedgesTriggered:           p.metrics.hedgesTriggered.Load(),
 		HedgesWon:                 p.metrics.hedgesWon.Load(),
 		FallbacksUsed:             p.metrics.fallbacksUsed.Load(),
@@ -505,6 +390,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		metrics.BulkheadInUse = p.bulkhead.InUse()
 		metrics.BulkheadCap = p.bulkhead.Cap()
 		metrics.BulkheadQueued = p.bulkhead.Queued()
+		metrics.CoDelLoad = p.bulkhead.CoDelLoad()
 	}
 
 	if p.retryBudget != nil {

@@ -20,6 +20,7 @@ func TestRejectionReason(t *testing.T) {
 		"rate_limited":         {r8e.ErrRateLimited, "rate_limited"},
 		"bulkhead_full":        {r8e.ErrBulkheadFull, "bulkhead_full"},
 		"bulkhead_timeout":     {r8e.ErrBulkheadTimeout, "bulkhead_timeout"},
+		"codel_shed":           {r8e.ErrCoDelShed, "codel_shed"},
 		"concurrency_limited":  {r8e.ErrConcurrencyLimited, "concurrency_limited"},
 		"throttled":            {r8e.ErrThrottled, "throttled"},
 		"timeout":              {r8e.ErrTimeout, "timeout"},

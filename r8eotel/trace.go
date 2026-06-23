@@ -134,6 +134,8 @@ func rejectionReason(err error) string {
 		return "bulkhead_full"
 	case errors.Is(err, r8e.ErrBulkheadTimeout):
 		return "bulkhead_timeout"
+	case errors.Is(err, r8e.ErrCoDelShed):
+		return "codel_shed"
 	case errors.Is(err, r8e.ErrConcurrencyLimited):
 		return "concurrency_limited"
 	case errors.Is(err, r8e.ErrThrottled):

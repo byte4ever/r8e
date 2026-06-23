@@ -90,6 +90,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadRejected })
 	builder.counter("r8e.policy.bulkhead_timeouts", "Calls that timed out waiting for a bulkhead slot",
 		func(m *r8e.PolicyMetrics) int64 { return m.BulkheadTimeouts })
+	builder.counter("r8e.policy.codel_shed", "Callers shed by the bulkhead's controlled-delay queue",
+		func(m *r8e.PolicyMetrics) int64 { return m.CoDelShed })
 	builder.counter("r8e.policy.hedges_triggered", "Hedged requests launched",
 		func(m *r8e.PolicyMetrics) int64 { return m.HedgesTriggered })
 	builder.counter("r8e.policy.hedges_won", "Hedged requests that won",
@@ -175,6 +177,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) float64 { return m.AdaptiveTimeout.Seconds() })
 	builder.gaugeFloat64("r8e.policy.adaptive_hedge_delay", "Current adaptive hedge delay, in seconds",
 		func(m *r8e.PolicyMetrics) float64 { return m.AdaptiveHedgeDelay.Seconds() })
+	builder.gaugeFloat64("r8e.policy.codel_load", "Bulkhead controlled-delay load (standing delay / slough)",
+		func(m *r8e.PolicyMetrics) float64 { return m.CoDelLoad })
 
 	if builder.err != nil {
 		return nil, builder.err

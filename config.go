@@ -55,9 +55,21 @@ type (
 		// "50ms".
 		BulkheadMaxWait *string `json:"bulkhead_max_wait,omitempty" yaml:"bulkhead_max_wait,omitempty"`
 		// BulkheadQueueDepth caps how many callers may wait at once.
-		// Optional; requires Bulkhead and BulkheadMaxWait. Default: the bulkhead
-		// max-concurrency. Example: 20.
+		// Optional; requires Bulkhead and a wait (BulkheadMaxWait or the
+		// BulkheadCoDel fields). Default: the bulkhead max-concurrency. Example: 20.
 		BulkheadQueueDepth *int `json:"bulkhead_queue_depth,omitempty" yaml:"bulkhead_queue_depth,omitempty"`
+		// BulkheadCoDelTarget enables the controlled-delay (CoDel) queue discipline:
+		// the acceptable standing queue delay. Required together with
+		// BulkheadCoDelInterval; requires Bulkhead. Parsed via time.ParseDuration.
+		// Example: "5ms". See [BulkheadCoDel].
+		//nolint:tagliatelle,lll // "CoDel" is one coined word on the wire (codel_*), not co_del_*
+		BulkheadCoDelTarget *string `json:"bulkhead_codel_target,omitempty" yaml:"bulkhead_codel_target,omitempty"`
+		// BulkheadCoDelInterval is how long the standing delay must persist above
+		// BulkheadCoDelTarget before the queue is declared overloaded. Required
+		// together with BulkheadCoDelTarget; requires Bulkhead. Parsed via
+		// time.ParseDuration. Example: "100ms". See [BulkheadCoDel].
+		//nolint:tagliatelle,lll // "CoDel" is one coined word on the wire (codel_*), not co_del_*
+		BulkheadCoDelInterval *string `json:"bulkhead_codel_interval,omitempty" yaml:"bulkhead_codel_interval,omitempty"`
 		// AdaptiveConcurrency configures the adaptive concurrency limiter.
 		// Mutually exclusive with Bulkhead.
 		// Optional. Example: {"initial_limit": 20, "max_limit": 200}.
@@ -398,7 +410,7 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 		}
 
 		opts = append(opts, WithBulkhead(*pc.Bulkhead, bhOpts...))
-	} else if pc.BulkheadMaxWait != nil || pc.BulkheadQueueDepth != nil {
+	} else if pc.hasAnyBulkheadWaitSetting() {
 		return nil, ErrBulkheadWaitWithoutBulkhead
 	}
 
@@ -810,7 +822,8 @@ func concurrencyBudgetOptionsFromConfig(
 // bulkheadOptionsFromConfig converts the bulkhead wait fields of a
 // [PolicyConfig] into bulkhead options. Shared by [BuildOptions] and
 // [Policy.Reconfigure]. Returns an error if a queue depth is given without a
-// max-wait (the queue is only used while waiting).
+// wait (the queue is only used while waiting; either a max-wait or the
+// controlled-delay discipline enables it).
 func bulkheadOptionsFromConfig(pc *PolicyConfig) ([]BulkheadOption, error) {
 	var opts []BulkheadOption
 
@@ -824,14 +837,66 @@ func bulkheadOptionsFromConfig(pc *PolicyConfig) ([]BulkheadOption, error) {
 	}
 
 	if pc.BulkheadQueueDepth != nil {
-		if pc.BulkheadMaxWait == nil {
+		if !pc.bulkheadWaitEnabled() {
 			return nil, ErrBulkheadQueueWithoutWait
 		}
 
 		opts = append(opts, BulkheadQueueDepth(*pc.BulkheadQueueDepth))
 	}
 
+	codelOpt, err := bulkheadCoDelOptionFromConfig(pc)
+	if err != nil {
+		return nil, err
+	}
+
+	if codelOpt != nil {
+		opts = append(opts, codelOpt)
+	}
+
 	return opts, nil
+}
+
+// bulkheadCoDelOptionFromConfig converts the controlled-delay fields of a
+// [PolicyConfig] into a [BulkheadCoDel] option, or nil when neither is set. Both
+// target and interval are required together (see [ErrBulkheadCoDelConfigIncomplete]).
+func bulkheadCoDelOptionFromConfig(pc *PolicyConfig) (BulkheadOption, error) {
+	if pc.BulkheadCoDelTarget == nil && pc.BulkheadCoDelInterval == nil {
+		return nil, nil //nolint:nilnil // nil option, nil error: CoDel simply unset
+	}
+
+	if pc.BulkheadCoDelTarget == nil || pc.BulkheadCoDelInterval == nil {
+		return nil, ErrBulkheadCoDelConfigIncomplete
+	}
+
+	target, err := time.ParseDuration(*pc.BulkheadCoDelTarget)
+	if err != nil {
+		return nil, fmt.Errorf("bulkhead_codel_target: %w", err)
+	}
+
+	interval, err := time.ParseDuration(*pc.BulkheadCoDelInterval)
+	if err != nil {
+		return nil, fmt.Errorf("bulkhead_codel_interval: %w", err)
+	}
+
+	return BulkheadCoDel(target, interval), nil
+}
+
+// hasAnyBulkheadWaitSetting reports whether any bulkhead wait-related field is
+// present — the fixed max-wait, the queue depth, OR either controlled-delay
+// field. Used to reject those settings when no bulkhead is configured to apply
+// them to. (Distinct from [PolicyConfig.bulkheadWaitEnabled], which excludes the
+// queue depth because a depth is a bound on a wait, not a wait itself.)
+func (pc *PolicyConfig) hasAnyBulkheadWaitSetting() bool {
+	return pc.BulkheadQueueDepth != nil || pc.bulkheadWaitEnabled()
+}
+
+// bulkheadWaitEnabled reports whether a wait is actually enabled — a fixed
+// max-wait or the controlled-delay discipline — that a queue depth can bound. The
+// queue depth itself is not a wait, so it is excluded.
+func (pc *PolicyConfig) bulkheadWaitEnabled() bool {
+	return pc.BulkheadMaxWait != nil ||
+		pc.BulkheadCoDelTarget != nil ||
+		pc.BulkheadCoDelInterval != nil
 }
 
 // cbOptionsFromConfig converts a [CircuitBreakerConfig] into circuit-breaker

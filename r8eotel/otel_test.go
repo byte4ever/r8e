@@ -238,6 +238,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.circuit_half_opens", "r8e.policy.circuit_ramps",
 		"r8e.policy.rate_limited",
 		"r8e.policy.bulkhead_rejected", "r8e.policy.bulkhead_timeouts",
+		"r8e.policy.codel_shed",
 		"r8e.policy.hedges_triggered", "r8e.policy.hedges_won",
 		"r8e.policy.fallbacks_used", "r8e.policy.retry_budget_exceeded",
 		"r8e.policy.time_budget_exceeded", "r8e.policy.coalesce_leaders",
@@ -253,7 +254,8 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.chaos_injected",
 		// Gauges.
 		"r8e.policy.bulkhead_in_use", "r8e.policy.bulkhead_capacity",
-		"r8e.policy.bulkhead_queued", "r8e.policy.circuit_state",
+		"r8e.policy.bulkhead_queued", "r8e.policy.codel_load",
+		"r8e.policy.circuit_state",
 		"r8e.policy.healthy", "r8e.policy.saturated",
 		"r8e.policy.coalesce_in_flight", "r8e.policy.concurrency_limit",
 		"r8e.policy.concurrency_in_flight", "r8e.policy.retry_budget_tokens",
