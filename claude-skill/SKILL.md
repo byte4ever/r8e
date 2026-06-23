@@ -753,4 +753,30 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/31-recover`.
+Examples: `examples/01-quickstart` through `examples/40-slo-governor`.
+
+## Conventions: every feature ships with a documented example (mandatory)
+
+Any new pattern (a new `WithX`) or behaviour/API change MUST land, in the same
+change, with a fully documented runnable example — never code-only. This is a
+hard gate, not a follow-up. For each new feature provide:
+
+- A numbered example directory `examples/NN-<kebab-name>/` (NN = next free
+  number) containing **three** files: `main.go`, `README.md`, `README.fr.md`.
+- `main.go` with rich **"why" comments**: a header paragraph stating the problem
+  the feature solves (not just the API call), and inline comments explaining the
+  intent at each step. Match the comment density of the sibling examples (~30% of
+  lines). It must compile, `go vet` clean, and run with stable, readable output.
+- Bilingual READMEs on the **house template** (mirror `examples/07-hedge`):
+  intro → `## What it demonstrates` → `## How it works` (a mermaid diagram when
+  it clarifies the flow) → `## Key concepts` (a table) → `## When to use` →
+  `## Run` → `## Expected output`. Both files open with the cross-language link
+  (`*[Lire en Français](README.fr.md)*` / `*[Read in English](README.md)*`); the
+  FR file uses proper accents.
+- Wire the new example into the central example lists in **`README.md` AND
+  `README.fr.md`** (the `go run ./examples/...` block).
+- Update `README.md`, `README.fr.md` (keep FR in sync), and this `SKILL.md`;
+  `doc.go` stays a high-level overview (no per-pattern enumeration).
+
+See [`examples/40-slo-governor`](../examples/40-slo-governor) for the reference
+shape (bilingual README on the template + a "why"-commented `main.go`).
