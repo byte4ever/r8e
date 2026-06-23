@@ -1,0 +1,11 @@
+{
+  "skill_version": "1.0.0",
+  "module": "github.com/byte4ever/r8e",
+  "targets": {
+    "r8e": "v0.10.0",
+    "otter": "v0.10.0",
+    "ristretto": "v0.10.0",
+    "r8eotel": "v0.10.0"
+  },
+  "note": "Single source of truth for the policy-skills release. The skill_version is the fleet's OWN independent SemVer; targets are the EXACT r8e core + side-package versions this skill release was calibrated against. Bump them together — see MAINTENANCE.md. The install scripts and r8e-policy/SKILL.md ('Pinned r8e version') read from here."
+}

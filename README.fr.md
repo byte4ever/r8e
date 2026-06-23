@@ -1319,6 +1319,36 @@ ln -s "$(go list -m -f '{{.Dir}}' github.com/byte4ever/r8e)/claude-skill" .claud
 
 Une fois installe, Claude Code appliquera automatiquement ses connaissances r8e lorsque vous travaillez sur du code lie a la resilience.
 
+### Flotte de redaction & revue de policies
+
+Au-dela du skill de reference d'API ci-dessus, r8e fournit une **flotte de skills
+de policy** sous [`policy-skills/`](policy-skills/) pour rediger et auditer des
+policies de resilience, sur le modele `go` / `review-go` : un skill de redaction
+plus une flotte de revue contradictoire a six axes (call/Do, timeouts, retry,
+overload, fallback/cache, observability) qui execute chaque axe comme un
+sous-agent isole **REJECT par defaut** et arbitre un verdict unique (le pire
+verdict gagne). En *mode expert*, le skill de redaction interroge le service cible
+(quand il n'y a pas de code a lire) avant de rediger la moindre option, puis valide
+le brouillon a travers la flotte de revue.
+
+La flotte est versionnee et publiee **independamment** (tags `policy-skills/vX.Y.Z`),
+chaque release etant epinglee a une version exacte de r8e. Installez-la avec le
+script multiplateforme fourni (`install.sh` / `install.ps1`) :
+
+```bash
+# depuis un clone :
+./policy-skills/install.sh
+# Windows : .\policy-skills\install.ps1
+```
+
+Demandez alors, par exemple, *« Utilise r8e-policy pour rediger une policy pour
+&lt;service&gt; »* (redaction, avec le questionnaire expert) ou *« Utilise
+review-r8e-policy sur cette policy »* (audit). Voir
+[`policy-skills/README.md`](policy-skills/README.md) pour la carte de la flotte, le
+versioning et l'installation depuis une release ;
+[`policy-skills/MAINTENANCE.md`](policy-skills/MAINTENANCE.md) regit le re-epinglage
+des skills a chaque release de r8e ou d'un side-package.
+
 ## Exemples
 
 Voir le répertoire [`examples/`](examples/) pour des exemples exécutables démontrant chaque fonctionnalité :

@@ -1298,6 +1298,33 @@ ln -s "$(go list -m -f '{{.Dir}}' github.com/byte4ever/r8e)/claude-skill" .claud
 
 Once installed, Claude Code will automatically apply r8e knowledge when you work on resilience-related code.
 
+### Policy authoring & review fleet
+
+Beyond the API-reference skill above, r8e ships a **policy skill fleet** under
+[`policy-skills/`](policy-skills/) for authoring and auditing resilience policies,
+modelled on the `go` / `review-go` pattern: one authoring skill plus a six-axis
+adversarial review fleet (call/Do, timeouts, retry, overload, fallback/cache,
+observability) that runs each axis as an isolated, **REJECT-by-default** sub-agent
+and arbitrates a single worst-verdict-wins verdict. In *expert mode* the authoring
+skill interrogates the target service (when there is no code to read) before
+drafting a single option, then validates the draft through the review fleet.
+
+The fleet is versioned and released **independently** (tags `policy-skills/vX.Y.Z`),
+each release pinned to an exact r8e version. Install with the bundled
+cross-platform script (`install.sh` / `install.ps1`):
+
+```bash
+# from a clone:
+./policy-skills/install.sh
+# Windows: .\policy-skills\install.ps1
+```
+
+Then ask, e.g., *"Use r8e-policy to write a policy for &lt;service&gt;"* (authoring,
+with the expert questionnaire) or *"Use review-r8e-policy on this policy"* (audit).
+See [`policy-skills/README.md`](policy-skills/README.md) for the fleet map,
+versioning, and install-from-release; [`policy-skills/MAINTENANCE.md`](policy-skills/MAINTENANCE.md)
+governs re-pinning the skills on each r8e / side-package release.
+
 ## Examples
 
 See the [`examples/`](examples/) directory for runnable examples demonstrating each feature:

@@ -8,6 +8,11 @@
             "type": "command",
             "command": "cmd=$(jq -r \".tool_input.command\"); printf \"%s\" \"$cmd\" | grep -qE \"git[[:space:]]+commit|gh[[:space:]]+pr[[:space:]]+create\" && jq -n --arg m \"Impactful change? If this commit/PR adds a feature or changes behavior/API, verify the user-facing docs reflect it before finalizing: README.md, README.fr.md (keep FR in sync with EN), doc.go (package godoc), and claude-skill/SKILL.md. Skip trivial commits (chore/refactor/test-only/docs).\" \"{hookSpecificOutput:{hookEventName:\\\"PreToolUse\\\",additionalContext:\\$m}}\" || true",
             "statusMessage": "Checking docs for impactful commit/PR"
+          },
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r \".tool_input.command\"); printf \"%s\" \"$cmd\" | grep -qE \"git[[:space:]]+tag|gh[[:space:]]+release[[:space:]]+create\" && jq -n --arg m \"Release detected. If you are tagging/releasing r8e or a side package (otter/ristretto/r8eotel), evaluate whether policy-skills/ needs an update per policy-skills/MAINTENANCE.md: diff the public API, update the affected references, bump policy-skills/VERSIONS.json and the r8e-policy SKILL 'Pinned r8e version', re-run the calibration, then re-tag policy-skills/vX.Y.Z.\" \"{hookSpecificOutput:{hookEventName:\\\"PreToolUse\\\",additionalContext:\\$m}}\" || true",
+            "statusMessage": "Checking policy-skills update on release"
           }
         ]
       }
