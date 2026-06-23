@@ -74,6 +74,92 @@ health reporting, and configuration hot-reload.
 
 Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, `Clock` for deterministic tests.
 
+## Why r8e? Feature comparison
+
+r8e aims to be the most **complete single composable** resilience library for Go.
+The matrix below compares it with popular Go resilience libraries; every cell was
+verified against each project's current documentation (versions below).
+
+Legend: ✅ built-in · 🟡 partial / related axis · ❌ not provided.
+
+| Capability | **r8e** | failsafe-go | go-resiliency | goresilience | hystrix-go | gobreaker |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| **Retry & circuit breaking** | | | | | | |
+| Retry + pluggable backoff | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Retry jitter | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Retry budget (storm throttle) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Circuit breaker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| CB slow-call / latency trip | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| CB ramp / slow-start recovery | ✅ | 🟡 | ❌ | ❌ | ❌ | 🟡 |
+| **Timeouts & deadlines** | | | | | | |
+| Per-attempt timeout | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Adaptive timeout (percentile) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Total time budget (retry + hedge) | ✅ | 🟡 | ❌ | ❌ | ❌ | ❌ |
+| Cross-service deadline propagation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Rate & concurrency limiting** | | | | | | |
+| Rate limiter | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Adaptive rate limiter (AIMD) <sup>1</sup> | ✅ | 🟡 | 🟡 | ❌ | ❌ | ❌ |
+| Bulkhead (concurrency cap) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Bulkhead bounded wait / queue | ✅ | ✅ | 🟡 | ✅ | ❌ | ❌ |
+| CoDel / adaptive-LIFO queue | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Adaptive concurrency limiter | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
+| **Hedging & budgets** | | | | | | |
+| Hedged / backup requests | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Adaptive hedge delay (percentile) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Concurrency budget (cap retries + hedges) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Load shedding** | | | | | | |
+| Adaptive throttle (Google SRE) | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
+| SLO burn-rate governor | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Sheddability / priority tiers | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
+| **Fallback, caching & dedup** | | | | | | |
+| Fallback | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ |
+| Read-through cache | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Cache stale-if-error / refresh-ahead / negative | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Request coalescing (singleflight) | ✅ | ❌ | 🟡 | ❌ | ❌ | ❌ |
+| **Correctness & testing** | | | | | | |
+| Panic recovery → error | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 |
+| Chaos / fault injection | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Error classification (permanent/transient) | ✅ | ✅ | ✅ | 🟡 | ❌ | 🟡 |
+| **Composition & ergonomics** | | | | | | |
+| Composable + **automatic** ordering <sup>2</sup> | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
+| Generics (type-safe `Policy[T]`) | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Zero-dependency core | ✅ | 🟡 | ✅ | 🟡 | 🟡 | ✅ |
+| **Observability & operations** | | | | | | |
+| Hooks / event listeners | ✅ | ✅ | ❌ | ❌ | 🟡 | 🟡 |
+| Built-in metrics | ✅ | ❌ | ❌ | ✅ | ✅ | 🟡 |
+| OpenTelemetry (metrics + tracing) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Health / readiness reporting | ✅ | 🟡 | ❌ | ❌ | 🟡 | 🟡 |
+| Declarative config (JSON) + hot reload | ✅ | ❌ | ❌ | ❌ | 🟡 | ❌ |
+| HTTP client adapter | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+<sup>1</sup> r8e's AIMD adapts the request **rate**; failsafe-go and goresilience adapt
+**concurrency** (a related but different axis — see the adaptive-concurrency row).
+<sup>2</sup> All four compose policies, but only r8e sorts them into the correct
+outside-in order **automatically** (by fixed priority); the others require you to
+nest/order them yourself.
+
+**How to read this.** [failsafe-go](https://failsafe-go.dev) is the closest
+comparable — actively maintained and especially strong on adaptive load-limiting
+(it pioneered several of these ideas). r8e's main additions over it are the
+**observability/operations tier** (built-in metrics, OpenTelemetry, health &
+readiness, JSON config + hot reload), a set of **newer primitives** (SLO governor,
+CoDel queuing, adaptive timeout, cross-service deadline propagation, request
+coalescing, panic recovery, chaos), **automatic** pattern ordering, and a
+**zero-dependency core**. The others fill narrower niches:
+[go-resiliency](https://github.com/eapache/go-resiliency) is a stable, minimal
+toolkit (retry, breaker, semaphore, deadline);
+[goresilience](https://github.com/slok/goresilience) explored CoDel/adaptive-LIFO
+and AIMD early but is unmaintained and pre-generics;
+[hystrix-go](https://github.com/afex/hystrix-go) (a Netflix Hystrix port) is
+dormant and not recommended for new projects; and
+[gobreaker](https://github.com/sony/gobreaker) is a focused, well-maintained
+circuit breaker (with generics and a distributed variant) — an excellent choice
+if a breaker is all you need.
+
+*Versions compared (Feb 2026): failsafe-go v0.9.6 · go-resiliency v1.7.0 ·
+goresilience v0.2.0 (last release 2019) · hystrix-go (no tagged release, dormant
+since 2018) · gobreaker v2.4.0.*
+
 ## Quickstart
 
 ```go
