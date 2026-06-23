@@ -3,7 +3,7 @@ module github.com/byte4ever/r8e/ristretto
 go 1.25.11
 
 require (
-	github.com/byte4ever/r8e v0.9.0
+	github.com/byte4ever/r8e v0.10.0
 	github.com/dgraph-io/ristretto/v2 v2.1.0
 	github.com/stretchr/testify v1.11.1
 )

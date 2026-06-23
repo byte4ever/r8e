@@ -3,7 +3,7 @@ module github.com/byte4ever/r8e/otter
 go 1.25.11
 
 require (
-	github.com/byte4ever/r8e v0.9.0
+	github.com/byte4ever/r8e v0.10.0
 	github.com/maypok86/otter v1.2.4
 	github.com/stretchr/testify v1.11.1
 )
