@@ -323,6 +323,22 @@ r8e.WithCircuitBreaker(
 )
 ```
 
+**Outcome classifier (opt-in).** By default every non-nil error counts as a failure and a nil error as a success. `CircuitBreakerClassifier(fn)` lets you decide: `fn(ctx, err)` returns `OutcomeSuccess`, `OutcomeFailure` or `OutcomeNeutral`, and the caller still receives the real error. A neutral call leaves the failure counter and the slow-call window untouched; in half-open it frees the probe slot without counting, so the next call probes right away. `CallerCancellationIsNeutral` makes a call ended by its caller's context neutral, including a cancellation that carries a cause (`context.WithCancelCause`, as errgroup does), and `IsCallerCancellation(ctx, err)` lets you build your own classifier. A deadline r8e set is never a caller cancellation: a `WithTimeout` timeout, a retry `PerAttemptTimeout` of an enclosing policy, or a `WithTimeBudget` deadline set with `PropagateDeadline` that ends before the caller's own. A hanging downstream therefore still trips the breaker, as long as an r8e deadline ends the call before the caller gives up: keep `WithTimeout` shorter than your callers' deadlines. The classifier is called concurrently, so it must be safe for concurrent use; with `WithTimeout`, it can run after `Do` has returned `ErrTimeout`. See [`examples/44-circuit-breaker-classifier`](examples/44-circuit-breaker-classifier).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.FailureThreshold(5),
+    r8e.CircuitBreakerClassifier(func(ctx context.Context, err error) r8e.Outcome {
+        if errors.Is(err, errNotFound) {
+            return r8e.OutcomeNeutral // a business answer: the downstream is up
+        }
+        return r8e.CallerCancellationIsNeutral(ctx, err)
+    }),
+)
+```
+
+**Admissions and stale outcomes.** The policy ties each outcome to the admission it came from. An outcome from a call admitted before the breaker last opened or entered half-open is ignored, so a slow call that outlives the recovery timeout can neither close nor reopen the breaker while a probe is in flight. A panic in the wrapped call counts as a failure, which also frees a half-open probe slot, before it propagates (with `WithRecover`, the panic is already an error at that point). Used on its own, `cb.Acquire()` returns a `CircuitPermit`; report the outcome with `permit.Done(elapsed, outcome)`. `Allow` and `Record` keep their behaviour, but they are not tied to an admission.
+
 ### Rate Limiter
 
 Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token.
@@ -1459,6 +1475,7 @@ go run ./examples/40-slo-governor/
 go run ./examples/41-codel-queue/
 go run ./examples/42-nested-retry-budget/
 go run ./examples/43-deadline-propagation-cross-service/
+go run ./examples/44-circuit-breaker-classifier/
 ```
 
 ## License

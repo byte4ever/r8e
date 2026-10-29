@@ -325,6 +325,22 @@ r8e.WithCircuitBreaker(
 )
 ```
 
+**Classifier des résultats (opt-in).** Par défaut, toute erreur non nil compte comme un échec et une erreur nil comme un succès. `CircuitBreakerClassifier(fn)` vous laisse décider : `fn(ctx, err)` renvoie `OutcomeSuccess`, `OutcomeFailure` ou `OutcomeNeutral`, et l'appelant reçoit toujours la vraie erreur. Un appel neutre ne touche ni au compteur d'échecs ni à la fenêtre des appels lents. En half-open, il libère la sonde sans rien compter, et l'appel suivant peut sonder tout de suite. `CallerCancellationIsNeutral` rend neutre un appel terminé par le contexte de son appelant, y compris une annulation qui porte une cause (`context.WithCancelCause`, comme le fait errgroup), et `IsCallerCancellation(ctx, err)` permet d'écrire votre propre classifier. Une deadline posée par r8e n'est jamais une annulation de l'appelant : un timeout `WithTimeout`, un `PerAttemptTimeout` de retry d'une policy englobante, ou une deadline de `WithTimeBudget` posée avec `PropagateDeadline` qui tombe avant celle de l'appelant. Un downstream bloqué ouvre donc toujours le breaker, à condition qu'une deadline de r8e coupe l'appel avant que l'appelant abandonne. Gardez un `WithTimeout` plus court que les deadlines de vos appelants. Le classifier est appelé en concurrence : il doit le supporter. Avec `WithTimeout`, il peut tourner après que `Do` a renvoyé `ErrTimeout`. Voir [`examples/44-circuit-breaker-classifier`](examples/44-circuit-breaker-classifier).
+
+```go
+r8e.WithCircuitBreaker(
+    r8e.FailureThreshold(5),
+    r8e.CircuitBreakerClassifier(func(ctx context.Context, err error) r8e.Outcome {
+        if errors.Is(err, errNotFound) {
+            return r8e.OutcomeNeutral // réponse métier : le downstream répond
+        }
+        return r8e.CallerCancellationIsNeutral(ctx, err)
+    }),
+)
+```
+
+**Admissions et résultats périmés.** La policy rattache chaque résultat à l'admission dont il vient. Le résultat d'un appel admis avant la dernière ouverture du breaker, ou avant son dernier passage en half-open, est ignoré. Un appel lent qui dure plus longtemps que le recovery timeout ne peut donc ni fermer ni rouvrir le breaker pendant qu'une sonde est en vol. Une panique dans l'appel protégé compte comme un échec, ce qui libère aussi une sonde half-open, puis elle se propage (avec `WithRecover`, la panique est déjà une erreur à ce stade). Sans policy, `cb.Acquire()` renvoie un `CircuitPermit`, et `permit.Done(elapsed, outcome)` rapporte le résultat. `Allow` et `Record` gardent leur comportement, mais ils ne sont pas liés à une admission.
+
 ### Rate Limiter
 
 Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton.
@@ -1486,6 +1502,7 @@ go run ./examples/40-slo-governor/
 go run ./examples/41-codel-queue/
 go run ./examples/42-nested-retry-budget/
 go run ./examples/43-deadline-propagation-cross-service/
+go run ./examples/44-circuit-breaker-classifier/
 ```
 
 ## Licence
