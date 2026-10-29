@@ -64,6 +64,10 @@ type (
 		done     chan struct{}
 		deadline time.Time
 		mu       sync.Mutex
+		// ownDeadline is true when the budget deadline is earlier than the
+		// parent's, so it is a deadline r8e set rather than one it adopted
+		// from the parent (see RespectInboundDeadline).
+		ownDeadline bool
 	}
 )
 
@@ -213,15 +217,21 @@ func newBudgetDeadlineCtx(
 ) (*budgetDeadlineCtx, context.CancelFunc) {
 	// Honor the tighter of our budget deadline and any parent deadline, so a
 	// downstream callee reads the soonest bound (mirrors context.WithDeadline).
+	// A budget that does not end strictly before the parent ends on the
+	// parent's deadline, so it is not the budget's own.
 	effective := deadline
-	if pd, ok := parent.Deadline(); ok && pd.Before(effective) {
+	ownDeadline := true
+
+	if pd, ok := parent.Deadline(); ok && !deadline.Before(pd) {
 		effective = pd
+		ownDeadline = false
 	}
 
 	bctx := &budgetDeadlineCtx{
-		parent:   parent,
-		done:     make(chan struct{}),
-		deadline: effective,
+		parent:      parent,
+		done:        make(chan struct{}),
+		deadline:    effective,
+		ownDeadline: ownDeadline,
 	}
 
 	cancel := func() { bctx.cancel(context.Canceled) }
@@ -300,7 +310,13 @@ func (c *budgetDeadlineCtx) Err() error {
 }
 
 // Value delegates to the parent, preserving the cooperative time-budget value
-// and any other request-scoped values for the inner chain.
+// and any other request-scoped values for the inner chain. The one exception is
+// policyDeadlineKey: a budget whose deadline is its own answers it with that
+// deadline, so IsCallerCancellation recognises it as r8e's (see withPolicyTimeout).
 func (c *budgetDeadlineCtx) Value(key any) any {
+	if _, ok := key.(policyDeadlineKey); ok && c.ownDeadline {
+		return c.deadline
+	}
+
 	return c.parent.Value(key)
 }

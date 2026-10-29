@@ -217,8 +217,46 @@ re-opens. Tune with `r8e.SlowCallWindow(n)` (default 100) and
 `SlowCallRateThreshold` must be set together, else `ErrSlowCallConfigIncomplete`;
 `SlowCallWindow`, `SlowCallMinCalls`). Observability: `OnSlowCallRateExceeded`
 hook, `SlowCallRateExceeded` counter, `SlowCallRate` gauge. Standalone:
-`cb.Record(elapsed, err)` (latency-aware; `RecordSuccess`/`RecordFailure` treat
-the call as fast).
+prefer `permit, err := cb.Acquire()` then `permit.Done(elapsed, outcome)`;
+`cb.Allow()` + `cb.Record(elapsed, err)` still work (latency-aware;
+`RecordSuccess`/`RecordFailure` treat the call as fast) but are not tied to an
+admission.
+
+**Outcome classifier** (opt-in): `r8e.CircuitBreakerClassifier(fn)` with
+`fn func(ctx context.Context, err error) r8e.Outcome` returning
+`r8e.OutcomeSuccess`, `r8e.OutcomeFailure` or `r8e.OutcomeNeutral`. Default (no
+option, or nil): nil error = success, any other error = failure, exactly as
+before. The caller always gets the real error, so do NOT rewrite errors or carry
+results through a side channel to steer the breaker. Neutral = no effect on the
+failure counter or the slow-call window; in half-open it frees the probe slot
+without counting. `r8e.CallerCancellationIsNeutral` (ready-made) makes a call
+ended by the caller's context neutral, including a cancellation that carries a
+cause (`context.WithCancelCause`, errgroup; net/http returns the cause); compose
+your own with `r8e.IsCallerCancellation(ctx, err)`, e.g. to also make a business
+404 neutral. A deadline r8e set is never a caller cancellation: `WithTimeout`
+(this or an enclosing policy), an enclosing retry's `PerAttemptTimeout`, and a
+`WithTimeBudget` + `PropagateDeadline` deadline that ends before the caller's
+own (a budget that `RespectInboundDeadline` tightened to an existing deadline
+is attributed to whoever set it: the caller, or an r8e `WithTimeout`). Each
+binding r8e deadline records its instant in the context, and a non-binding one
+records nothing; a call counts as r8e's only if its context's deadline equals
+the innermost recorded instant. So a caller deadline set below a later r8e
+deadline stays the caller's, and so does one set under `context.WithoutCancel`
+below an r8e deadline, unless it falls exactly on the innermost recorded
+instant. A hanging downstream therefore opens the breaker only when an r8e
+deadline ends the call first: keep `WithTimeout` shorter than the callers'
+deadlines. `ctx.Err()` and `context.Cause` are unchanged. The classifier is called concurrently (must be safe for concurrent
+use) and, with `WithTimeout`, may run after `Do` returned `ErrTimeout`. The zero
+`Outcome` is not a named outcome and counts as a failure; `Outcome` implements
+`String()`. Code-only (not in `CircuitBreakerConfig`). Example:
+`examples/44-circuit-breaker-classifier`.
+
+**Admissions**: the policy middleware uses `Acquire`/`Done`, so an outcome from
+a call admitted before the breaker last opened or entered half-open is ignored
+(a slow call outliving the recovery timeout cannot close or reopen the breaker),
+and only a half-open probe frees a probe slot. A panic in the inner chain (no
+`WithRecover`) counts as a failure before propagating. `CircuitPermit.Done` is
+idempotent and a no-op on the zero permit returned with an `Acquire` error.
 
 **Adaptive recovery backoff** (opt-in, default disabled): after each failed
 half-open probe, the next recovery wait is `recoveryTimeout × factor^n` where
@@ -790,7 +828,7 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/40-slo-governor`.
+Examples: `examples/01-quickstart` through `examples/44-circuit-breaker-classifier`.
 
 ## Conventions: every feature ships with a documented example (mandatory)
 

@@ -254,6 +254,12 @@ func WithHooks(h *Hooks) Option {
 
 // WithRegistry sets an explicit registry for the policy to register with.
 // If not provided, named policies auto-register with DefaultRegistry.
+//
+// A registry never removes a policy and accepts duplicate names, so
+// [DefaultRegistry] keeps every named policy built without this option for
+// the life of the process. A service that builds named policies repeatedly
+// (per request, per job, in tests) should use an empty name, or pass a
+// registry that it drops together with those policies.
 func WithRegistry(reg *Registry) Option {
 	return optionFunc(func(s *policySetup) {
 		s.registry = reg
@@ -377,6 +383,18 @@ func WithSharedConcurrencyBudget(budget *ConcurrencyBudget) Option {
 
 // WithCircuitBreaker adds a circuit breaker that fast-fails when the downstream
 // is unhealthy.
+//
+// Each admitted call reports one outcome, tied to its admission (see
+// [CircuitBreaker.Acquire]): an outcome from a call admitted before the
+// breaker last opened or entered half-open is ignored. By default a nil error
+// is a success and any other error a failure; [CircuitBreakerClassifier]
+// changes that, and the caller always receives the call's real error. A panic
+// in the inner chain counts as a failure before it propagates.
+//
+// The outcome is recorded when the inner chain returns. With [WithTimeout],
+// which sits outside the breaker, the timeout can return [ErrTimeout] to the
+// caller first: the breaker then records the call, and fires any hook the
+// recording triggers, after [Policy.Do] has returned.
 func WithCircuitBreaker(opts ...CircuitBreakerOption) Option {
 	return optionFunc(func(s *policySetup) {
 		s.circuitBreaker = &circuitBreakerDesc{opts: opts}
@@ -630,7 +648,8 @@ func WithReadinessImpact() Option {
 // NewPolicy creates a new [Policy] with the given name and options. Each
 // configured pattern contributes a middleware; patterns are auto-sorted by
 // priority via [SortPatterns] before chaining. A named policy auto-registers
-// with its registry (or [DefaultRegistry] if none is given).
+// with its registry (or [DefaultRegistry] if none is given), which never
+// removes it; see [WithRegistry] before building named policies repeatedly.
 func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	var setup policySetup
 	for _, opt := range opts {
@@ -1051,7 +1070,8 @@ func newCircuitBreakerEntry[T any](cb *CircuitBreaker) PatternEntry[T] {
 		Name:     "circuit_breaker",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				if err := cb.Allow(); err != nil {
+				adm, err := cb.admitWithClassifier()
+				if err != nil {
 					var zero T
 
 					return zero, err //nolint:wrapcheck // circuit breaker error returned as-is
@@ -1062,8 +1082,15 @@ func newCircuitBreakerEntry[T any](cb *CircuitBreaker) PatternEntry[T] {
 				// the work the breaker wraps — including inner retry/hedge — the
 				// same granularity at which it records success and failure.
 				start := cb.clock.Now()
+
+				// A panic in next or in the classifier skips the assignment
+				// below, so the deferred Done records a failure, which also
+				// frees a half-open probe slot, while the panic unwinds.
+				outcome := OutcomeFailure
+				defer func() { adm.permit.Done(cb.clock.Since(start), outcome) }()
+
 				val, err := next(ctx)
-				cb.Record(cb.clock.Since(start), err)
+				outcome = adm.classify(ctx, err)
 
 				return val, err //nolint:wrapcheck // caller's error returned as-is
 			}
