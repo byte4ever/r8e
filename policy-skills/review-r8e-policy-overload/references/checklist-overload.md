@@ -14,6 +14,31 @@ Per-category checks for the policy's overload controls. Each check is phrased so
 - [ ] Is the threshold a *stated* fit to traffic, or an unverified default?
       (default `FailureThreshold(5)` is plausible but UNKNOWN until checked.)
 
+## Outcome classification (what the breaker counts)
+
+- [ ] Do errors that say nothing about the dependency's health reach the
+      breaker: business / `Permanent` `4xx` in the error taxonomy, or caller
+      cancellations (the call runs under a request context the caller can
+      cancel)? With no `CircuitBreakerClassifier`, each counts as a failure, and
+      a run of `FailureThreshold` of them opens the breaker on a healthy
+      dependency.
+- [ ] Does the policy have a rate limiter, bulkhead or adaptive concurrency? They
+      run INSIDE the breaker, so their rejections (`ErrRateLimited`,
+      `ErrBulkheadFull`, `ErrBulkheadTimeout`, `ErrCoDelShed`,
+      `ErrConcurrencyLimited`) reach it as failures though the call never left
+      the process. A burst past the bulkhead's size opens the breaker on a
+      healthy dependency unless the classifier makes those sentinels neutral.
+- [ ] Is the classifier right? Business / `Permanent` errors and caller
+      cancellations → `OutcomeNeutral` (or success); genuine downstream faults and
+      r8e deadlines → failure. A classifier that makes `5xx` or every error
+      neutral blinds the breaker.
+- [ ] With caller cancellations neutral (`CallerCancellationIsNeutral` or
+      `IsCallerCancellation`), does an r8e deadline (`WithTimeout`,
+      `PerAttemptTimeout`, a `PropagateDeadline` budget) end a hanging call before
+      the callers give up? If the callers' deadline is shorter, or unknown, a
+      hanging dependency ends as neutral caller cancellations: it never opens the
+      breaker, and `SlowCallRate` never sees it either.
+
 ## Recovery sizing
 
 - [ ] Is `RecoveryTimeout` shorter than the downstream's real recovery time → the

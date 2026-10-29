@@ -19,7 +19,7 @@ target service together*, and the authoring skill **interrogates the service**
 | `review-r8e-policy-call` | Axis: the protected function inside `Do` — idempotency, side effects, retry/hedge safety, ctx honoring, resource cleanup, real error taxonomy. | `review-go-concurrency` |
 | `review-r8e-policy-timeouts` | Axis: deadlines & latency — timeout vs p99, time budget, deadline propagation, adaptive timeout, hedge delay, unbounded-latency hazards. | per-aspect |
 | `review-r8e-policy-retry` | Axis: retry & amplification — strategy/backoff, retry & concurrency budgets, retry-after, error classification, retry of non-idempotent ops. | per-aspect |
-| `review-r8e-policy-overload` | Axis: overload protection & shedding — circuit breaker, bulkhead/adaptive concurrency, rate limit, throttle, SLO governor, metastable failure. | per-aspect |
+| `review-r8e-policy-overload` | Axis: overload protection & shedding — circuit breaker (incl. what it counts: outcome classifier), bulkhead/adaptive concurrency, rate limit, throttle, SLO governor, metastable failure. | per-aspect |
 | `review-r8e-policy-fallback` | Axis: degradation & data correctness — fallback safety, cache/coalesce key correctness, ttl, stale-if-error, negative cache, refresh-ahead. | per-aspect |
 | `review-r8e-policy-observability` | Axis: ops — hooks/metrics tied to failure modes, health/readiness impact, naming/registry, config-vs-code & hot reload, chaos kill-switch, OTel. | per-aspect |
 
@@ -55,6 +55,7 @@ against. The single source of truth is [`VERSIONS.json`](VERSIONS.json):
 | skill_version | r8e | otter | ristretto | r8eotel |
 |---|---|---|---|---|
 | `1.0.0` | `v0.10.0` | `v0.10.0` | `v0.10.0` | `v0.10.0` |
+| `1.1.0` | `v0.11.0` | `v0.11.0` | `v0.11.0` | `v0.11.0` |
 
 Releases are tagged `policy-skills/v<skill_version>` with a self-contained tarball
 asset. The authoring skill always proposes r8e **at the pinned version** so your
@@ -86,7 +87,7 @@ Windows (PowerShell):
 bundled script:
 
 ```bash
-ver=1.0.0
+ver=1.1.0
 curl -fsSL -o ps.tgz \
   "https://github.com/byte4ever/r8e/releases/download/policy-skills/v${ver}/policy-skills-v${ver}.tar.gz"
 tar -xzf ps.tgz && ./policy-skills/install.sh

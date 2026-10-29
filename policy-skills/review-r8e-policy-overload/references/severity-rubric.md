@@ -52,6 +52,28 @@ doubt between two levels, the one with a concrete propagation path wins.
 4. **Burst goes to unbounded wait.** `BulkheadMaxWait` set very long (or queue
    discipline absent) so a burst queues for seconds instead of fast-rejecting.
    Acceptable if the caller tolerates the wait; otherwise prefer reject / CoDel.
+5. **Breaker counts errors that say nothing about the dependency's health.** The
+   artifact shows such errors reaching a breaker whose classifier (or lack of
+   one) counts them: business / `Permanent` errors in the taxonomy (`404
+   not_found`, validation `4xx`), caller cancellations, or the rejections of a
+   rate limiter / bulkhead / adaptive concurrency inside the breaker
+   (`ErrBulkheadFull` and the like). Propagation: each counts as a failure;
+   `FailureThreshold` consecutive ones (a client probing missing ids, an upstream
+   redeploy cancelling its in-flight calls, a burst past the bulkhead's size)
+   open the breaker, which then fences off a healthy dependency for
+   `RecoveryTimeout`. Remediation: `CircuitBreakerClassifier` with those errors
+   neutral, e.g. `IsPermanent(err)` or `errors.Is(err, ErrBulkheadFull)` →
+   `OutcomeNeutral`, else `CallerCancellationIsNeutral(ctx, err)`. Accepted only
+   with the risk documented. Scope: requires the artifact to show such errors
+   exist; when nothing does, an absent classifier is NOTED #5.
+6. **Neutral caller cancellations with no shorter r8e deadline.** The classifier
+   makes caller cancellations neutral, and no r8e deadline in view (`WithTimeout`,
+   `PerAttemptTimeout`, a `PropagateDeadline` budget) is shorter than the
+   callers'. Propagation: a hanging dependency is ended by the callers' deadline,
+   every such call is neutral, the breaker never opens, and `SlowCallRate` never
+   sees those calls. Remediation: a `WithTimeout` below the callers' deadline.
+   When the callers' deadline is UNKNOWN, the finding is "confirm it is above the
+   r8e deadline".
 
 ## NOTED — observation for awareness, no action required
 
@@ -63,6 +85,9 @@ doubt between two levels, the one with a concrete propagation path wins.
    the *budget tuning* is the retry axis's, note and defer.
 4. Sheddability tiers are absent but all traffic here is single-tier — no `Never`
    traffic to protect.
+5. The breaker has no `CircuitBreakerClassifier`, but nothing in the context shows
+   business errors or caller cancellations reaching it — the default counting
+   fits; note the option for when such errors appear.
 
 ## Anti-calibration (do NOT do this)
 
@@ -73,3 +98,8 @@ doubt between two levels, the one with a concrete propagation path wins.
   with no amplification path — at most IMPORTANT, often NOTED.
 - Marking IMPORTANT for "could add a breaker" with no overload/brownout path — that
   is at most NOTED.
+- Calling an absent or loose `CircuitBreakerClassifier` BLOCKING: the spurious
+  trip needs a run of consecutive errors the artifact cannot demonstrate — it is
+  IMPORTANT #5 at most. Exception: a classifier that makes EVERY error neutral
+  leaves no fast-fail path; score it as an absent breaker (BLOCKING #1 when its
+  scope holds).

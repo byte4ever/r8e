@@ -11,10 +11,14 @@ dismissable in writing). The positive anchor for calibration.
 - **Target**: internal recommendations service, `GET /recommend?user={id}`.
 - **Operation**: read-only, **idempotent**, no side effects. Safe to retry and to
   hedge.
-- **Error taxonomy**: classified at the call boundary — `4xx` marked
-  `r8e.Permanent`, `5xx`/timeouts left transient (the r8e default), `429` carries
-  a `Retry-After` header honored automatically.
+- **Error taxonomy**: classified at the call boundary — `4xx` other than `429`
+  marked `r8e.Permanent`, `5xx`/timeouts left transient (the r8e default). A
+  `429` carries a `Retry-After` of at least 1 s (its error implements
+  `r8e.RetryAfterProvider`); no other response carries one.
 - **Latency**: p50 ≈ 30 ms, p99 ≈ 80 ms. Budget for this call: 300 ms.
+- **Callers**: the call runs under the inbound HTTP request's context, which the
+  client can cancel (page navigated away) and which carries a 1 s deadline set by
+  the edge proxy — above this call's 300 ms budget.
 - **Criticality**: best-effort. An **empty** recommendations list is an
   explicitly acceptable degraded experience (documented product decision) — the
   page renders without the rail.
@@ -32,9 +36,15 @@ dismissable in writing). The positive anchor for calibration.
 policy := r8e.NewPolicy[[]Item]("recommend-read",
     // Hard ceiling ≈ p99 (80 ms) × generous headroom; bounds retry + the whole call.
     r8e.WithTimeout(300*time.Millisecond),
-    // Idempotent read → bounded retries with jittered backoff, capped.
+    // Idempotent read → bounded retries with jittered backoff, capped. A 429
+    // asks for ≥ 1 s, which never fits the 300 ms budget, and MaxDelay would
+    // cut its Retry-After short: do not re-send it early, fail to the empty rail.
     r8e.WithRetry(3, r8e.ExponentialJitterBackoff(20*time.Millisecond),
-        r8e.MaxDelay(150*time.Millisecond)),
+        r8e.MaxDelay(150*time.Millisecond),
+        r8e.RetryIf(func(err error) bool {
+            var throttled r8e.RetryAfterProvider
+            return !errors.As(err, &throttled)
+        })),
     // Gate retries against a token bucket so a partial outage can't amplify load.
     r8e.WithRetryBudget(r8e.MaxTokens(10), r8e.TokenRatio(0.1)),
     // Trip on failures AND on a brownout (slow-but-200), recover gently.
@@ -42,6 +52,18 @@ policy := r8e.NewPolicy[[]Item]("recommend-read",
         r8e.FailureThreshold(5),
         r8e.RecoveryTimeout(10*time.Second),
         r8e.SlowCallRate(150*time.Millisecond, 0.5),
+        // Count only what says the recommender is unwell: a permanent 4xx is
+        // its normal answer, our own bulkhead's rejection never reached it,
+        // and a caller that gives up says nothing about it. A 429 still
+        // counts, so sustained throttling opens the breaker and backs off.
+        // The 300 ms WithTimeout ends a hanging call before the 1 s request
+        // deadline, so a hang still counts as a failure.
+        r8e.CircuitBreakerClassifier(func(ctx context.Context, err error) r8e.Outcome {
+            if r8e.IsPermanent(err) || errors.Is(err, r8e.ErrBulkheadFull) {
+                return r8e.OutcomeNeutral
+            }
+            return r8e.CallerCancellationIsNeutral(ctx, err)
+        }),
     ),
     // Sized to the downstream connection pool, not guessed.
     r8e.WithBulkhead(32),

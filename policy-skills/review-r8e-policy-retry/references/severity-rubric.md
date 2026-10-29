@@ -45,6 +45,14 @@ doubt between two levels, the one with a concrete propagation path wins.
 4. **No `MaxDelay` cap.** Unbounded exponential growth could push a late attempt's
    wait toward the budget edge. Acceptable if `maxAttempts` is small enough that
    the cap never binds — show the arithmetic.
+5. **Retry-After cut short by `MaxDelay` or the deadline.** The dependency sends
+   `429 Retry-After: 1s` (or more), and `MaxDelay(150ms)` caps the hint, or the
+   time left under the deadline is shorter. Propagation: the retry re-sends after
+   150 ms, into an explicit "back off", from every replica at about the same
+   time. Less severe than BLOCKING #4 when a retry budget caps the total, but
+   still a retry against the server's own signal. Remediation: do not retry
+   errors that carry a hint above the cap (`RetryIf` on `RetryAfterProvider`),
+   or raise `MaxDelay` and the budget so the hint fits.
 
 ## NOTED — observation for awareness, no action required
 

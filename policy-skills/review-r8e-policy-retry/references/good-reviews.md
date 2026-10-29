@@ -186,22 +186,26 @@ FINAL VERDICT: CONDITIONAL APPROVE
    wait cannot balloon past the budget.
 5. `PerAttemptTimeout`: not set, but `WithTimeout(300ms)` bounds the whole call
    (sizing is the timeouts axis; here it confirms the retry schedule fits).
-6. Service taxonomy: `4xx` permanent, `5xx`/timeouts transient, `429` carries
-   Retry-After.
-7. Classification: `4xx` marked `r8e.Permanent` → permanent errors fast-fail, no
-   wasted attempts. The default-transient trap does NOT fire.
+6. Service taxonomy: `4xx` other than `429` permanent, `5xx`/timeouts transient,
+   `429` carries a Retry-After of at least 1 s — the only error with a hint.
+7. Classification: `4xx` (not `429`) marked `r8e.Permanent` → permanent errors
+   fast-fail, no wasted attempts. The default-transient trap does NOT fire, and
+   the taxonomy does not contradict itself (the throttle is not `Permanent`).
 8. Dependency is SHARED ("internal service shared across the fleet").
 9. Retry budget: `WithRetryBudget(MaxTokens(10), TokenRatio(0.1))` present → caps
    aggregate retry pressure on the shared dep → no storm.
 10. Concurrency budget: not separately set, but a `WithBulkhead(32)` sized to the
     connection pool bounds in-flight load (overload axis's lane; here it confirms
     fan-out is capped).
-11. Retry-After: `429` honored automatically via the classified boundary
-    (`RetryAfterProvider`) → no throttle stampede.
+11. Retry-After: a `429` asks for ≥ 1 s; `MaxDelay(150ms)` would cut that short
+    and the 300 ms budget could not fit it anyway. `RetryIf` refuses to retry any
+    `RetryAfterProvider` error → the `429` is not re-sent early; it fails to the
+    empty rail. No retry against the server's "back off".
 12. Worst-case attempts vs budget: 3 attempts, capped backoff ≤150ms each, p99
     80ms, all under the 300ms `WithTimeout` → the schedule fits.
 13. This is a read → no write side effect to amplify.
-14. `RetryIf`: not needed — `Permanent` classification at the boundary covers it.
+14. `RetryIf`: present, and narrow — it only drops errors that carry a
+    Retry-After; `Permanent` classification at the boundary covers the rest.
 15. First-attempt handling: a permanent `4xx` fast-fails on attempt 1 (classified);
     transients retry within budget.
 
@@ -215,16 +219,18 @@ FINAL VERDICT: CONDITIONAL APPROVE
 - **Synchronized waves?** Trigger: a cohort fails together. Propagation:
   `ExponentialJitterBackoff` desynchronizes them. Symptom: spread-out retries, no
   herd. Does not fail.
-- **429 throttle.** Trigger: server `429 Retry-After`. Propagation: honored
-  automatically → the client waits as instructed. Symptom: backed-off retry. Does
-  not fail.
+- **429 throttle.** Trigger: server `429 Retry-After: 1s`. Propagation:
+  `RetryIf` refuses the retry (the hint cannot fit `MaxDelay` or the budget) →
+  one attempt, then the empty fallback. Symptom: no early re-send into the
+  throttle. Does not fail.
 - **Budget overrun.** Trigger: repeated transients. Propagation: 3 attempts,
   `MaxDelay(150ms)` cap, p99 80ms, all under `WithTimeout(300ms)`. Symptom:
   worst-case fits the deadline. Does not fail.
 Fewer than 5 *failing* scenarios are findable: the retry is bounded
 (3 attempts), jittered + capped (no synchronization), budget-gated (no storm),
-classified (no wasted permanent retries), and Retry-After-honoring (no
-stampede) — its amplification surface is structurally bounded.
+classified (no wasted permanent retries), and never retries a throttle it
+cannot wait out (no stampede) — its amplification surface is structurally
+bounded.
 
 ### Phase 3 — Scoring
 - BLOCKING: none.
@@ -239,13 +245,14 @@ scenario is dismissable in writing. **APPROVE.**
 ### Phase 5 — Meta-critique
 1. Most likely leniency: rubber-stamping because the context says "good." I
    re-derived bounded-ness from the config: jitter + cap (no waves), budget (no
-   storm), `Permanent` classification (no wasted retries), Retry-After honored —
-   not from the label.
+   storm), `Permanent` classification (no wasted retries), throttles not retried
+   early (`RetryIf` on `RetryAfterProvider`, since `MaxDelay` caps a hint) — not
+   from the label.
 2. Under-examined: whether the recommender client retries internally (nesting
    would multiply attempts) — the context shows a single typed call with no
    internal guard, so no compounding is evident; I would reopen on new evidence.
 3. To a REJECT reviewer: name the amplification path. There is none — the retry is
-   jittered, capped, budget-gated, classified, and Retry-After-aware on an
+   jittered, capped, budget-gated, classified, and throttle-aware on an
    idempotent read; re-running it within a drained token budget changes nothing on
    the shared dependency.
 

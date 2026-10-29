@@ -129,7 +129,10 @@ here; do not dismiss an observation as "probably not serious."
   replica amplifies retries fleet-wide.
 - Concurrency budget (`WithConcurrencyBudget`) capping in-flight retries+hedges.
 - Retry-After honoring (429/503): does the error implement `RetryAfterProvider`
-  (httpx `StatusError`), or is a fixed backoff ignoring the server's signal?
+  (httpx `StatusError`), or is a fixed backoff ignoring the server's signal? Do
+  the hints fit under `MaxDelay` and the deadline (`MaxDelay` caps a hint, so a
+  capped one re-sends early)? Is a `429` marked `Permanent` while its
+  Retry-After is expected to be honored?
 - httpx adapter used so 429/503 carry Retry-After and 4xx classify Permanent?
 - Retry count vs latency budget: worst-case sum of attempts + backoff vs the
   call's deadline / SLA. A 5× ConstantBackoff(200ms) can blow a 500ms budget.

@@ -56,8 +56,11 @@ by axis, each with the concrete answer options and **what the answer changes**.
 2. **Is this dependency shared by many callers / the whole fleet?**
    - Yes → add a retry budget (storm protection).
    - No / dedicated → a plain retry may be fine.
-3. **Does the service emit `Retry-After` / 429 throttling?**
-   - Yes → honored automatically (httpx) — confirm the adapter is used.
+3. **Does the service emit `Retry-After` / 429 throttling, and how long are the
+   hints?**
+   - Yes → honored automatically (httpx) — confirm the adapter is used. If the
+     hints exceed `MaxDelay` or the budget, do not retry them (`RetryIf`):
+     `MaxDelay` caps a hint, so a capped one re-sends early.
 4. **How many retries can the upstream latency budget actually afford?**
    → caps `maxAttempts` and `MaxDelay`.
 
@@ -75,6 +78,14 @@ by axis, each with the concrete answer options and **what the answer changes**.
 4. **Is there a hard external rate quota?** → `WithRateLimit`.
 5. **Do you have an explicit SLO for this path, and traffic tiers that can be
    shed?** → `WithSLO` / `WithAdaptiveThrottle` + `Sheddability`.
+6. **Which errors are the service's normal answer rather than a sign it is
+   unwell (not-found, validation, business refusals)? Can the callers cancel
+   the call, and what deadline do they set?**
+   - Such errors exist, or callers cancel → `CircuitBreakerClassifier`: those
+     errors and caller cancellations are neutral for the breaker
+     (`CallerCancellationIsNeutral`), and `WithTimeout` stays shorter than the
+     callers' deadline so a hang still trips it.
+   - Neither → the default breaker counting is right.
 
 ## Axis 5 — fallback / cache
 
