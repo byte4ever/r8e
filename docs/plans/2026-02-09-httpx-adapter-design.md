@@ -1,5 +1,8 @@
 # httpx — Resilient HTTP Client Adapter
 
+> **Historical document.** The Go coding rules in this document no longer apply.
+> Go rules come from the go-skills plugin, and `.golangci.yaml` settles mechanical lint questions.
+
 ## Problem
 
 Using r8e with HTTP calls requires boilerplate: wrapping `http.Client.Do` into a

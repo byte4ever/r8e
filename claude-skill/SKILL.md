@@ -802,8 +802,8 @@ hard gate, not a follow-up. For each new feature provide:
   number) containing **three** files: `main.go`, `README.md`, `README.fr.md`.
 - `main.go` with rich **"why" comments**: a header paragraph stating the problem
   the feature solves (not just the API call), and inline comments explaining the
-  intent at each step. Match the comment density of the sibling examples (~30% of
-  lines). It must compile, `go vet` clean, and run with stable, readable output.
+  intent at each step. It must compile, `go vet` clean, and run with stable,
+  readable output.
 - Bilingual READMEs on the **house template** (mirror `examples/07-hedge`):
   intro → `## What it demonstrates` → `## How it works` (a mermaid diagram when
   it clarifies the flow) → `## Key concepts` (a table) → `## When to use` →

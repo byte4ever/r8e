@@ -1,5 +1,8 @@
 # httpx Adapter Implementation Plan
 
+> **Historical document.** The Go coding rules in this document no longer apply.
+> Go rules come from the go-skills plugin, and `.golangci.yaml` settles mechanical lint questions.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans
 > to implement this plan task-by-task.
 
