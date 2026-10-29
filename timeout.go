@@ -58,6 +58,15 @@ type (
 		*windowedPercentile
 		cfg atomic.Pointer[adaptiveTimeoutConfig]
 	}
+
+	// policyDeadlineKey is the context key under which r8e records the instant of
+	// a deadline it set and that binds, that is, earlier than any deadline the
+	// context already had. withPolicyTimeout sets it for DoTimeout and the
+	// per-attempt retry timeout, and budgetDeadlineCtx answers it for a hard time
+	// budget. IsCallerCancellation counts a deadline as r8e's only when
+	// ctx.Deadline() equals it, two facts fixed when each context is created, so
+	// a writer must store the instant its context's Deadline reports.
+	policyDeadlineKey struct{}
 )
 
 const (
@@ -79,6 +88,11 @@ const (
 // DoTimeout executes fn with a timeout. If fn does not complete within d,
 // the context is cancelled and ErrTimeout is returned.
 //
+// The context passed to fn records this deadline as r8e's own when it is
+// earlier than any deadline ctx already has, which is how
+// [IsCallerCancellation] tells it from the caller's. Its Err and
+// [context.Cause] are those of any context.WithTimeout context.
+//
 //nolint:ireturn // generic type parameter T, not an interface
 func DoTimeout[T any](
 	ctx context.Context,
@@ -94,7 +108,7 @@ func DoTimeout[T any](
 	}
 
 	// Create derived context with timeout.
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	timeoutCtx, cancel := withPolicyTimeout(ctx, timeout)
 	defer cancel()
 
 	// Run fn in a goroutine and collect result via channel.
@@ -125,6 +139,26 @@ func DoTimeout[T any](
 
 		return zero, ErrTimeout
 	}
+}
+
+// withPolicyTimeout derives a context.WithTimeout context for a timeout r8e
+// sets. When that timeout binds, being earlier than any deadline ctx already
+// has, the derived context also records its deadline under policyDeadlineKey.
+// A timeout that does not bind leaves the recorded deadline to whoever set the
+// earlier one. The recorded instant is the one timeoutCtx.Deadline() reports,
+// not a second clock read: IsCallerCancellation requires the two to be equal.
+func withPolicyTimeout(
+	ctx context.Context,
+	timeout time.Duration,
+) (context.Context, context.CancelFunc) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+
+	deadline, _ := timeoutCtx.Deadline() // always set by WithTimeout
+	if parentDeadline, ok := ctx.Deadline(); ok && !deadline.Before(parentDeadline) {
+		return timeoutCtx, cancel
+	}
+
+	return context.WithValue(timeoutCtx, policyDeadlineKey{}, deadline), cancel
 }
 
 // AdaptiveTimeout enables percentile-driven adaptive timeout on a [WithTimeout]

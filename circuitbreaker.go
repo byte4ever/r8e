@@ -1,6 +1,7 @@
 package r8e
 
 import (
+	"context"
 	"math"
 	"math/rand/v2"
 	"sync"
@@ -13,6 +14,10 @@ import (
 
 type (
 	circuitBreakerConfig struct {
+		// classifier maps a call's error to an Outcome in the policy
+		// middleware (see CircuitBreakerClassifier); nil means classifyByError.
+		classifier func(context.Context, error) Outcome
+
 		failureThreshold    int
 		recoveryTimeout     time.Duration
 		halfOpenMaxAttempts int
@@ -98,8 +103,14 @@ type (
 		// from closed state. Guarded by mu.
 		recoveryAttempt int
 
+		// epoch advances each time the breaker enters the open or the
+		// half-open state. A CircuitPermit records the epoch it was admitted
+		// in, and its outcome is ignored once the epoch has moved on. Guarded
+		// by mu.
+		epoch uint64
+
 		mu    sync.Mutex
-		state uint32 // stateClosed | stateOpen | stateHalfOpen
+		state uint32 // stateClosed | stateOpen | stateHalfOpen | stateRamping
 	}
 
 	// slowCallWindow is a count-based sliding window of the most recent slow/fast
@@ -123,12 +134,27 @@ type (
 
 	// callOutcome is a call classified for the state machine: whether it failed
 	// and whether it was slow (its latency exceeded the threshold). Built once in
-	// recordOutcome and never mutated afterwards. Passing it as a struct rather
+	// recordLocked and never mutated afterwards. Passing it as a struct rather
 	// than as separate bool parameters keeps the recordX helpers free of
 	// control-flag coupling.
 	callOutcome struct {
 		failed bool
 		slow   bool
+	}
+
+	// admission is the result of admitLocked for an admitted call: whether it
+	// holds a half-open probe slot, and the lifecycle hook to fire after unlock
+	// (nil when the admission caused no transition).
+	admission struct {
+		emit       func()
+		holdsProbe bool
+	}
+
+	// classifiedAdmission is one admitted call's permit together with the
+	// classifier in force when the call was admitted.
+	classifiedAdmission struct {
+		classify func(context.Context, error) Outcome
+		permit   CircuitPermit
 	}
 )
 
@@ -395,71 +421,40 @@ func (cb *CircuitBreaker) Reconfigure(opts ...CircuitBreakerOption) {
 // closed, or half-open with a probe slot available. Returns ErrCircuitOpen if
 // the breaker is open and the recovery timeout hasn't elapsed, or if half-open
 // already has halfOpenMaxAttempts probes in flight.
-// The state-transition methods capture the lifecycle hook to fire in a local
-// and invoke it AFTER releasing cb.mu, so a user-supplied callback can never
-// run inside the critical section (which would deadlock on re-entry or stall
-// every caller behind a slow hook).
-
+//
+// Allow does not tie the admission to the outcome reported later through
+// [CircuitBreaker.Record]: any recorded outcome applies to the current state,
+// even one from a call admitted before the breaker opened. Prefer
+// [CircuitBreaker.Acquire], whose [CircuitPermit] ignores such stale outcomes.
 func (cb *CircuitBreaker) Allow() error {
+	// The state-transition methods capture the lifecycle hook to fire in a
+	// local and invoke it AFTER releasing cb.mu, so a user-supplied callback
+	// can never run inside the critical section (which would deadlock on
+	// re-entry or stall every caller behind a slow hook).
 	cb.mu.Lock()
-
-	var (
-		emit func()
-		err  error
-	)
-
-	switch cb.state {
-	case stateOpen:
-		if cb.clock.Since(cb.lastFailure) <= cb.currentRecoveryTimeout() {
-			err = ErrCircuitOpen
-
-			break
-		}
-
-		// Recovery timeout elapsed: transition to half-open and admit this
-		// call as the first probe.
-		cb.state = stateHalfOpen
-		cb.halfOpenSuccesses = 0
-		cb.halfOpenInFlight = 1
-		emit = cb.hooks.emitCircuitHalfOpen
-
-	case stateHalfOpen:
-		// Admit at most halfOpenMaxAttempts concurrent probes; reject the rest
-		// so a recovering downstream is not hit by a thundering herd.
-		if cb.halfOpenInFlight >= cb.cfg.halfOpenMaxAttempts {
-			err = ErrCircuitOpen
-
-			break
-		}
-
-		cb.halfOpenInFlight++
-
-	case stateRamping:
-		elapsed := cb.clock.Since(cb.rampStart)
-		if elapsed >= cb.cfg.rampRecoveryWindow {
-			// Ramp window elapsed: recovery is complete — close and admit.
-			emit = cb.closeLocked()
-
-			break
-		}
-
-		// Admit a growing fraction of traffic and shed the rest, so a still-
-		// fragile downstream sees load ramp up rather than spike to full.
-		if cb.sampler() >= cb.rampFractionAt(elapsed) {
-			err = ErrCircuitRamping
-		}
-
-	default:
-		// stateClosed: allow the call.
-	}
-
+	adm, err := cb.admitLocked()
 	cb.mu.Unlock()
 
-	if emit != nil {
-		emit()
+	if adm.emit != nil {
+		adm.emit()
 	}
 
 	return err
+}
+
+// Acquire checks if a call should be allowed, like [CircuitBreaker.Allow], and
+// returns a [CircuitPermit] tied to this admission. Report the call's outcome
+// with [CircuitPermit.Done]. On rejection it returns the zero CircuitPermit and
+// [ErrCircuitOpen], or [ErrCircuitRamping] while ramping (see [RampRecovery]).
+//
+// A permit's outcome only counts if the breaker has not opened or started a
+// new half-open phase since the admission, and only a permit admitted as a
+// half-open probe frees a probe slot. So a slow call admitted before a trip
+// can neither close nor reopen the breaker while a later probe is in flight.
+func (cb *CircuitBreaker) Acquire() (CircuitPermit, error) {
+	adm, err := cb.admitWithClassifier()
+
+	return adm.permit, err
 }
 
 // Record observes a completed call: its latency (measured with the breaker's
@@ -468,6 +463,9 @@ func (cb *CircuitBreaker) Allow() error {
 // into the slow-call-rate trip. Prefer this over [CircuitBreaker.RecordSuccess]
 // / [CircuitBreaker.RecordFailure] when slow-call detection is enabled, so the
 // call's latency is taken into account; those two treat the call as fast.
+//
+// Record is not tied to an admission (see [CircuitBreaker.Allow]); prefer
+// [CircuitBreaker.Acquire] and [CircuitPermit.Done].
 func (cb *CircuitBreaker) Record(elapsed time.Duration, err error) {
 	cb.recordOutcome(callInput{elapsed: elapsed, failed: err != nil})
 }
@@ -475,7 +473,7 @@ func (cb *CircuitBreaker) Record(elapsed time.Duration, err error) {
 // RecordSuccess records a successful call, treated as fast (latency 0). With
 // slow-call detection enabled (see [SlowCallRate]) it records a non-slow verdict
 // regardless of the real latency, so use [CircuitBreaker.Record] for
-// latency-aware recording.
+// latency-aware recording. Like Record, it is not tied to an admission.
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.recordOutcome(callInput{})
 }
@@ -483,43 +481,97 @@ func (cb *CircuitBreaker) RecordSuccess() {
 // RecordFailure records a failed call, treated as fast (latency 0). With
 // slow-call detection enabled (see [SlowCallRate]) it records a non-slow verdict
 // regardless of the real latency, so use [CircuitBreaker.Record] for
-// latency-aware recording.
+// latency-aware recording. Like Record, it is not tied to an admission.
 func (cb *CircuitBreaker) RecordFailure() {
 	cb.recordOutcome(callInput{failed: true})
 }
 
+// admitWithClassifier admits a call and returns its permit together with the
+// classifier in force, both read under the same lock as the admission so the
+// pair stays consistent while Reconfigure swaps the classifier. A nil
+// classifier is replaced by classifyByError. On rejection it returns the zero
+// classifiedAdmission.
+func (cb *CircuitBreaker) admitWithClassifier() (classifiedAdmission, error) {
+	cb.mu.Lock()
+	adm, err := cb.admitLocked()
+	epoch := cb.epoch
+	classify := cb.cfg.classifier
+	cb.mu.Unlock()
+
+	if adm.emit != nil {
+		adm.emit()
+	}
+
+	if err != nil {
+		return classifiedAdmission{}, err
+	}
+
+	if classify == nil {
+		classify = classifyByError
+	}
+
+	return classifiedAdmission{
+		classify: classify,
+		permit:   CircuitPermit{cb: cb, epoch: epoch, holdsProbe: adm.holdsProbe},
+	}, nil
+}
+
+// admitLocked decides whether a call is admitted and applies the resulting
+// transition (see admission). Caller must hold mu.
+func (cb *CircuitBreaker) admitLocked() (admission, error) {
+	switch cb.state {
+	case stateOpen:
+		if cb.clock.Since(cb.lastFailure) <= cb.currentRecoveryTimeout() {
+			return admission{}, ErrCircuitOpen
+		}
+
+		// Recovery timeout elapsed: transition to half-open and admit this
+		// call as the first probe.
+		cb.state = stateHalfOpen
+		cb.epoch++
+		cb.halfOpenSuccesses = 0
+		cb.halfOpenInFlight = 1
+
+		return admission{emit: cb.hooks.emitCircuitHalfOpen, holdsProbe: true}, nil
+
+	case stateHalfOpen:
+		// Admit at most halfOpenMaxAttempts concurrent probes; reject the rest
+		// so a recovering downstream is not hit by a thundering herd.
+		if cb.halfOpenInFlight >= cb.cfg.halfOpenMaxAttempts {
+			return admission{}, ErrCircuitOpen
+		}
+
+		cb.halfOpenInFlight++
+
+		return admission{holdsProbe: true}, nil
+
+	case stateRamping:
+		elapsed := cb.clock.Since(cb.rampStart)
+		if elapsed >= cb.cfg.rampRecoveryWindow {
+			// Ramp window elapsed: recovery is complete — close and admit.
+			return admission{emit: cb.closeLocked()}, nil
+		}
+
+		// Admit a growing fraction of traffic and shed the rest, so a still-
+		// fragile downstream sees load ramp up rather than spike to full.
+		if cb.sampler() >= cb.rampFractionAt(elapsed) {
+			return admission{}, ErrCircuitRamping
+		}
+
+		return admission{}, nil
+
+	default:
+		// stateClosed: allow the call.
+		return admission{}, nil
+	}
+}
+
 // recordOutcome is the single entry point behind Record/RecordSuccess/
-// RecordFailure. It classifies the call (deriving the slow verdict and pushing
-// it into the window), updates the failure counter and any resulting state
-// transition under one lock, then fires the captured lifecycle hook outside the
-// critical section (see Allow).
+// RecordFailure. It applies the call under one lock (see recordLocked), then
+// fires the captured lifecycle hook outside the critical section (see Allow).
 func (cb *CircuitBreaker) recordOutcome(in callInput) {
 	cb.mu.Lock()
-
-	out := callOutcome{failed: in.failed}
-	if cb.slowCallEnabled() {
-		out.slow = in.elapsed > cb.cfg.slowCallDuration
-		cb.slowWin.observe(out, cb.cfg.slowCallWindow)
-	}
-
-	var emit func()
-
-	switch cb.state {
-	case stateClosed:
-		emit = cb.recordClosed(out)
-	case stateHalfOpen:
-		emit = cb.recordHalfOpen(out)
-	case stateRamping:
-		emit = cb.recordRamping(out)
-	default:
-		// stateOpen: a failure recorded while already open drives no transition
-		// but still advances the recovery baseline (the historical contract —
-		// reachable only via a standalone caller, since Allow rejects first).
-		if out.failed {
-			cb.lastFailure = cb.clock.Now()
-		}
-	}
-
+	emit := cb.recordLocked(in)
 	cb.mu.Unlock()
 
 	if emit != nil {
@@ -527,15 +579,89 @@ func (cb *CircuitBreaker) recordOutcome(in callInput) {
 	}
 }
 
-// openLocked transitions the breaker to open: it sets the state, resets the
-// half-open probe counters, and (re)starts the recovery clock from now. It is
-// the sole writer of lastFailure on an open transition (the non-opening failure
-// paths stamp it themselves), and returns the supplied trip hook for the caller
-// to fire after unlock. Callers are responsible for updating recoveryAttempt
-// before calling (recordClosed resets it; recordHalfOpen bumps it via
-// bumpRecoveryAttemptLocked). Caller must hold mu.
+// complete applies the outcome a CircuitPermit reports under one lock (see
+// completeLocked), then fires the captured lifecycle hook outside the critical
+// section (see Allow).
+func (cb *CircuitBreaker) complete(permit *CircuitPermit, elapsed time.Duration, outcome Outcome) {
+	cb.mu.Lock()
+	emit := cb.completeLocked(permit, elapsed, outcome)
+	cb.mu.Unlock()
+
+	if emit != nil {
+		emit()
+	}
+}
+
+// completeLocked applies a permit's outcome and returns the hook to fire after
+// unlock. A permit from an earlier epoch is ignored entirely: its call was
+// admitted before the breaker last opened or entered half-open, so it says
+// nothing about the current recovery. A neutral outcome only frees the probe
+// slot the permit holds. Success and failure go through the same path as
+// Record. Caller must hold mu.
+func (cb *CircuitBreaker) completeLocked(
+	permit *CircuitPermit,
+	elapsed time.Duration,
+	outcome Outcome,
+) func() {
+	if permit.epoch != cb.epoch {
+		return nil
+	}
+
+	switch outcome {
+	case OutcomeNeutral:
+		if permit.holdsProbe && cb.state == stateHalfOpen {
+			cb.releaseProbe()
+		}
+
+		return nil
+	case OutcomeSuccess:
+		return cb.recordLocked(callInput{elapsed: elapsed})
+	default:
+		return cb.recordLocked(callInput{elapsed: elapsed, failed: true})
+	}
+}
+
+// recordLocked classifies a completed call (deriving the slow verdict and
+// pushing it into the window), updates the failure counter and applies any
+// resulting state transition. It returns the hook to fire after unlock. Caller
+// must hold mu.
+func (cb *CircuitBreaker) recordLocked(in callInput) func() {
+	out := callOutcome{failed: in.failed}
+	if cb.slowCallEnabled() {
+		out.slow = in.elapsed > cb.cfg.slowCallDuration
+		cb.slowWin.observe(out, cb.cfg.slowCallWindow)
+	}
+
+	switch cb.state {
+	case stateClosed:
+		return cb.recordClosed(out)
+	case stateHalfOpen:
+		return cb.recordHalfOpen(out)
+	case stateRamping:
+		return cb.recordRamping(out)
+	default:
+		// stateOpen: a failure recorded while already open drives no transition
+		// but still advances the recovery baseline (the historical contract —
+		// reachable only via Record, since a permit from before the trip is
+		// stale and Allow rejects first).
+		if out.failed {
+			cb.lastFailure = cb.clock.Now()
+		}
+
+		return nil
+	}
+}
+
+// openLocked transitions the breaker to open: it sets the state, starts a new
+// epoch, resets the half-open probe counters, and (re)starts the recovery clock
+// from now. It is the sole writer of lastFailure on an open transition (the
+// non-opening failure paths stamp it themselves), and returns the supplied trip
+// hook for the caller to fire after unlock. Callers are responsible for
+// updating recoveryAttempt before calling (recordClosed resets it;
+// recordHalfOpen bumps it via bumpRecoveryAttemptLocked). Caller must hold mu.
 func (cb *CircuitBreaker) openLocked(emit func()) func() {
 	cb.state = stateOpen
+	cb.epoch++
 	cb.halfOpenSuccesses = 0
 	cb.halfOpenInFlight = 0
 	cb.lastFailure = cb.clock.Now()
@@ -621,7 +747,7 @@ func (cb *CircuitBreaker) recordHalfOpen(out callOutcome) func() {
 // and probe counters and resetting the adaptive-recovery backoff so the next
 // trip starts from the base recoveryTimeout. It returns the close hook for the
 // caller to fire after unlock. Used both when half-open closes directly and when
-// the ramp window completes (see Allow). Caller must hold mu.
+// the ramp window completes (see admitLocked). Caller must hold mu.
 func (cb *CircuitBreaker) closeLocked() func() {
 	cb.state = stateClosed
 	cb.failureCount = 0
@@ -652,7 +778,8 @@ func (cb *CircuitBreaker) enterRampLocked() func() {
 // proves the downstream is not yet healthy and reopens the breaker — bumping the
 // adaptive-recovery backoff, exactly like a failed half-open probe. A fast
 // success lets the ramp continue; its progression is purely time-driven, so the
-// ramping → closed transition happens lazily in Allow once the window elapses.
+// ramping → closed transition happens lazily in admitLocked, on the first
+// admission after the window elapses.
 // Caller must hold mu.
 func (cb *CircuitBreaker) recordRamping(out callOutcome) func() {
 	if out.failed {

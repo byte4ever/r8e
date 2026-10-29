@@ -199,10 +199,7 @@ func runRetryAttempt[T any](
 	}
 
 	if cfg.perAttemptTimeout > 0 {
-		attemptCtx, attemptCancel := context.WithTimeout(
-			ctx,
-			cfg.perAttemptTimeout,
-		)
+		attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
 		defer attemptCancel()
 
 		return fn(attemptCtx)

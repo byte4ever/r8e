@@ -97,7 +97,10 @@ type (
 
 	// CircuitBreakerConfig holds circuit breaker configuration
 	// values. Embed it (via [PolicyConfig]) in your own config
-	// struct for JSON or YAML unmarshaling.
+	// struct for JSON or YAML unmarshaling. The outcome classifier
+	// (see [CircuitBreakerClassifier]) is code, so it is not part of
+	// this config, and a reconfiguration from it keeps the classifier
+	// in place.
 	CircuitBreakerConfig struct {
 		// RecoveryTimeout is the duration the breaker stays open.
 		// Optional. Parsed via time.ParseDuration. Example: "30s".
