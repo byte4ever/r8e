@@ -1,8 +1,8 @@
 # Calibration registry — r8e-policy review fleet
 
 Per the reviewer-agent specification (§4.7 test on graded artifacts, §4.8
-attribution-inversion, §5 measurement). Records the calibration run that gated
-this fleet's first release, the defects it surfaced, the fixes, and the
+attribution-inversion, §5 measurement). Records the calibration runs that gated
+each release of this fleet, the defects they surfaced, the fixes, and the
 convergence. Update this file whenever the fleet's verdicts are checked against
 real outcomes.
 
@@ -83,6 +83,82 @@ runs above are mutually consistent:
 | poor | REJECT on every axis (demonstrated, visible defects) | **REJECT** |
 | mediocre | CONDITIONAL on every axis (IMPORTANT, no BLOCKING) | **CONDITIONAL APPROVE** |
 | good | APPROVE on every axis (complete artifact) | **APPROVE** |
+
+## v1.1.0 — re-pin to r8e v0.11.0 (circuit-breaker outcomes)
+
+r8e v0.11.0 adds `CircuitBreakerClassifier`, `OutcomeNeutral`,
+`CallerCancellationIsNeutral` and `IsCallerCancellation`. The fleet gained an
+"outcome classification" category on the overload axis (IMPORTANT when the
+artifact shows errors that say nothing about the dependency's health reaching
+the breaker, or neutral caller cancellations with no shorter r8e deadline;
+never BLOCKING unless the classifier makes every error neutral), and
+`fixtures/good.md` gained a classifier so the positive anchor shows the
+practice.
+
+Every axis reads the shared references that changed, so the run covers: the
+overload axis on all three fixtures, the five other axes on `good.md`, and the
+attribution-inversion test on `mediocre.md` with the overload axis (the axis
+that changed). Same method as above: fresh isolated sub-agents, artifacts
+under neutral names with the expected-verdict header stripped.
+
+### Round 1 (surfaced two defects in the positive anchor)
+
+| Test | Expected | Got | OK? |
+|---|---|---|---|
+| poor → overload | REJECT | REJECT | ✅ |
+| mediocre → overload | CONDITIONAL | CONDITIONAL (3 IMPORTANT, incl. the new `404`-counted-by-the-breaker) | ✅ |
+| mediocre → overload "principal engineer" | CONDITIONAL | CONDITIONAL | — |
+| mediocre → overload "intern" | CONDITIONAL | CONDITIONAL, same three IMPORTANT | ✅ **identical** |
+| good → call / timeouts / fallback / observability | APPROVE | APPROVE | ✅ |
+| good → overload | APPROVE | **CONDITIONAL** | ❌ real defect |
+| good → retry | APPROVE | **CONDITIONAL** | ❌ real defect |
+
+Both divergences were true positives on `good.md`, confirmed in the r8e source,
+and both predate v1.1.0:
+
+1. **The breaker counts its own bulkhead's rejections.** Rate limiter, bulkhead
+   and adaptive concurrency run inside the breaker, so `ErrBulkheadFull` reaches
+   it as a failure. A burst of 37 concurrent calls (32 admitted, 5 rejected)
+   opened the breaker on a healthy recommender. The new outcome category made
+   the overload reviewer look at what the breaker counts.
+2. **`MaxDelay` cuts the Retry-After short.** The taxonomy marked every `4xx`
+   `Permanent` yet expected the `429` Retry-After to be honored, and
+   `MaxDelay(150ms)` caps a hint (by design), so a `429` asking for ≥ 1 s was
+   re-sent after 150 ms. The retry axis had never been blind-run on `good.md`;
+   its own worked review claimed "honored automatically".
+
+### Fixes applied
+
+1. `fixtures/good.md`: the `429` is no longer `Permanent`; a `RetryIf` refuses to
+   retry any `RetryAfterProvider` error (the hint cannot fit `MaxDelay` or the
+   300 ms budget), and the breaker still counts it, so sustained throttling backs
+   off. The classifier also makes `ErrBulkheadFull` neutral.
+2. Overload axis: the outcome category covers the rejections of the stages
+   inside the breaker (`ErrRateLimited`, `ErrBulkheadFull`, `ErrBulkheadTimeout`,
+   `ErrCoDelShed`, `ErrConcurrencyLimited`), within IMPORTANT #5.
+3. Retry axis: a checklist item and IMPORTANT #5 for a Retry-After cut short by
+   `MaxDelay` or the deadline, and a checklist item for a `429` marked
+   `Permanent` while its Retry-After is expected to be honored.
+4. `api-constraints.md`, `decision-matrix.md`, `expert-questionnaire.md` and the
+   worked reviews of `good.md` (call, retry, overload, observability) updated to
+   match.
+
+### Round 2 — `good.md` re-run on all six axes (converged)
+
+`poor.md` and `mediocre.md` did not change, and neither has a stage inside a
+breaker nor a Retry-After cut by `MaxDelay`, so their round-1 verdicts stand.
+
+| Test | Expected | Got | OK? |
+|---|---|---|---|
+| good → call | APPROVE | APPROVE | ✅ |
+| good → timeouts | APPROVE | APPROVE | ✅ |
+| good → retry | APPROVE | APPROVE | ✅ |
+| good → overload | APPROVE | APPROVE | ✅ |
+| good → fallback | APPROVE | APPROVE | ✅ |
+| good → observability | APPROVE | APPROVE | ✅ |
+
+Converged: poor → REJECT, mediocre → CONDITIONAL APPROVE, good → APPROVE on every
+axis, attribution-inversion identical.
 
 ## Spec deployment checklist (Appendix)
 

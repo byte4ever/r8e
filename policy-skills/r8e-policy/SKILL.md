@@ -30,20 +30,20 @@ This skill release is calibrated for an **exact** r8e version. The canonical pin
 is [`../VERSIONS.json`](../VERSIONS.json); this section is kept in agreement with
 it (both are bumped together on each release — see `../MAINTENANCE.md`).
 
-- **r8e core**: `v0.10.0`
-- side packages: `otter v0.10.0`, `ristretto v0.10.0`, `r8eotel v0.10.0`
+- **r8e core**: `v0.11.0`
+- side packages: `otter v0.11.0`, `ristretto v0.11.0`, `r8eotel v0.11.0`
 
 Always propose r8e **at this pinned version** so the user's project and this skill
 agree. When you deliver a policy, include the matching install snippet:
 
 ```sh
-go get github.com/byte4ever/r8e@v0.10.0
+go get github.com/byte4ever/r8e@v0.11.0
 ```
 
 ```go
 // go.mod
-require github.com/byte4ever/r8e v0.10.0
-// + only if used: github.com/byte4ever/r8e/otter|ristretto|r8eotel v0.10.0
+require github.com/byte4ever/r8e v0.11.0
+// + only if used: github.com/byte4ever/r8e/otter|ristretto|r8eotel v0.11.0
 ```
 
 If the user is already on a different r8e version, say so explicitly: features
@@ -98,7 +98,7 @@ The six axes you must be able to answer for:
 | **call / Do** | Is the operation idempotent / a write? Safe to retry? Safe to duplicate (hedge)? Does the call honor `ctx`? |
 | **timeouts** | What is the downstream p50/p99? Is there a per-call budget or SLA? |
 | **retry** | Which errors are permanent vs transient? Is the dependency shared across the fleet (amplification risk)? Does it emit `Retry-After`? |
-| **overload** | What is the downstream capacity (pool size, quota, RPS limit)? Is metastable collapse a risk? |
+| **overload** | What is the downstream capacity (pool size, quota, RPS limit)? Is metastable collapse a risk? Which errors say nothing about its health (business `4xx`, caller cancellations), and what deadline do the callers set? |
 | **fallback / cache** | Is there a *safe* degraded value? Is stale data acceptable, and for how long? |
 | **observability** | Which failure modes must be visible? Should this policy gate readiness? Does config need hot reload? |
 
@@ -162,6 +162,9 @@ do not patch the parameter by hand without re-justifying it.
 - A fallback that fabricates success for a failed write.
 - Gating readiness (`WithReadinessImpact`) on a shared dependency without calling
   out the fleet-wide-flip risk.
+- Rewriting errors, or returning a failed status as `(resp, nil)`, to keep the
+  breaker from counting it. Use `CircuitBreakerClassifier`: the caller keeps the
+  real error.
 
 ## References
 

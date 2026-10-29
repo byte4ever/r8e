@@ -223,10 +223,13 @@ FINAL VERDICT: CONDITIONAL APPROVE
     the dependency's loss should NOT pull the pod; ungated readiness is consistent.
 13. No `r8eotel.Register` / `r8eotel.Trace`. The context does not state an OTel
     stack → at most NOTED (could add `r8eotel.Trace` if spans are wanted later).
-14. Code-only patterns: no `WithCoalesce`, no `WithCache`, no classifiers closures,
-    no `WithFallbackFunc` (it uses a static `WithFallback[[]Item](nil)` value) — so
-    the config-vs-code JSON gap is minimal here; the retunable knobs (timeout,
-    retry, breaker, bulkhead) are all config-expressible.
+14. Code-only patterns: two closures — the retry's `RetryIf` and the breaker's
+    `CircuitBreakerClassifier`. No `WithCoalesce`, no `WithCache`, no
+    `WithFallbackFunc` (it uses a static `WithFallback[[]Item](nil)` value). Both
+    closures are absent from any `PolicyConfig`, but the context promises no JSON
+    retuning, and a `Reconfigure` keeps them — so the config-vs-code gap is
+    minimal here; the retunable knobs (timeout, retry, breaker, bulkhead) are all
+    config-expressible.
 15. No `WithChaos` → no kill-switch concern.
 16. Of the modes that page someone (breaker open, fallback storm), BOTH are
     alertable via the wired hooks. Nothing high-signal is silent.
@@ -250,8 +253,9 @@ FINAL VERDICT: CONDITIONAL APPROVE
   logs; no silent amplification. Does not fail.
 Fewer than 5 *failing* scenarios are findable: the policy is named (registered for
 health), wires hooks to every high-signal mode it has, deliberately and correctly
-leaves readiness ungated on a shared dependency, and carries no code-only pattern
-that would silently vanish from config — its operability gaps are structurally
+leaves readiness ungated on a shared dependency, and its code-only pieces (the
+retry predicate and the breaker classifier) are not promised to operators as
+JSON-tunable — its operability gaps are structurally
 bounded to "could optionally add OTel tracing."
 
 ### Phase 3 — Scoring

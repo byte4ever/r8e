@@ -33,7 +33,7 @@ against `api-constraints.md` before presenting.
 | Transient faults (5xx/timeouts) | `WithRetry(2–4, ExponentialJitterBackoff(base), MaxDelay(cap))` | jitter avoids synchronized retry waves |
 | Shared dependency hit by the whole fleet | add `WithRetryBudget` (per-policy) or `WithSharedRetryBudget` | caps aggregate retry pressure → no retry storm |
 | Multiple policies under one gateway | nest budgets via `r8e.Parent(parent)` | a storm in one leaf throttles its siblings |
-| Emits `Retry-After` (429/503) | nothing extra — honored automatically if the error implements `RetryAfterProvider` | httpx `StatusError` already does |
+| Emits `Retry-After` (429/503) | honored automatically if the error implements `RetryAfterProvider` (httpx `StatusError` does); if the hints exceed `MaxDelay` or the budget, do not retry them (`RetryIf`) | `MaxDelay` caps the hint: a capped one re-sends early |
 | Backpressure you can react to (429/Retry-After) | consider `WithRateLimit(rate, AIMD(…))` | client rate adapts to server overload |
 
 ## 4. Capacity & overload → shedding
@@ -44,6 +44,8 @@ against `api-constraints.md` before presenting.
 | Bursty arrivals, want to wait not reject | `WithBulkhead(n, BulkheadMaxWait(d))` or `BulkheadCoDel(target, interval)` | FIFO wait / controlled-delay shedding |
 | Unknown / variable capacity | `WithAdaptiveConcurrency(…)` (Gradient2) — NOT with Bulkhead | self-tunes from RTT |
 | Repeatedly-failing dependency | `WithCircuitBreaker(FailureThreshold, RecoveryTimeout)` | fast-fail while it's down |
+| Errors that say nothing about the dep's health reach the breaker (business/`Permanent` 4xx, caller cancellations, rejections by a bulkhead / rate limiter / adaptive concurrency inside the breaker) | add `CircuitBreakerClassifier(fn)`: `Permanent`/business and those `Err*` sentinels → `OutcomeNeutral`, the rest → `CallerCancellationIsNeutral(ctx, err)` | a run of them would open the breaker on a healthy dep |
+| Caller cancellations are neutral | keep an r8e deadline (`WithTimeout`, `PerAttemptTimeout`, `PropagateDeadline` budget) shorter than the callers' | else a hanging dep ends as neutral cancellations and never trips |
 | Brownout (slow-but-200) is the real failure | add `SlowCallRate(d, rate)` | failure trip alone misses brownouts |
 | Healing downstream re-floods on close | add `RampRecovery(window)` | slow-start admission |
 | Hard external quota / RPS limit | `WithRateLimit(rate)` (+ `RateLimitBlocking()` to wait) | stay under quota |
@@ -86,3 +88,6 @@ against `api-constraints.md` before presenting.
 5. Every parameter traces to a service trait (rationale table).
 6. Readiness impact only on non-shared deps.
 7. Fallback never fabricates a write success.
+8. With a breaker: errors that say nothing about the dep's health are neutral
+   (`CircuitBreakerClassifier`), and an r8e deadline ends a hanging call before
+   the callers give up.

@@ -160,9 +160,9 @@ FINAL VERDICT: CONDITIONAL APPROVE
 4. No `WithHedge` → no duplicate concern (and would be safe anyway for a read).
 5. The fn is `func(ctx context.Context)` passing ctx to `recommender.Get(ctx,
    userID)` → cancellation/deadline propagate end to end.
-6. Error taxonomy: 4xx marked `r8e.Permanent`, 5xx/timeouts transient, 429 carries
-   Retry-After honored automatically — classified at the boundary. The call's
-   taxonomy is explicit.
+6. Error taxonomy: 4xx other than 429 marked `r8e.Permanent`, 5xx/timeouts
+   transient, 429 carries a Retry-After of at least 1 s and is not retried
+   (`RetryIf`) — classified at the boundary. The call's taxonomy is explicit.
 7. Resource cleanup: typed client call; nothing raw to leak.
 8. Re-execution determinism: a recommendations read is naturally idempotent;
    re-execution returns an equivalent list.
@@ -173,7 +173,8 @@ FINAL VERDICT: CONDITIONAL APPROVE
 12. Panic surface: none demonstrable; inputs are a userID.
 13. Nested guards: `WithTimeout(300ms)` bounds the call; the client honors ctx, so
     the policy deadline bites (sizing → timeouts axis).
-14. `429` handled without manual code (RetryAfterProvider).
+14. `429` recognised through `RetryAfterProvider`, no status parsing in the
+    policy; retry tuning around it is the retry axis's.
 15. The op is safe to run zero, one, or many times.
 
 ### Phase 2 — Adversarial scenarios
@@ -186,8 +187,9 @@ FINAL VERDICT: CONDITIONAL APPROVE
 - **Empty fallback.** Trigger: downstream down + retries exhausted. Propagation:
   `nil []Item` returned; page renders without the rail (documented). Symptom:
   degraded but correct. Does not fail.
-- **429 throttle.** Trigger: server 429 + Retry-After. Propagation: honored
-  automatically. Symptom: backed-off retry. Does not fail.
+- **429 throttle.** Trigger: server 429 + Retry-After. Propagation: not retried
+  (`RetryIf`), the empty fallback answers. Symptom: one request, no early
+  re-send. Does not fail.
 Fewer than 5 *failing* scenarios are findable: the call is an idempotent,
 ctx-honoring, classified read with a documented-safe degraded value — its
 failure modes are structurally bounded to "returns an error or an empty list,"

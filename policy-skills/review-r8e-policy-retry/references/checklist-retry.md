@@ -57,6 +57,13 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       into an explicit "back off" signal → throttle stampede.
 - [ ] Is the httpx adapter used so 429/503 carry Retry-After AND 4xx classify
       Permanent without hand-written code?
+- [ ] Does `MaxDelay`, or the time left under `WithTimeout` / the time budget, sit
+      BELOW the Retry-After hints? `MaxDelay` caps the hint too, so the retry
+      re-sends early, into the server's explicit "back off". Such errors should
+      not be retried (`RetryIf` on `RetryAfterProvider`) unless the hint fits.
+- [ ] Is a throttling status (`429`) both marked `Permanent` AND expected to be
+      honored? `Permanent` stops the retry, so the Retry-After is never used —
+      the taxonomy contradicts itself.
 
 ## Cross-axis notes (note once, defer; do NOT score here)
 - [ ] Retrying a WRITE also amplifies the side effect — note it, defer the

@@ -4,7 +4,8 @@ description: >-
   Adversarial review of the overload / shedding controls of an r8e policy —
   circuit breaker, bulkhead, adaptive concurrency, rate limit, throttle, SLO
   governor. Judges presence and sizing of these guards against the downstream's
-  capacity and sharing, the brownout (slow-but-200) trip, healing slow-start, the
+  capacity and sharing, the brownout (slow-but-200) trip, what the breaker counts
+  (outcome classifier), healing slow-start, the
   bulkhead/adaptive-concurrency mutual exclusion, and metastable collapse from
   retry/hedge amplification on a shared dependency with nothing to fast-fail. Use
   to review whether the policy can shed and fast-fail under overload. REJECT by
@@ -68,6 +69,12 @@ This reviewer judges ONLY the **overload / shedding controls and their sizing**:
   recovery; `SlowCallRate` for brownouts (slow-but-200) the failure trip misses;
   `RecoveryBackoff` / `RampRecovery` slow-start so a healing downstream is not
   re-flooded.
+- What the breaker counts: `CircuitBreakerClassifier` keeping business /
+  `Permanent` errors, caller cancellations and the rejections of the stages
+  inside the breaker (rate limiter, bulkhead, adaptive concurrency) from
+  tripping it, and, once
+  cancellations are neutral, an r8e deadline shorter than the callers' so a hang
+  still trips it.
 - `WithBulkhead` presence and sizing vs the downstream pool/capacity;
   `BulkheadMaxWait` (wait) vs reject under burst; `BulkheadCoDel` queue discipline.
 - `WithAdaptiveConcurrency` (Gradient2) for unknown/variable capacity — AND the
@@ -129,6 +136,13 @@ here; do not dismiss an observation as "probably not serious."
   failure) the failure trip alone never catches?
 - Ramp / backoff recovery (`RampRecovery` / `RecoveryBackoff`): does a healing
   downstream get re-flooded the instant the breaker closes?
+- Outcome classification: do business / `Permanent` errors, caller
+  cancellations, or the rejections of a rate limiter / bulkhead / adaptive
+  concurrency inside the breaker reach it, and does a `CircuitBreakerClassifier`
+  keep them from counting? Is the classifier itself right (genuine faults still
+  fail)?
+- With caller cancellations neutral: is an r8e deadline shorter than the callers'
+  deadline, so a hanging dependency still trips the breaker?
 - Bulkhead present at all (any concurrency cap on in-flight work)?
 - Bulkhead size vs downstream pool/capacity: guessed vs traced to a stated pool.
 - Bulkhead wait vs reject under burst (`BulkheadMaxWait` semantics) — does a burst
@@ -160,7 +174,9 @@ findable, justify in writing that the policy's overload behaviour is structurall
 bounded. Prioritise: metastable collapse (brownout × retry/hedge × no breaker on a
 shared dep), brownout that never trips a failure-only breaker, healing downstream
 re-flooded on close, burst that exhausts the caller's pool with no bulkhead, a
-bulkhead/adaptive-concurrency build panic.
+bulkhead/adaptive-concurrency build panic, a run of business errors, caller
+cancellations or the policy's own bulkhead rejections that opens the breaker on a
+healthy dependency.
 
 ### Phase 3 — Scoring
 

@@ -40,6 +40,8 @@ register and severity.
 16. Note (out of lane): `WithReadinessImpact()` on a shared dep is a fleet-wide
     readiness-flip risk — defer scoring to observability; the metastable
     interaction is mine to flag.
+17. Outcome classification: N/A — there is no breaker whose counting a
+    classifier could correct.
 
 ### Phase 2 — Adversarial scenarios
 - **Metastable collapse on a brownout.** Trigger: gateway p99 rises (capacity dip,
@@ -136,6 +138,10 @@ FINAL VERDICT: REJECT
 14. Sheddability tiers: none; single-tier read — acceptable.
 15. `WithCache` is present (short-circuits hits) — reduces offered load on a hot
     key, easing overload, though cache *correctness* is the fallback axis's.
+16. Outcome classification: no `CircuitBreakerClassifier`, and the taxonomy says
+    `404 not_found` is permanent → every `404` reaches the breaker as a failure.
+17. Caller cancellations: the context does not say where `ctx` comes from; with
+    no classifier they count as failures too (the default) — no neutral-hang trap.
 
 ### Phase 2 — Adversarial scenarios
 - **Brownout never trips the breaker.** Trigger: catalog DB contention → p99 climbs
@@ -158,6 +164,11 @@ FINAL VERDICT: REJECT
   closes, full traffic returns at once (no ramp). Symptom: a brief re-entry spike;
   an internal catalog likely absorbs it. Detectability: a small request-rate step
   on close. (Bounded — not scored above NOTED.)
+- **A run of `404`s opens the breaker.** Trigger: a client walks a list of
+  removed product ids. Propagation: 5 consecutive `404`s, each counted as a
+  failure (no classifier) → the breaker opens on a healthy catalog. Symptom: for
+  30 s every product read fails fast to the nil fallback, for every user on the
+  replica. Detectability: circuit-open with a flat catalog 5xx rate.
 
 ### Phase 3 — Scoring
 - BLOCKING: none. A breaker is present (a fast-fail path exists), the policy is
@@ -165,18 +176,24 @@ FINAL VERDICT: REJECT
   amplification on a shared dep with nothing to fast-fail.
 - IMPORTANT: #3+#4 (no `SlowCallRate` → the breaker is blind to the catalog's most
   common failure, a brownout). #8+#9+#10 (no bulkhead on a shared dep that can slow
-  → caller pile-up window, only partly bounded by the 2 s timeout).
+  → caller pile-up window, only partly bounded by the 2 s timeout). #16 (the
+  permanent `404` counts as a breaker failure → a run of them opens the breaker on
+  a healthy catalog; IMPORTANT, not BLOCKING — it needs a run of consecutive
+  `404`s the artifact cannot show).
 - NOTED: #5/#6 (default `FailureThreshold(5)` / `RecoveryTimeout(30s)` plausible
   but unverified against traffic / recovery time). #7 (no `RampRecovery` — bounded
-  on an internal dep). #12 retry amplification → defer budget to retry axis.
+  on an internal dep). #12 retry amplification → defer budget to retry axis. #17
+  (`ctx` origin unstated; caller cancellations follow the default counting).
 
 ### Phase 4 — Verdict
-No BLOCKING; two IMPORTANT, both real but accept-able with explicit risk.
+No BLOCKING; three IMPORTANT, all real but accept-able with explicit risk.
 **CONDITIONAL APPROVE**, accepted risks: (1) add `SlowCallRate(d, rate)` so the
 breaker trips on the catalog's brownout, or confirm in writing the catalog fails
 hard (errors, not slowness); (2) size a `WithBulkhead` to the catalog's serveable
-capacity, or document why unbounded in-flight is safe given the 2 s ceiling. The
-default thresholds are an unverified-but-plausible starting point (NOTED).
+capacity, or document why unbounded in-flight is safe given the 2 s ceiling;
+(3) add a `CircuitBreakerClassifier` that makes the permanent `404` neutral, or
+document why a run of `404`s cannot happen. The default thresholds are an
+unverified-but-plausible starting point (NOTED).
 
 ### Phase 5 — Meta-critique
 1. Most likely leniency: crediting "a breaker is present" as sufficient — it is
@@ -229,6 +246,14 @@ FINAL VERDICT: CONDITIONAL APPROVE
 15. Fast-fail path under sustained overload: breaker (failure AND brownout) +
     bulkhead reject (`ErrBulkheadFull` past 32 in-flight) + budget-gated retry —
     overload sheds rather than amplifies. The metastable trigger is absent.
+16. Outcome classification: `CircuitBreakerClassifier` makes a `Permanent` `4xx`,
+    the policy's own `ErrBulkheadFull` (the bulkhead runs inside the breaker) and
+    a caller cancellation neutral; `5xx`, `429` and r8e timeouts still fail, so
+    sustained throttling opens the breaker and backs off. The breaker counts only
+    what says the recommender is unwell.
+17. Hang with neutral cancellations: `WithTimeout(300ms)` is below the stated 1 s
+    request deadline, so a hanging call is ended by the r8e deadline and counts as
+    a failure — the neutral-cancellation path cannot blind the breaker.
 
 ### Phase 2 — Adversarial scenarios
 - **Brownout.** Trigger: recommender p99 climbs above 150 ms on a majority.
@@ -239,18 +264,27 @@ FINAL VERDICT: CONDITIONAL APPROVE
   opens. Symptom: fast-fail, no pile-up. Does NOT fail.
 - **Concurrency burst.** Trigger: a spike of concurrent calls. Propagation:
   `WithBulkhead(32)` caps in-flight at the pool size; the 33rd fast-rejects
-  (`ErrBulkheadFull`). Symptom: the caller's pool is never exceeded; excess sheds.
-  Does NOT fail.
+  (`ErrBulkheadFull`), which the classifier makes neutral, so five rejections in
+  a row do not open the breaker. Symptom: the caller's pool is never exceeded;
+  excess sheds; the healthy recommender stays reachable. Does NOT fail.
 - **Partial outage + retries.** Trigger: intermittent 5xx. Propagation: retries are
   budget-gated (10 tokens, 0.1 ratio) → amplification is capped; the breaker backs
   it. Symptom: bounded extra load, no storm. Does NOT fail.
 - **Recovery re-entry.** Trigger: recommender heals after 10 s. Propagation: breaker
   closes, traffic returns; no ramp, but capacity is known (32) and the bulkhead
   still caps in-flight. Symptom: a brief, bounded re-entry. Does NOT fail.
+- **Clients give up, or send bad ids.** Trigger: users navigate away mid-call, or a
+  client sends a run of invalid ids (`4xx`). Propagation: both are neutral → the
+  failure counter does not move. Symptom: the breaker stays closed on a healthy
+  recommender. Does NOT fail.
+- **Recommender hangs.** Trigger: calls stop returning. Propagation: the 300 ms
+  `WithTimeout` ends each call before the 1 s request deadline → a failure; 5 in a
+  row open the breaker. Symptom: fast-fail to the empty rail. Does NOT fail.
 Fewer than 5 *failing* scenarios are findable: the policy has a breaker that trips
-on failures AND brownouts, a bulkhead sized to the stated pool, budget-gated retry,
-and no hedge — every overload path either fast-fails or is capped to known
-capacity. Its overload behaviour is structurally bounded.
+on failures AND brownouts and counts only health signals, a bulkhead sized to the
+stated pool, budget-gated retry, and no hedge — every overload path either
+fast-fails or is capped to known capacity. Its overload behaviour is structurally
+bounded.
 
 ### Phase 3 — Scoring
 - BLOCKING: none.
@@ -262,8 +296,10 @@ capacity. Its overload behaviour is structurally bounded.
 ### Phase 4 — Verdict
 Phases 1–2 produced no overload observation above NOTED, and every adversarial
 scenario is dismissable in writing: the breaker fast-fails on failures and
-brownouts, the bulkhead is sized to the stated 32-connection pool (not guessed),
-retry is budget-gated, and there is no hedge to amplify. **APPROVE.**
+brownouts and ignores business errors and caller cancellations, a hang still
+trips it through the 300 ms timeout, the bulkhead is sized to the stated
+32-connection pool (not guessed), retry is budget-gated, and there is no hedge to
+amplify. **APPROVE.**
 
 ### Phase 5 — Meta-critique
 1. Most likely leniency: rubber-stamping because the context says "good." I

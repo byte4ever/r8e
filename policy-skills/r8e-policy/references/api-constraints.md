@@ -57,7 +57,50 @@ everything**, including auth failures, validation `4xx`, and other permanent
 errors. A retry-bearing policy against a service with permanent error modes MUST
 classify them (`RetryIf` or `Permanent()` at the call boundary, or the httpx
 classifier). `Retry-After` (429/503) is honored automatically when the error
-implements `RetryAfterProvider` (httpx `StatusError` does).
+implements `RetryAfterProvider` (httpx `StatusError` does) — **but `MaxDelay` caps
+the hint too**, and the deadline still applies. A hint above `MaxDelay` is re-sent
+early, into the server's "back off"; when the hints cannot fit, do not retry those
+errors (`RetryIf` returning false for a `RetryAfterProvider`). Marking a `429`
+`Permanent` also stops the retry: its Retry-After is then never used.
+
+## Circuit-breaker outcomes — the default counts every error
+
+**By default the breaker counts every non-nil error as a failure**, including a
+`Permanent` business `4xx` and a call its caller cancelled. `FailureThreshold`
+counts *consecutive* failures, so a run of errors that say nothing about the
+dependency's health opens the breaker on a healthy dependency: a client probing
+missing ids (a run of `404`s), or an upstream redeploy cancelling its in-flight
+calls. `Permanent` stops retries; it does not stop the breaker from counting.
+
+- `CircuitBreakerClassifier(fn)` maps each call to `OutcomeSuccess`,
+  `OutcomeFailure` or `OutcomeNeutral`. A neutral call touches neither the
+  failure counter nor the slow-call window; in half-open it frees the probe slot
+  without counting. The caller always gets the real error: never rewrite errors
+  or return `(resp, nil)` to keep the breaker from counting them.
+- **The breaker also counts the rejections of the stages inside it.** Rate
+  limiter, bulkhead and adaptive concurrency run inside the breaker (see the
+  ordering above), so `ErrRateLimited`, `ErrBulkheadFull`, `ErrBulkheadTimeout`,
+  `ErrCoDelShed` and `ErrConcurrencyLimited` reach it as failures, though the
+  call never reached the dependency. A burst past a bulkhead's size then opens
+  the breaker on a healthy dependency: make those sentinels neutral in the
+  classifier. The calls that were admitted still carry the real health signal.
+- `CallerCancellationIsNeutral` is ready-made: a call ended by its caller's
+  context is neutral, anything else follows the default. Compose your own with
+  `IsCallerCancellation(ctx, err)`, e.g. `IsPermanent(err)` → neutral first.
+- **Deadline attribution.** `WithTimeout`, a retry `PerAttemptTimeout` and a
+  `WithTimeBudget` + `PropagateDeadline` deadline that end the call are r8e's: a
+  failure, never a caller cancellation. A caller deadline that ends the call
+  first is the caller's (`IsCallerCancellation` reports true). So once caller
+  cancellations are neutral, a
+  hanging dependency opens the breaker only if an r8e deadline **shorter than the
+  callers'** ends the call. Otherwise every hang ends as a neutral caller
+  cancellation, and `SlowCallRate` never sees it either.
+- The classifier is called concurrently and, with `WithTimeout`, may run after
+  `Do` returned `ErrTimeout`: it must be a pure function of `(ctx, err)`.
+- Outcomes are bound to their admission: an outcome from a call admitted before
+  the breaker last opened or entered half-open is ignored. The policy does this on
+  its own; a standalone breaker gets it through `Acquire` + `CircuitPermit.Done`
+  (`Allow`/`Record` keep their old, unbound behaviour).
 
 ## Health & readiness
 
@@ -73,8 +116,9 @@ implements `RetryAfterProvider` (httpx `StatusError` does).
 
 Absent from `PolicyConfig` / `BuildOptions` / `Reconfigure` (the option carries a
 function or closure): `WithCoalesce`, `WithCache`, `WithChaos`, all classifiers
-(`RetryIf`, `ThrottleClassifier`, `AIMDClassifier`, `SLOClassifier`),
-`WithFallbackFunc`, `Parent`/shared-budget links, `ChaosEnabled`. When you emit a
+(`RetryIf`, `ThrottleClassifier`, `AIMDClassifier`, `SLOClassifier`,
+`CircuitBreakerClassifier`), `WithFallbackFunc`, `Parent`/shared-budget links,
+`ChaosEnabled`. (`Reconfigure` of a breaker keeps its classifier.) When you emit a
 JSON `PolicyConfig`, these patterns will be **silently absent** — say so. And
 `Reconfigure` can only retune patterns the policy ALREADY has; adding/removing a
 pattern needs a rebuild (configuring an absent pattern → `ErrPatternAbsent`).

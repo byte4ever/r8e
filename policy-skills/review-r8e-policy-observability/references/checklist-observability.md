@@ -54,8 +54,8 @@ pre-dismiss.
 ## Config-vs-code & hot reload
 - [ ] Which chosen patterns are CODE-ONLY (carry a func/closure): `WithCoalesce`,
       `WithCache`, `WithChaos`, all classifiers (`RetryIf`, `ThrottleClassifier`,
-      `AIMDClassifier`, `SLOClassifier`), `WithFallbackFunc`, `Parent`/shared-budget
-      links, `ChaosEnabled`?
+      `AIMDClassifier`, `SLOClassifier`, `CircuitBreakerClassifier`),
+      `WithFallbackFunc`, `Parent`/shared-budget links, `ChaosEnabled`?
 - [ ] When a `PolicyConfig` JSON is emitted, those patterns are SILENTLY ABSENT —
       is that acknowledged, or will an operator think the JSON is the whole policy?
 - [ ] Do operators expect to RETUNE knobs at runtime without redeploy? If so, are
