@@ -74,7 +74,9 @@ const (
 // and [CircuitBreaker.Record] keeps its error-based behaviour.
 //
 // See [CallerCancellationIsNeutral] for a ready-made classifier, and
-// [IsCallerCancellation] to build your own.
+// [IsCallerCancellation] and [IsLocalRejection] to build your own. By default
+// the breaker also counts the rejections of the rate limiter, bulkhead and
+// adaptive concurrency limiter that run inside it (see IsLocalRejection).
 func CircuitBreakerClassifier(fn func(context.Context, error) Outcome) CircuitBreakerOption {
 	return func(cfg *circuitBreakerConfig) {
 		cfg.classifier = fn
@@ -137,6 +139,57 @@ func CallerCancellationIsNeutral(ctx context.Context, err error) Outcome {
 	}
 
 	return classifyByError(ctx, err)
+}
+
+// IsLocalRejection reports whether err is one of [ErrRateLimited],
+// [ErrBulkheadFull], [ErrBulkheadTimeout], [ErrCoDelShed] or
+// [ErrConcurrencyLimited] itself, not an error that wraps it. That is exactly
+// what a rate limiter, a bulkhead or an adaptive concurrency limiter running
+// inside the circuit breaker returns when it turns a call away, before the
+// call reaches the downstream.
+//
+// In a [Policy], those guards run inside the breaker, and by default the
+// breaker counts their rejections as failures: a burst past the bulkhead's
+// size can open the breaker on a healthy downstream. Make them neutral in the
+// classifier:
+//
+//	r8e.CircuitBreakerClassifier(func(ctx context.Context, err error) r8e.Outcome {
+//		if r8e.IsLocalRejection(err) {
+//			return r8e.OutcomeNeutral
+//		}
+//		return r8e.CallerCancellationIsNeutral(ctx, err)
+//	})
+//
+// A wrapped sentinel does not match. A nested policy inside the function
+// returns its guards' rejections bare: its own retry runs inside its rate
+// limiter, bulkhead and adaptive limiter, so it never sees them. What the
+// outer breaker sees then depends on a retry that encloses the call into the
+// nested policy, such as the outer policy's own [WithRetry], which runs inside
+// its breaker. When that retry runs out of attempts, it wraps the last error
+// ("retries exhausted: bulkhead full"), which is no local rejection, even if
+// every attempt was turned away locally. When it stops on a RetryIf returning
+// false or on an exhausted retry budget, it returns the bare sentinel, a local
+// rejection, even after attempts that reached the downstream. The same holds
+// for a function that returns one of these sentinels itself. To make such
+// calls count, have the function return an error of its own, wrapping or
+// replacing the sentinel. And when calls that
+// ignore their context keep holding the bulkhead's slots, its rejections are
+// the only sign left that the downstream hangs; keep [WithTimeout] and a
+// function that honours its context.
+//
+// It reports false for [ErrThrottled] and [ErrSLOShed], whose shedders run
+// outside the breaker and react to the downstream's recent outcomes, and for
+// [ErrCircuitOpen], which an inner policy's breaker returns when its
+// downstream is down.
+func IsLocalRejection(err error) bool {
+	// A wrapped sentinel is not a local rejection: identity is the contract.
+	switch err {
+	case ErrRateLimited, ErrBulkheadFull, ErrBulkheadTimeout, //nolint:errorlint // identity, see above
+		ErrCoDelShed, ErrConcurrencyLimited:
+		return true
+	default:
+		return false
+	}
 }
 
 // String returns "success", "failure" or "neutral", and "unknown" for any

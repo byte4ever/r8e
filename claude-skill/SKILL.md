@@ -246,7 +246,16 @@ without counting. `r8e.CallerCancellationIsNeutral` (ready-made) makes a call
 ended by the caller's context neutral, including a cancellation that carries a
 cause (`context.WithCancelCause`, errgroup; net/http returns the cause); compose
 your own with `r8e.IsCallerCancellation(ctx, err)`, e.g. to also make a business
-404 neutral. A deadline r8e set is never a caller cancellation: `WithTimeout`
+404 neutral. By default the breaker also counts the rejections of the rate
+limiter, bulkhead and adaptive concurrency that run inside it (a burst past the
+bulkhead can open it on a healthy downstream): `r8e.IsLocalRejection(err)` is
+true when err is itself, unwrapped, `ErrRateLimited`, `ErrBulkheadFull`,
+`ErrBulkheadTimeout`, `ErrCoDelShed` or `ErrConcurrencyLimited`, so a
+classifier can make them neutral. A wrapped sentinel (the "retries exhausted:
+bulkhead full" a retry returns around a nested policy) does not match; a downstream function that
+returns one of them itself does, so wrap it. It is false for `ErrThrottled`,
+`ErrSLOShed` and `ErrCircuitOpen`. A deadline r8e set is never a caller
+cancellation: `WithTimeout`
 (this or an enclosing policy), an enclosing retry's `PerAttemptTimeout`, and a
 `WithTimeBudget` + `PropagateDeadline` deadline that ends before the caller's
 own (a budget that `RespectInboundDeadline` tightened to an existing deadline
