@@ -1,6 +1,8 @@
 package r8e
 
 import (
+	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -65,9 +67,10 @@ func NewRegistry() *Registry {
 	return r
 }
 
-// Register adds a HealthReporter to the registry.
-// This is typically called during startup by NewPolicy.
-// It is safe for concurrent use but intended for initialization only.
+// Register adds a HealthReporter to the registry. NewPolicy calls it each
+// time it builds a named policy, at startup or per job, and the registration
+// lasts until [Registry.Unregister] removes it. It is safe for concurrent use
+// with Unregister and the readers.
 func (r *Registry) Register(hr HealthReporter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -81,6 +84,47 @@ func (r *Registry) Register(hr HealthReporter) {
 	copy(updated, old)
 	updated = append(updated, hr)
 	r.reporters.Store(&updated)
+}
+
+// Unregister removes every registration of hr and reports whether there was
+// any. It matches with == on the reporter value: pointer identity for a
+// [Policy], so another policy that has the same name stays, and value
+// equality for a value-type reporter. A reporter whose == could panic is
+// never matched, including a comparable type that holds an uncomparable
+// value in an interface field. It is safe for concurrent use with
+// [Registry.Register] and the readers, which keep iterating the list they
+// started with. On a nil *Registry it does nothing and returns false.
+//
+// To remove a policy from the registry it joined, whichever that is:
+//
+//	defer policy.Registry().Unregister(policy)
+func (r *Registry) Unregister(hr HealthReporter) bool {
+	if r == nil || hr == nil || !reflect.ValueOf(hr).Comparable() {
+		return false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	old := *r.reporters.Load()
+
+	// Copy-on-write, as in Register: readers may still hold old.
+	kept := make([]HealthReporter, 0, len(old))
+	for _, registered := range old {
+		if registered != hr {
+			kept = append(kept, registered)
+		}
+	}
+
+	if len(kept) == len(old) {
+		return false
+	}
+
+	// Publish with cap == len, like Register.
+	kept = slices.Clip(kept)
+	r.reporters.Store(&kept)
+
+	return true
 }
 
 // CheckReadiness iterates all registered reporters and builds a
