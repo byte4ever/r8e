@@ -51,8 +51,8 @@ func Trace[T any](policy *r8e.Policy[T], tp trace.TracerProvider) *TracedPolicy[
 //     invocation is not reflected in this counter, though its child span is
 //     still correctly exported and visible in the trace.
 //   - r8e.rejection_reason — present on error; classifies the sentinel
-//     (circuit_open, retries_exhausted, timeout, …) or "error" for a plain
-//     fn error.
+//     (circuit_open, circuit_ramping, retries_exhausted, timeout, …) or
+//     "error" for a plain fn error.
 //
 // Each child span carries r8e.attempt.number (1-indexed).
 //
@@ -128,6 +128,8 @@ func rejectionReason(err error) string {
 	switch {
 	case errors.Is(err, r8e.ErrCircuitOpen):
 		return "circuit_open"
+	case errors.Is(err, r8e.ErrCircuitRamping):
+		return "circuit_ramping"
 	case errors.Is(err, r8e.ErrRateLimited):
 		return "rate_limited"
 	case errors.Is(err, r8e.ErrBulkheadFull):

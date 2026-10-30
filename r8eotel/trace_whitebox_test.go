@@ -17,16 +17,22 @@ func TestRejectionReason(t *testing.T) {
 		want string
 	}{
 		"circuit_open":         {r8e.ErrCircuitOpen, "circuit_open"},
+		"circuit_ramping":      {r8e.ErrCircuitRamping, "circuit_ramping"},
 		"rate_limited":         {r8e.ErrRateLimited, "rate_limited"},
 		"bulkhead_full":        {r8e.ErrBulkheadFull, "bulkhead_full"},
 		"bulkhead_timeout":     {r8e.ErrBulkheadTimeout, "bulkhead_timeout"},
 		"codel_shed":           {r8e.ErrCoDelShed, "codel_shed"},
 		"concurrency_limited":  {r8e.ErrConcurrencyLimited, "concurrency_limited"},
 		"throttled":            {r8e.ErrThrottled, "throttled"},
+		"slo_shed":             {r8e.ErrSLOShed, "slo_shed"},
 		"timeout":              {r8e.ErrTimeout, "timeout"},
 		"time_budget_exceeded": {r8e.ErrTimeBudgetExceeded, "time_budget_exceeded"},
 		"retries_exhausted":    {r8e.ErrRetriesExhausted, "retries_exhausted"},
-		"plain_error":          {errors.New("something else"), "error"},
+		"concurrency_budget_exceeded": {
+			r8e.ErrConcurrencyBudgetExceeded, "concurrency_budget_exceeded",
+		},
+		"panic_recovered": {&r8e.PanicError{Value: "boom"}, "panic_recovered"},
+		"plain_error":     {errors.New("something else"), "error"},
 	}
 
 	for name, tc := range cases {

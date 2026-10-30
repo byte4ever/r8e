@@ -13,16 +13,26 @@ import (
 )
 
 func TestCircuitStateGauge(t *testing.T) {
-	cases := map[string]int64{
-		"":             circuitClosedGauge,
-		"closed":       circuitClosedGauge,
-		"half_open":    circuitHalfOpenGauge,
-		"open":         circuitOpenGauge,
-		"future_state": circuitUnknownGauge,
+	t.Parallel()
+
+	cases := map[string]struct {
+		state string
+		want  int64
+	}{
+		"no_breaker":   {"", circuitClosedGauge},
+		"closed":       {"closed", circuitClosedGauge},
+		"half_open":    {"half_open", circuitHalfOpenGauge},
+		"open":         {"open", circuitOpenGauge},
+		"ramping":      {"ramping", circuitRampingGauge},
+		"future_state": {"future_state", circuitUnknownGauge},
 	}
 
-	for state, want := range cases {
-		assert.Equal(t, want, circuitStateGauge(&r8e.PolicyMetrics{CircuitState: state}))
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, circuitStateGauge(&r8e.PolicyMetrics{CircuitState: tc.state}))
+		})
 	}
 }
 
@@ -33,12 +43,14 @@ func TestBoolGauge(t *testing.T) {
 	assert.Equal(t, int64(0), healthy(&r8e.PolicyMetrics{Healthy: false}))
 }
 
-// erroringMeter is a metric.Meter that fails to create one kind of instrument,
-// so the error-propagation paths in Register can be exercised.
+// erroringMeter is a metric.Meter that fails one call with err: the creation
+// of one kind of instrument, or RegisterCallback. It exercises the
+// error-propagation paths in Register.
 type erroringMeter struct {
 	noop.Meter
 
-	failOn string // "counter" or "gauge"
+	err    error
+	failOn string // "counter", "gauge", "gauge_f64" or "register"
 }
 
 func (m erroringMeter) Int64ObservableCounter(
@@ -46,7 +58,7 @@ func (m erroringMeter) Int64ObservableCounter(
 	options ...metric.Int64ObservableCounterOption,
 ) (metric.Int64ObservableCounter, error) {
 	if m.failOn == "counter" {
-		return nil, errors.New("counter create failed")
+		return nil, m.err
 	}
 
 	return m.Meter.Int64ObservableCounter(name, options...)
@@ -57,7 +69,7 @@ func (m erroringMeter) Int64ObservableGauge(
 	options ...metric.Int64ObservableGaugeOption,
 ) (metric.Int64ObservableGauge, error) {
 	if m.failOn == "gauge" {
-		return nil, errors.New("gauge create failed")
+		return nil, m.err
 	}
 
 	return m.Meter.Int64ObservableGauge(name, options...)
@@ -68,7 +80,7 @@ func (m erroringMeter) Float64ObservableGauge(
 	options ...metric.Float64ObservableGaugeOption,
 ) (metric.Float64ObservableGauge, error) {
 	if m.failOn == "gauge_f64" {
-		return nil, errors.New("float gauge create failed")
+		return nil, m.err
 	}
 
 	return m.Meter.Float64ObservableGauge(name, options...)
@@ -79,25 +91,27 @@ func (m erroringMeter) RegisterCallback(
 	instruments ...metric.Observable,
 ) (metric.Registration, error) {
 	if m.failOn == "register" {
-		return nil, errors.New("register callback failed")
+		return nil, m.err
 	}
 
 	return m.Meter.RegisterCallback(callback, instruments...)
 }
 
 func TestRegisterPropagatesInstrumentError(t *testing.T) {
-	reg := r8e.NewRegistry()
+	t.Parallel()
 
-	cases := map[string]string{
-		"counter":   "counter create failed",
-		"gauge":     "gauge create failed",
-		"gauge_f64": "float gauge create failed",
-		"register":  "register otel metrics callback", // wrapped
-	}
+	for _, failOn := range []string{"counter", "gauge", "gauge_f64", "register"} {
+		t.Run(failOn, func(t *testing.T) {
+			t.Parallel()
 
-	for failOn, wantSub := range cases {
-		_, err := Register(erroringMeter{failOn: failOn}, reg)
-		require.Error(t, err, "failOn=%s", failOn)
-		require.ErrorContains(t, err, wantSub)
+			injected := errors.New(failOn + " failed")
+
+			_, err := Register(erroringMeter{err: injected, failOn: failOn}, r8e.NewRegistry())
+			require.ErrorIs(t, err, injected)
+
+			if failOn == "register" {
+				assert.ErrorContains(t, err, "register otel metrics callback")
+			}
+		})
 	}
 }
