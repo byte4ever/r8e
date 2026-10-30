@@ -21,6 +21,15 @@ do not pre-dismiss.
       from a genuine downstream error, when the degraded value is only appropriate
       for one of them? A func that returns the degraded value on EVERY error may
       mask a real failure that must surface.
+- [ ] Does the func use `IsLocalRejection` to spot shedding? It matches only five
+      bare sentinels (not `ErrCircuitOpen`, `ErrThrottled`, `ErrSLOShed`, nor a
+      wrapped one): it is for the breaker classifier. A fallback uses
+      `errors.Is`.
+- [ ] Does the func degrade only on `ErrTimeout` / `ErrTimeBudgetExceeded`? A
+      call that the callers' deadline ends first, or on the same instant,
+      returns the caller's context error (`context.DeadlineExceeded`), not the
+      r8e sentinel: the degraded value is never served for that hang. Is the
+      r8e deadline strictly shorter than the callers'?
 - [ ] Is the fallback's semantic correctness STATED by the context, or UNKNOWN?
       UNKNOWN is unresolved risk.
 

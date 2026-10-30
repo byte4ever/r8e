@@ -21,9 +21,13 @@ doubt between two levels, the one with a concrete propagation path wins.
    without closing `resp.Body`. Propagation: under load, fd/connection exhaustion
    → the whole client stalls. Remediation: `defer resp.Body.Close()` (mind the
    httpx transient/permanent body contract).
-5. **Shared mutation across hedge goroutines.** The fn appends to a captured slice;
-   two hedge executions race it. Propagation: data race → corrupt result or panic
-   under `-race`/production. Remediation: no shared mutable capture, or no hedge.
+5. **Shared mutation across hedge goroutines, or with the caller after a
+   timeout.** The fn appends to a captured slice; two hedge executions race it.
+   Or, under `WithTimeout`, the fn writes a captured variable the caller reads
+   once `Do` returned `ErrTimeout`, while the fn is still running. Propagation:
+   data race → corrupt result or panic under `-race`/production. Remediation:
+   no shared mutable capture (return the value through the fn's result), or no
+   hedge.
 
 ## IMPORTANT — justified concern, may be accepted with explicit documented risk
 
@@ -39,6 +43,15 @@ doubt between two levels, the one with a concrete propagation path wins.
 4. **Nested timeout mismatch.** The client's own timeout is shorter than the
    policy's, so `WithTimeout` never bites. Not a safety hole but the policy knob is
    inert — reconcile them.
+5. **A hung call under a breaker.** The fn ignores `ctx` (`func(_
+   context.Context)`, or a client that takes none) on a read under
+   `WithCircuitBreaker`. Propagation: the dependency hangs while the breaker
+   probes it; the probes never return; `WithTimeout` answers the callers but
+   leaves the probes in their slots; the breaker stays half-open and fails every
+   call with `ErrCircuitOpen` until restart. Remediation: thread `ctx` into the
+   call; the `HalfOpenProbeLease` safety net is the overload axis's. When the
+   client's `ctx` handling is UNKNOWN, the finding is "confirm it forwards
+   `ctx`". (On a write, the ignored `ctx` is already BLOCKING #3.)
 
 ## NOTED — observation for awareness, no action required
 
@@ -48,10 +61,15 @@ doubt between two levels, the one with a concrete propagation path wins.
    review-r8e-policy-fallback.
 3. A panic is theoretically possible but the inputs are fully validated upstream
    and `WithRecover` is present — no demonstrated path.
+4. The fn returns an r8e sentinel bare (a nested policy's error passed through).
+   Flag that it should wrap or replace it, and defer what the breaker counts to
+   review-r8e-policy-overload.
 
 ## Anti-calibration (do NOT do this)
 
 - Scoring "no retry budget" here — that is the retry axis.
+- Scoring the absence or the sizing of `HalfOpenProbeLease` here — that is the
+  overload axis. You score the ignored `ctx` that lets a probe hang.
 - Calling an idempotent read's retry BLOCKING — re-execution is harmless.
 - Marking IMPORTANT for "could be cleaner" with no failure path — that is at most
   NOTED, usually nothing.

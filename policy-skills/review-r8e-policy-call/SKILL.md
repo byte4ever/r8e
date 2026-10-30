@@ -60,9 +60,10 @@ cancellation, cleanup).
 This reviewer judges ONLY the **wrapped call's nature and its compatibility with
 the patterns applied to it**: idempotency / side effects, retry-safety,
 hedge-safety (concurrent duplicate execution), `ctx` honoring and true
-cancellability, resource cleanup on every exit path, the real error taxonomy the
-call emits, and re-execution hazards (partial-write inconsistency, shared captured
-state across hedge goroutines).
+cancellability (including the slots a hung call keeps holding), resource cleanup
+on every exit path, the real error taxonomy the call emits, and re-execution
+hazards (partial-write inconsistency, shared captured state across hedge
+goroutines or with the caller once `Do` returned).
 
 OUT OF SCOPE — do NOT score these; note at most once as NOTED "out of scope —
 defer to <axis>":
@@ -108,17 +109,28 @@ here; do not dismiss an observation as "probably not serious."
   unable to stop in-flight work (only stop *waiting* on it).
 - Orphaned side effect: a timeout/cancel that returns to the caller while the
   downstream write keeps running to completion.
+- Slots a hung call keeps: under `WithCircuitBreaker`, a call that ignores `ctx`
+  and hangs keeps its half-open probe slot (and its bulkhead slot) after
+  `WithTimeout` answered the caller; once such calls hold every probe slot, the
+  breaker stays half-open until restart.
 - Resource cleanup on EVERY exit path (response body, connection, file, lock),
   including the fallback / timeout / cancel / panic paths.
 - Partial-failure consistency: a write retried after a partial application leaves
   inconsistent state.
 - Shared captured state: variables closed over by the fn that two hedge
   goroutines (or sequential retries) mutate without synchronisation.
+- State shared with the caller after `Do` returned: under `WithTimeout` (or
+  `WithCoalesce`, `RefreshAhead`), `Do` returns when the deadline fires or the
+  caller's `ctx` ends, while the fn keeps running on its own goroutine. Anything
+  the fn writes that the caller reads afterwards must be synchronised.
 - Re-execution determinism: read-after-write / token-refresh / RNG inside the fn
   that misbehaves when run more than once.
 - Real error taxonomy: which errors the call actually returns, and whether
   permanent ones are distinguishable (a precondition the retry/fallback axes
   depend on — enumerate the taxonomy here even though *acting* on it is theirs).
+  Include any r8e sentinel the fn returns bare (a nested policy's error passed
+  through, or its own refusals written as `ErrBulkheadFull` and the like):
+  `IsLocalRejection` reads it as the policy's own rejection.
 - Panic surface: can the fn panic, and is `WithRecover` present if so.
 - Blocking / unbounded work not bounded by `ctx` (infinite read, no deadline).
 - Nested guards: the call already has its own internal timeout/retry that fights
@@ -133,8 +145,9 @@ Produce **a minimum of 5 concrete scenarios** in which the wrapped call fails
 under its policy. Each: Trigger / Propagation / Symptom / Detectability. If fewer
 than 5 are findable, justify in writing that the call's failure modes are
 structurally bounded. Prioritise: retry of a write (double effect), hedge of a
-write (concurrent duplicate), ctx ignored (orphaned work after timeout),
-partial-write retried (inconsistency), resource leaked on a non-happy path.
+write (concurrent duplicate), ctx ignored (orphaned work after timeout, a hung
+probe holding the breaker half-open), partial-write retried (inconsistency),
+resource leaked on a non-happy path.
 
 ### Phase 3 — Scoring
 

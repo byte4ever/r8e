@@ -142,6 +142,9 @@ FINAL VERDICT: REJECT
     `404 not_found` is permanent → every `404` reaches the breaker as a failure.
 17. Caller cancellations: the context does not say where `ctx` comes from; with
     no classifier they count as failures too (the default) — no neutral-hang trap.
+18. Half-open probes: `catalog.Get` honors `ctx` (stated at the call) under
+    `WithTimeout(2s)`, so a probe that hangs is cancelled and reports; it cannot
+    hold its slot. No `HalfOpenProbeLease` needed.
 
 ### Phase 2 — Adversarial scenarios
 - **Brownout never trips the breaker.** Trigger: catalog DB contention → p99 climbs
@@ -247,13 +250,21 @@ FINAL VERDICT: CONDITIONAL APPROVE
     bulkhead reject (`ErrBulkheadFull` past 32 in-flight) + budget-gated retry —
     overload sheds rather than amplifies. The metastable trigger is absent.
 16. Outcome classification: `CircuitBreakerClassifier` makes a `Permanent` `4xx`,
-    the policy's own `ErrBulkheadFull` (the bulkhead runs inside the breaker) and
-    a caller cancellation neutral; `5xx`, `429` and r8e timeouts still fail, so
-    sustained throttling opens the breaker and backs off. The breaker counts only
-    what says the recommender is unwell.
-17. Hang with neutral cancellations: `WithTimeout(300ms)` is below the stated 1 s
-    request deadline, so a hanging call is ended by the r8e deadline and counts as
-    a failure — the neutral-cancellation path cannot blind the breaker.
+    the policy's own bulkhead rejection (`IsLocalRejection`: the bulkhead runs
+    inside the breaker and returns `ErrBulkheadFull` unwrapped) and a caller
+    cancellation neutral; `5xx`, `429` and r8e timeouts still fail, so sustained
+    throttling opens the breaker and backs off. The breaker counts only what
+    says the recommender is unwell.
+17. Hang with neutral cancellations: `WithTimeout(300ms)` is strictly below the
+    stated 1 s request deadline (at least 900 ms of it left when the call
+    starts), so it binds: a hanging call is ended by the r8e deadline and counts
+    as a failure — the neutral-cancellation path cannot blind the breaker.
+18. Local rejections by identity: `recommender.Get` is a plain HTTP client that
+    returns no r8e sentinel, so `IsLocalRejection` can only match this policy's
+    own bulkhead. No downstream saturation can pass for a local rejection.
+19. Half-open probes: the client forwards `ctx` and `WithTimeout(300ms)` cancels
+    it, so a probe reports within about 300 ms and cannot hold its slot. No
+    `HalfOpenProbeLease` needed.
 
 ### Phase 2 — Adversarial scenarios
 - **Brownout.** Trigger: recommender p99 climbs above 150 ms on a majority.
@@ -264,8 +275,8 @@ FINAL VERDICT: CONDITIONAL APPROVE
   opens. Symptom: fast-fail, no pile-up. Does NOT fail.
 - **Concurrency burst.** Trigger: a spike of concurrent calls. Propagation:
   `WithBulkhead(32)` caps in-flight at the pool size; the 33rd fast-rejects
-  (`ErrBulkheadFull`), which the classifier makes neutral, so five rejections in
-  a row do not open the breaker. Symptom: the caller's pool is never exceeded;
+  (`ErrBulkheadFull`), which the classifier makes neutral (`IsLocalRejection`),
+  so five rejections in a row do not open the breaker. Symptom: the caller's pool is never exceeded;
   excess sheds; the healthy recommender stays reachable. Does NOT fail.
 - **Partial outage + retries.** Trigger: intermittent 5xx. Propagation: retries are
   budget-gated (10 tokens, 0.1 ratio) → amplification is capped; the breaker backs
@@ -280,6 +291,10 @@ FINAL VERDICT: CONDITIONAL APPROVE
 - **Recommender hangs.** Trigger: calls stop returning. Propagation: the 300 ms
   `WithTimeout` ends each call before the 1 s request deadline → a failure; 5 in a
   row open the breaker. Symptom: fast-fail to the empty rail. Does NOT fail.
+- **Hang during half-open.** Trigger: the recommender stops answering while the
+  breaker probes it. Propagation: `WithTimeout(300ms)` cancels the probe through
+  its `ctx`; the probe reports a failure and the breaker reopens. Symptom: no
+  probe slot held, no breaker stuck half-open. Does NOT fail.
 Fewer than 5 *failing* scenarios are findable: the policy has a breaker that trips
 on failures AND brownouts and counts only health signals, a bulkhead sized to the
 stated pool, budget-gated retry, and no hedge — every overload path either
@@ -296,8 +311,9 @@ bounded.
 ### Phase 4 — Verdict
 Phases 1–2 produced no overload observation above NOTED, and every adversarial
 scenario is dismissable in writing: the breaker fast-fails on failures and
-brownouts and ignores business errors and caller cancellations, a hang still
-trips it through the 300 ms timeout, the bulkhead is sized to the stated
+brownouts and ignores business errors, caller cancellations and its own
+bulkhead's rejections, a hang still trips it through the 300 ms timeout and
+cannot hold a half-open probe slot, the bulkhead is sized to the stated
 32-connection pool (not guessed), retry is budget-gated, and there is no hedge to
 amplify. **APPROVE.**
 

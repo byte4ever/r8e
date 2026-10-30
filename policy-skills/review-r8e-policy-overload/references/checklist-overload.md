@@ -27,17 +27,59 @@ Per-category checks for the policy's overload controls. Each check is phrased so
       `ErrBulkheadFull`, `ErrBulkheadTimeout`, `ErrCoDelShed`,
       `ErrConcurrencyLimited`) reach it as failures though the call never left
       the process. A burst past the bulkhead's size opens the breaker on a
-      healthy dependency unless the classifier makes those sentinels neutral.
+      healthy dependency unless the classifier makes them neutral
+      (`IsLocalRejection(err)`).
+- [ ] How does the classifier match them? `IsLocalRejection` compares by
+      identity: it matches the sentinels exactly as the guards return them.
+      `errors.Is(err, ErrBulkheadFull)` (and the like) also matches a WRAPPED
+      sentinel: when the fn calls a nested r8e policy, the outer retry wraps its
+      rejection once attempts run out (`retries exhausted: bulkhead full`), and
+      `errors.Is` makes the downstream's saturation neutral. When the fn is a
+      plain client that never returns r8e sentinels, both match the same errors.
+- [ ] Does the fn return an r8e sentinel BARE (a nested policy's error passed
+      through, or its own refusals written as r8e sentinels)? `IsLocalRejection`
+      then reads the downstream's refusal as a local one, also when the outer
+      retry passes it on unwrapped (a `RetryIf` returning false, an exhausted
+      retry budget): the breaker never counts that saturation. The fn should wrap
+      or replace it.
 - [ ] Is the classifier right? Business / `Permanent` errors and caller
       cancellations → `OutcomeNeutral` (or success); genuine downstream faults and
       r8e deadlines → failure. A classifier that makes `5xx` or every error
       neutral blinds the breaker.
 - [ ] With caller cancellations neutral (`CallerCancellationIsNeutral` or
       `IsCallerCancellation`), does an r8e deadline (`WithTimeout`,
-      `PerAttemptTimeout`, a `PropagateDeadline` budget) end a hanging call before
-      the callers give up? If the callers' deadline is shorter, or unknown, a
-      hanging dependency ends as neutral caller cancellations: it never opens the
-      breaker, and `SlowCallRate` never sees it either.
+      `PerAttemptTimeout`, a `PropagateDeadline` budget) end a hanging call
+      STRICTLY before the callers give up? An r8e deadline on the same instant as
+      the callers' or later arms no timer and the deadline is the caller's. If
+      the callers' deadline is shorter, equal, or unknown, a hanging dependency
+      ends as neutral caller cancellations: it never opens the breaker, and
+      `SlowCallRate` never sees it either.
+- [ ] With local rejections neutral and a call that ignores `ctx`: hung calls
+      keep their bulkhead slots after `WithTimeout` returned, so the bulkhead's
+      rejections are the only sign left that the dependency hangs, and they are
+      neutral. The breaker never opens.
+
+## Half-open probes (a probe that never returns)
+
+- [ ] Can a half-open probe hang: does the call ignore `ctx`, or is its `ctx`
+      handling UNKNOWN? A probe holds its slot until it reports. `WithTimeout`
+      does not free it: it runs outside the breaker, answers the caller with
+      `ErrTimeout` and leaves the call running. Once hung probes hold every
+      `HalfOpenMaxAttempts` slot, the breaker stays half-open and fails every
+      call with `ErrCircuitOpen` until restart.
+- [ ] Is `HalfOpenProbeLease(d)` set where a probe can hang? Once every slot is
+      taken and even the newest probe was admitted more than `d` ago, the next
+      call counts the probes as one failed probe and reopens the breaker.
+- [ ] Is `d` ABOVE the worst span from a probe's admission to its report? Inside
+      a policy that span covers every retry attempt, their backoff, the waits of
+      a rate limiter or bulkhead inside the breaker (`BulkheadMaxWait`,
+      `RateLimitBlocking`), the classifier and `OnCircuitHalfOpen`. A shorter
+      lease counts probes still running as failed once every slot is taken,
+      reopening the breaker on a recovering dependency (and growing the
+      recovery timeout with `RecoveryBackoffMultiplier`).
+- [ ] Is the lease presented as the fix for a call that ignores `ctx`? It is a
+      safety net; the fix is a ctx-honoring call under `WithTimeout` (call
+      axis).
 
 ## Recovery sizing
 

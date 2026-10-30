@@ -160,6 +160,50 @@ breaker nor a Retry-After cut by `MaxDelay`, so their round-1 verdicts stand.
 Converged: poor → REJECT, mediocre → CONDITIONAL APPROVE, good → APPROVE on every
 axis, attribution-inversion identical.
 
+## v1.2.0 — re-pin to r8e v0.12.0 (deadline attribution, local rejections, probe lease, breaker outcomes, registry lifecycle)
+
+r8e v0.12.0 changes which deadline ends a call (an r8e deadline is r8e's only
+when strictly earlier than the caller's; a deadline that is the caller's arms
+no timer and the call returns the caller's context error), adds
+`IsLocalRejection` (identity, not `errors.Is`), `HalfOpenProbeLease`,
+`Registry.Unregister` and `Policy.Registry`, the `OnCircuitNeutral` /
+`OnCircuitStaleOutcome` hooks and their counters and OTel instruments, and
+states that hooks may run concurrently and after `Do` returns. Every axis
+gained content (SKILL.md, checklist, severity rubric), and `fixtures/good.md`
+now shows the v0.12.0 practices: `IsLocalRejection` in the classifier,
+`OnCircuitNeutral`, hooks safe for concurrent use, and three stated context
+facts (time left on the callers' deadline, a client that never returns r8e
+sentinels, a policy built once at start-up). `poor.md` and `mediocre.md` did
+not change.
+
+Ten blind runs, same method: fresh isolated sub-agents, artifacts under
+neutral names with the expected-verdict header stripped, the r8e API skill at
+v0.12.0. Since every axis changed, `good.md` ran on all six axes; `poor.md` ran
+on timeouts and `mediocre.md` on observability, the two axes whose content grew
+most; the attribution-inversion test ran on `mediocre.md` with the overload
+axis.
+
+### Round 1 (converged)
+
+| Test | Expected | Got | OK? |
+|---|---|---|---|
+| good → call | APPROVE | APPROVE (7 NOTED) | ✅ |
+| good → timeouts | APPROVE | APPROVE (9 NOTED) | ✅ |
+| good → retry | APPROVE | APPROVE (9 NOTED) | ✅ |
+| good → overload | APPROVE | APPROVE (8 NOTED) | ✅ |
+| good → fallback | APPROVE | APPROVE (6 NOTED) | ✅ |
+| good → observability | APPROVE | APPROVE (9 NOTED) | ✅ |
+| poor → timeouts | REJECT | REJECT (2 BLOCKING: no bound on the critical path; `WithCoalesce` without `WithTimeout` panics in `NewPolicy`) | ✅ |
+| mediocre → observability | CONDITIONAL | CONDITIONAL (2 IMPORTANT: no hooks on present failure modes; a cause-blind fallback signal) | ✅ |
+| mediocre → overload "principal engineer" | CONDITIONAL | CONDITIONAL (3 IMPORTANT: no `SlowCallRate`, no concurrency cap, no classifier for the permanent 404) | — |
+| mediocre → overload "intern" | CONDITIONAL | CONDITIONAL, the same three IMPORTANT | ✅ **identical** |
+
+Converged in one round: poor → REJECT, mediocre → CONDITIONAL APPROVE, good →
+APPROVE on every axis, attribution-inversion identical. No new BLOCKING fired
+on a fixture: the observability axis's new red lines (a named policy visibly
+built per inbound request, a hook visibly writing a plain map) need a visible
+failure mode, and `good.md` states that its policy is built once.
+
 ## Spec deployment checklist (Appendix)
 
 - [x] Disposition opens with "Default verdict: REJECT" (every axis + orchestrator)

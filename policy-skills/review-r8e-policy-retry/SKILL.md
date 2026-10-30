@@ -63,7 +63,8 @@ metastable failure) or wastes attempts on permanent errors.
 This reviewer judges ONLY the **retry configuration and its amplification /
 classification behavior**: `maxAttempts`, backoff strategy (ConstantBackoff
 synchronizes retry waves — prefer ExponentialJitterBackoff), jitter presence,
-`MaxDelay` cap, `PerAttemptTimeout`, error classification (the r8e default treats
+`MaxDelay` cap, `PerAttemptTimeout` (and whether it binds, ending strictly before
+the callers' deadline), error classification (the r8e default treats
 UNCLASSIFIED errors as TRANSIENT/retriable, so an unclassified retry burns 4xx /
 auth / validation errors that can never succeed), retry budgets on SHARED
 dependencies (`WithRetryBudget` / `WithSharedRetryBudget` / nested `Parent`) to
@@ -116,7 +117,10 @@ here; do not dismiss an observation as "probably not serious."
   failed together (mild thundering herd).
 - `MaxDelay` cap present? Unbounded exponential can balloon a single attempt's
   wait past the call's budget.
-- `PerAttemptTimeout` present / sane as a retry option.
+- `PerAttemptTimeout` present / sane as a retry option, and strictly shorter
+  than the time the callers' deadline leaves? One that falls on the same instant
+  or later arms no timer: it never cuts a hung attempt, so the attempt runs into
+  the caller's deadline and no second attempt runs.
 - Classification of permanent errors present (`Permanent()` / `RetryIf` / httpx
   classifier)? The service taxonomy: which errors are permanent (4xx auth /
   validation / business rejections)?
@@ -142,6 +146,11 @@ here; do not dismiss an observation as "probably not serious."
   or invert the test / miss a class?
 - Whether first-attempt-only / non-retriable errors are mishandled (retried when
   they should fast-fail, or classified Permanent when they are transient).
+- Nested r8e policy inside the fn: what the retry returns decides what the outer
+  breaker counts. Exhausted attempts wrap the nested rejection (`retries
+  exhausted: bulkhead full`); a `RetryIf` stop or an exhausted retry budget
+  passes it on bare, which `IsLocalRejection` reads as a local rejection. Note
+  it; the counting is the overload axis's.
 
 **Minimum threshold: 15 observations** for a non-trivial artifact. If fewer,
 explicitly justify triviality in writing.

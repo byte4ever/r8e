@@ -6,7 +6,9 @@ description: >-
   sized against downstream p50/p99 and the stated SLA, whether the retry+hedge
   SUM is capped (WithTimeBudget vs per-attempt), deadline propagation
   (PropagateDeadline / RespectInboundDeadline / httpx header) for fan-out and
-  ingress, AdaptiveTimeout / AdaptiveHedge for variable latency, and the
+  ingress, deadline attribution (an r8e deadline that does not end strictly
+  before the callers' arms no timer), AdaptiveTimeout / AdaptiveHedge for
+  variable latency, and the
   required-companion timeout rules whose absence panics NewPolicy. Use to review
   whether the call's latency is actually bounded. REJECT by default.
 ---
@@ -69,7 +71,10 @@ p50/p99 (too tight → false timeouts; too loose → no real protection, blows t
 upstream SLA); the retry×attempt-timeout worst-case latency vs the budget;
 `WithTimeBudget` capping the retry+hedge SUM vs a per-attempt `PerAttemptTimeout`;
 deadline propagation (`PropagateDeadline` + `httpx.InjectDeadline`) for fan-out;
-`RespectInboundDeadline` for ingress; `AdaptiveTimeout` for variable latency;
+`RespectInboundDeadline` for ingress; deadline attribution (whether
+`WithTimeout`, `PerAttemptTimeout` and a budget end strictly before the callers'
+deadline; one that does not arms no timer, so a hang ends with the caller's
+context error and no `OnTimeout`); `AdaptiveTimeout` for variable latency;
 the hedge DELAY sized vs p50/p95 (`AdaptiveHedge`); and the required-companion
 timeout rules whose absence panics `NewPolicy` (`WithCoalesce` and
 `RefreshAhead` REQUIRE `WithTimeout`; `WithTimeBudget` requires a retry/hedge
@@ -116,6 +121,17 @@ here; do not dismiss an observation as "probably not serious."
   (false-timeout storm) or far looser (no real protection)?
 - `WithTimeout` vs the stated SLA/budget: does the per-call ceiling fit inside the
   upstream SLA (a 2s timeout inside a 500ms SLA is nonsense)?
+- Deadline attribution: is `WithTimeout` (and `PerAttemptTimeout`, a
+  `PropagateDeadline` budget) strictly shorter than the time the callers'
+  deadline leaves when the call starts? An r8e deadline that comes on the same
+  instant or later arms no timer: the call ends with the caller's context
+  error, `OnTimeout` / `OnTimeBudgetExceeded` never fire, and the hang is the
+  caller's, not r8e's. Is the callers' deadline stated at all?
+- Budget on an inbound deadline / hedge gate: with `RespectInboundDeadline`, a
+  call the inbound deadline ends returns the caller's error (no
+  `ErrTimeBudgetExceeded`); retry only refuses an attempt that cannot fit while
+  the context is live. With `WithHedge` under a budget, no hedge fires once the
+  budget is spent.
 - Retry × attempt-timeout worst case: `WithRetry(n)` × the per-attempt deadline =
   worst-case chain latency. Does it exceed the budget? (3 × 2s = ~6s vs a 500ms
   SLA blows it.)
@@ -162,7 +178,8 @@ the latency surface is structurally bounded. Prioritise: retry/hedge with no har
 deadline (unbounded chain on a critical path), worst-case retry chain exceeding
 the SLA, a `WithTimeout` so loose a single slow call blows the SLA, a hedge delay
 below p50 doubling load, a required-companion timeout missing so `NewPolicy`
-panics at boot.
+panics at boot, an r8e deadline that never binds because the callers' comes
+first.
 
 ### Phase 3 — Scoring
 

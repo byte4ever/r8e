@@ -39,6 +39,16 @@ doubt between two levels, the one with a concrete propagation path wins.
 4. **Nested timeout mismatch.** The client's own timeout is shorter than
    `WithTimeout`, so the policy deadline never bites. Not a safety hole but the
    policy knob is inert — reconcile them.
+5. **r8e deadline not strictly shorter than the callers'.** `WithTimeout(2s)`
+   on calls whose callers set a 500 ms deadline (or `WithTimeout(1s)` under a
+   1 s edge deadline already partly spent). Propagation: the timeout arms no
+   timer; a hanging dependency is ended by the caller's deadline and returns the
+   caller's context error; `OnTimeout` never fires and the `Timeouts` counter
+   stays at zero while callers time out; under a breaker that makes caller
+   cancellations neutral, the hang never trips it (overload axis). Remediation:
+   size `WithTimeout` (and `PerAttemptTimeout`, the budget) strictly below the
+   time the callers' deadline leaves when the call starts. Scope: requires the
+   callers' deadline to be stated; when it is UNKNOWN, see NOTED #4.
 
 ## NOTED — observation for awareness, no action required
 
@@ -52,6 +62,10 @@ doubt between two levels, the one with a concrete propagation path wins.
    in-flight work — flag and defer the ctx-honoring defect to
    review-r8e-policy-call (out of this axis's lane to *fix*; note its effect on
    your timeout).
+4. The callers' deadline is not stated, and nothing in the policy depends on
+   whose deadline ends a hang — flag "confirm `WithTimeout` ends strictly before
+   the callers' deadline". (When a classifier makes caller cancellations
+   neutral, the overload axis scores it.)
 
 ## Anti-calibration (do NOT do this)
 
@@ -62,3 +76,7 @@ doubt between two levels, the one with a concrete propagation path wins.
   the call within budget — adaptive is an optimisation, not a missing bound.
 - Scoring the ctx-honoring defect itself as a timeout finding — it is the call
   axis's; you only note its effect on whether your deadline can cancel.
+- Re-litigating a stated caller deadline that is several times the r8e deadline
+  ("but how much is left?") with no sign that the call runs late in the request:
+  take it as binding. Flag the time left only when the margin is thin or the
+  context shows the deadline largely spent.

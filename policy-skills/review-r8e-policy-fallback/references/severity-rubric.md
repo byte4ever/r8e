@@ -48,6 +48,17 @@ doubt between two levels, the one with a concrete propagation path wins.
 4. **Negative cache stickiness.** `NegativeCache(d)` caches a failure that may have
    been transient for the full `d`. Acceptable if only stable failures (404) reach
    the negative cache; document which errors are cached.
+5. **`FallbackFunc` keyed on an r8e deadline that does not bind.** A
+   `WithFallbackFunc` serves its degraded value only when `errors.Is(err,
+   ErrTimeout)`, under `WithTimeout(300ms)`, while the stated caller (a page
+   renderer) gives the call a 200 ms deadline. Propagation: the policy timeout
+   arms no timer; a hang ends at 200 ms with the caller's
+   `context.DeadlineExceeded`, which the func does not recognise, so the raw
+   error surfaces where the degraded value was expected. Remediation: an r8e
+   deadline strictly shorter than the callers' (its sizing is the timeouts
+   axis's), or a func that also handles the caller's context error. Scope:
+   requires such a func and a stated caller deadline; when the callers'
+   deadline is UNKNOWN, NOTED "confirm".
 
 ## NOTED — observation for awareness, no action required
 
@@ -66,6 +77,12 @@ doubt between two levels, the one with a concrete propagation path wins.
   the coalesce/refresh-ahead REQUIREMENT as a correctness companion).
 - Calling a `nil` SLICE fallback unsafe — an empty slice is safe to range; only a
   nil POINTER/MAP the caller derefs is the hazard.
+- Recommending `IsLocalRejection` to discriminate shedding in a fallback: it
+  misses `ErrCircuitOpen`, `ErrThrottled`, `ErrSLOShed` and every wrapped
+  sentinel; a fallback uses `errors.Is`.
+- Scoring a static `WithFallback` value because it also fires when the caller's
+  own deadline ends the call: it fires on every error by design, and the value
+  goes to a caller that has given up.
 - Marking IMPORTANT for "the ttl could be shorter" with no stated change interval
   and no caller harm — that is at most NOTED.
 - Calling absence of a cache a BLOCKING — a missing cache returns correct (if

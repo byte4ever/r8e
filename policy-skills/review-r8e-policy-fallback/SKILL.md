@@ -67,8 +67,10 @@ This reviewer judges ONLY the **degraded-value and cached-result layer**:
   the static value safe to consume (a nil pointer the caller derefs vs a safe
   empty slice)? does a `FallbackFunc` discriminate the shed sentinels
   (`ErrCircuitOpen`/`ErrRateLimited`/…) from genuine downstream errors when its
-  degraded value is only appropriate for one of them? is the value semantically
-  correct as an *authoritative* result?
+  degraded value is only appropriate for one of them? does a `FallbackFunc`
+  keyed on `ErrTimeout` / `ErrTimeBudgetExceeded` miss the hangs that the
+  callers' deadline ends first (they carry the caller's context error)? is the
+  value semantically correct as an *authoritative* result?
 - `WithCache` correctness — keyFn collisions (distinct requests sharing a key →
   WRONG results returned to the wrong caller), empty/constant keys (opts out /
   pointless), ttl vs the data's change interval (a long ttl on changing data
@@ -126,7 +128,13 @@ here; do not dismiss an observation as "probably not serious."
 - `FallbackFunc` discriminates shed sentinels vs real errors: when the degraded
   value is only appropriate for shedding (or only for genuine failure), does the
   func test `errors.Is(err, ErrCircuitOpen/ErrRateLimited/…)` rather than firing
-  blindly on every error?
+  blindly on every error? (`errors.Is`, which also matches a wrapped sentinel;
+  `IsLocalRejection` matches only five bare sentinels and is for the breaker
+  classifier.)
+- `FallbackFunc` keyed on r8e deadline sentinels: does it degrade only on
+  `ErrTimeout` / `ErrTimeBudgetExceeded`? A hang that the callers' deadline ends
+  first (or on the same instant) returns the caller's context error instead,
+  with no r8e sentinel, so the func never serves its degraded value for it.
 - Fallback semantically correct as an authoritative result: would a caller
   treating the value as truth be misled (a fabricated "ok", a stale balance, a
   default that hides a real distinction)?

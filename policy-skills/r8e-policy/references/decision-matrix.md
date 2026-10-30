@@ -12,16 +12,18 @@ against `api-constraints.md` before presenting.
 | Idempotent read (GET) | `WithRetry` OK, `WithHedge` OK | re-execution and duplication are harmless |
 | Non-idempotent write, **no** idempotency key | NO `WithRetry`, NO `WithHedge` (or make the op idempotent first) | each re-execution moves state twice |
 | Non-idempotent write **with** an idempotency key the call sends | `WithRetry` OK (dedup downstream), `WithHedge` only if the key dedups concurrent dupes | the key collapses duplicates server-side |
-| Call ignores `ctx` | fix the call first; `WithTimeout` cannot cancel it (only stops *waiting*) | a "timeout" that can't cancel leaks work |
+| Call ignores `ctx` | fix the call first; `WithTimeout` cannot cancel it (only stops *waiting*); under a breaker, add `HalfOpenProbeLease` as a safety net (§4) | a "timeout" that can't cancel leaks work, and a hung probe keeps its half-open slot |
+| Call goes through another r8e policy (nested) | the function wraps or replaces the nested policy's errors before returning them | a bare nested rejection reads as this policy's own (`IsLocalRejection`): the breaker would never count the downstream's saturation |
 
 ## 2. Latency profile → deadlines
 
 | Trait | Implies | Range |
 |---|---|---|
 | Known p99 | `WithTimeout` ≈ p99 × 2–4 headroom (hard ceiling) | tight enough to protect, loose enough not to false-trip |
+| Callers set a deadline (request ctx) | keep `WithTimeout`, `PerAttemptTimeout` and a budget **strictly shorter** than the time it leaves when the call starts | an r8e deadline equal or later arms no timer: the caller's context error ends the call, no `OnTimeout`, and the hang is the caller's |
 | Variable / unknown p99 | `WithTimeout(ceiling)` + `AdaptiveTimeout(…)` | adaptive tightens below the ceiling from live successes |
 | Per-request budget / SLA across retries+hedge | `WithTimeBudget(d)` (needs a retry/hedge consumer) | caps the *sum*, tighter than per-attempt |
-| Cross-service deadline already on inbound ctx | `WithTimeBudget(d, RespectInboundDeadline())` | never run past the caller's deadline |
+| Cross-service deadline already on inbound ctx | `WithTimeBudget(d, RespectInboundDeadline())` | never run past the caller's deadline; a budget tightened to it is the caller's (its error, no `OnTimeBudgetExceeded`) |
 | This call fans out to further callees | `WithTimeBudget(d, PropagateDeadline())` (+ `httpx.InjectDeadline` for HTTP) | downstream stops when our budget is spent |
 | Heavy right tail, idempotent | `WithHedge(delay)` near p95, ideally `AdaptiveHedge(…)` + a concurrency budget | race only genuine stragglers, cap extra load |
 
@@ -44,8 +46,9 @@ against `api-constraints.md` before presenting.
 | Bursty arrivals, want to wait not reject | `WithBulkhead(n, BulkheadMaxWait(d))` or `BulkheadCoDel(target, interval)` | FIFO wait / controlled-delay shedding |
 | Unknown / variable capacity | `WithAdaptiveConcurrency(…)` (Gradient2) — NOT with Bulkhead | self-tunes from RTT |
 | Repeatedly-failing dependency | `WithCircuitBreaker(FailureThreshold, RecoveryTimeout)` | fast-fail while it's down |
-| Errors that say nothing about the dep's health reach the breaker (business/`Permanent` 4xx, caller cancellations, rejections by a bulkhead / rate limiter / adaptive concurrency inside the breaker) | add `CircuitBreakerClassifier(fn)`: `Permanent`/business and those `Err*` sentinels → `OutcomeNeutral`, the rest → `CallerCancellationIsNeutral(ctx, err)` | a run of them would open the breaker on a healthy dep |
-| Caller cancellations are neutral | keep an r8e deadline (`WithTimeout`, `PerAttemptTimeout`, `PropagateDeadline` budget) shorter than the callers' | else a hanging dep ends as neutral cancellations and never trips |
+| Errors that say nothing about the dep's health reach the breaker (business/`Permanent` 4xx, caller cancellations, rejections by a bulkhead / rate limiter / adaptive concurrency inside the breaker) | add `CircuitBreakerClassifier(fn)`: `Permanent`/business and `IsLocalRejection(err)` → `OutcomeNeutral`, the rest → `CallerCancellationIsNeutral(ctx, err)` | a run of them would open the breaker on a healthy dep; `IsLocalRejection` matches by identity, so a nested policy's wrapped rejection still counts (`errors.Is` would hide it) |
+| Caller cancellations are neutral | keep an r8e deadline (`WithTimeout`, `PerAttemptTimeout`, `PropagateDeadline` budget) **strictly** shorter than the callers' | else a hanging dep ends as neutral cancellations and never trips |
+| Under a breaker, a call can hang without returning (ignores `ctx`, or its `ctx` handling is unknown) | `HalfOpenProbeLease(d)`, `d` above the worst admission-to-report span: all attempts + backoff + bulkhead / rate-limiter wait | else a hung probe keeps the breaker half-open until restart (`WithTimeout` does not free its slot); a shorter `d` fails probes that would succeed |
 | Brownout (slow-but-200) is the real failure | add `SlowCallRate(d, rate)` | failure trip alone misses brownouts |
 | Healing downstream re-floods on close | add `RampRecovery(window)` | slow-start admission |
 | Hard external quota / RPS limit | `WithRateLimit(rate)` (+ `RateLimitBlocking()` to wait) | stay under quota |
@@ -71,8 +74,10 @@ against `api-constraints.md` before presenting.
 
 | Trait | Implies | Note |
 |---|---|---|
-| Any non-trivial policy | name it (`NewPolicy(name, …)`) | anonymous `Do` has no health visibility |
-| Failure modes must be visible | `WithHooks(&Hooks{…})` on the patterns present; metrics are automatic | wire hooks to the modes you protect against |
+| Any non-trivial policy | name it (`NewPolicy(name, …)`) and build it once | anonymous `Do` and an empty name have no health visibility |
+| Policies built per job / tenant / request | `defer policy.Registry().Unregister(policy)`, an empty name, or a `WithRegistry` registry dropped with them | a named policy stays registered: the registry and its health endpoints grow without bound |
+| Failure modes must be visible | `WithHooks(&Hooks{…})` on the patterns present; metrics are automatic | wire hooks to the modes you protect against; hooks run concurrently and may run after `Do` returned, so they must be safe for concurrent use |
+| Breaker with a classifier that makes outcomes neutral | `OnCircuitNeutral` hook, or an alert on `CircuitNeutralOutcomes` (`r8e.policy.circuit_neutral_outcomes`) | a neutral outcome reaches neither the failure counter nor the slow-call window: callers abandoning a slow dep only show there |
 | OTel shop | `r8eotel.Register(meter, reg)` + `r8eotel.Trace(policy, tp)` | metrics + tracing bridge |
 | Dedicated/owned dependency whose loss should pull the pod | `WithReadinessImpact()` | only when NOT fleet-shared |
 | Shared dependency | do NOT gate readiness | avoids fleet-wide readiness flip |
@@ -89,5 +94,9 @@ against `api-constraints.md` before presenting.
 6. Readiness impact only on non-shared deps.
 7. Fallback never fabricates a write success.
 8. With a breaker: errors that say nothing about the dep's health are neutral
-   (`CircuitBreakerClassifier`), and an r8e deadline ends a hanging call before
-   the callers give up.
+   (`CircuitBreakerClassifier`, local rejections through `IsLocalRejection`), and
+   an r8e deadline strictly shorter than the callers' ends a hanging call.
+9. With a breaker over a call that may hang without returning:
+   `HalfOpenProbeLease` above the worst probe span.
+10. Hooks safe for concurrent use; a policy built per job / tenant / request is
+    unregistered when done (or unnamed).

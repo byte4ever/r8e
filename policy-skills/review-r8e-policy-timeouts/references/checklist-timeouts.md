@@ -26,6 +26,30 @@ pre-dismiss.
 - [ ] If `WithTimeout` ≈ the budget, does it cap the WHOLE call (retries + hedge),
       or only one attempt?
 
+## Deadline attribution (whose deadline ends the call)
+- [ ] Is the callers' deadline STATED (the request context's deadline, an edge
+      proxy timeout, an inbound `grpc-timeout`)? If UNKNOWN, whether the r8e
+      deadline binds cannot be judged — observation.
+- [ ] Is `WithTimeout` STRICTLY shorter than the time the callers' deadline
+      leaves when the call starts? A timeout that falls on the same instant or
+      later arms no timer: the call ends with the caller's context error,
+      `OnTimeout` never fires, `ErrTimeout` is never returned, and
+      `IsCallerCancellation` reports the hang as the caller's.
+- [ ] Same for a retry `PerAttemptTimeout`: one that does not bind never cuts an
+      attempt, so the hung attempt runs into the caller's deadline.
+- [ ] Same for a `WithTimeBudget` + `PropagateDeadline` budget: one that does not
+      bind arms no timer and never raises `ErrTimeBudgetExceeded` for an
+      in-flight call.
+- [ ] With `RespectInboundDeadline`: the budget tightened to the inbound deadline
+      is the caller's. An in-flight call it ends returns the caller's context
+      error, with no `OnTimeBudgetExceeded`; only retry's refusal to start an
+      attempt that cannot fit, while the context is live, returns
+      `ErrTimeBudgetExceeded`. Does anything (alert, fallback) expect the
+      sentinel for the inbound deadline?
+- [ ] With `WithHedge` under a budget: once the budget is spent, no hedge fires;
+      the call waits for the primary and returns its result or the context's
+      error. Is a hedge counted on to rescue a slow primary late in the budget?
+
 ## Worst-case retry chain vs the budget
 - [ ] Compute `WithRetry(n)` × per-attempt deadline (+ backoff waits). Does the
       worst-case chain exceed the budget? (3 × 2s ≈ 6s vs a 500ms SLA blows it.)
