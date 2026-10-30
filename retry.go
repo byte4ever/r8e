@@ -158,6 +158,18 @@ func DoRetry[T any](
 		// a matchable ErrTimeBudgetExceeded sentinel, since a budget-exhausted
 		// deadline is a distinct outcome a caller may want to branch on.
 		if remaining, ok := timeBudgetRemaining(ctx, params.Clock); ok && delay >= remaining {
+			// A context that has already ended ended the call: return that
+			// end, not the budget's. The time-budget middleware attributes a
+			// deadline that is the budget's own (see budgetDeadlineFired), and
+			// a caller's deadline the context has reported stays the caller's.
+			// A caller's deadline that has passed but that the context has not
+			// reported yet (the caller's timer, or the budget's watcher, has
+			// not run) reads as live here, so the gate refuses the attempt as
+			// below.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, ctxErr //nolint:wrapcheck // preserving context error identity
+			}
+
 			params.Hooks.emitTimeBudgetExceeded()
 
 			return zero, fmt.Errorf("%w: %w", ErrTimeBudgetExceeded, lastErr)

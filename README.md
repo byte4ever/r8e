@@ -191,7 +191,7 @@ func main() {
 
 ### Timeout
 
-Cancel slow calls after a deadline. If the function doesn't complete in time, `r8e.ErrTimeout` is returned.
+Cancel slow calls after a deadline. If the function doesn't complete in time, `r8e.ErrTimeout` is returned. The timeout is r8e's only when it falls strictly before the caller's own deadline: if the caller's deadline comes first or on the same instant, `Do` returns the caller's context error and `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the caller's context ends; the function keeps running until it returns, so it must synchronise whatever it shares with the caller.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
@@ -574,7 +574,9 @@ StaleCache is standalone and wraps the entire policy call from the outside (see 
 retry and hedge. Before each retry, if the backoff alone would overrun the
 remaining budget, the retry **stops early** with `ErrTimeBudgetExceeded` (wrapping
 the real downstream error) instead of sleeping and launching an attempt that
-cannot finish in time; a hedge is not fired once the budget is spent.
+cannot finish in time; a hedge is not fired once the budget is spent. A context
+that has already ended returns its own error instead (see
+[Cross-service deadline propagation](#cross-service-deadline-propagation-ingress)).
 
 ```go
 policy := r8e.NewPolicy[Response]("svc",
@@ -639,9 +641,56 @@ policy := r8e.NewPolicy[Response]("middle-tier",
 )
 ```
 
-It tightens the cooperative gate retry and hedge consult, so a doomed attempt is
-not started once the inbound deadline leaves too little time. Config-expressible
-via `respect_inbound_deadline` (requires `time_budget`, else
+It tightens the cooperative gate retry and hedge consult. Retry does not start
+an attempt that cannot fit before the inbound deadline, and returns
+`ErrTimeBudgetExceeded`. Hedge fires no hedge once the budget is spent: it waits
+for the primary and returns its result, or the context's error once the context
+ends. Hedge's gate itself raises no `ErrTimeBudgetExceeded` and fires no
+`OnTimeBudgetExceeded`.
+
+With `PropagateDeadline`, the budget decides at its own deadline, as
+`DoTimeout` does. A caller that cancelled before it keeps the call: a failed
+call returns the caller's context error and `OnTimeBudgetExceeded` does not
+fire. Otherwise the budget cut the call: a failed call returns
+`ErrTimeBudgetExceeded`, even if the caller cancels or reaches its own, later
+deadline while the cut attempt is still returning. Without `WithHedge`, a call
+whose downstream still succeeds after the cut returns that success, without
+`OnTimeBudgetExceeded`. With `WithHedge`, hedge returns the context's error as
+soon as it sees the cut, without waiting for the downstream: the call returns
+`ErrTimeBudgetExceeded` and fires `OnTimeBudgetExceeded` once. Only a success
+that reaches hedge before it sees the cut stays a success. A deadline that is
+not the budget's own (the caller's came first or on the same instant, including
+one the budget adopted) is the caller's: a failed call returns the caller's
+context error, without `OnTimeBudgetExceeded`. Without `PropagateDeadline`, the
+budget sets no deadline and cuts nothing. A failed call whose caller's context
+has ended, before or after the budget's deadline, returns the caller's context
+error without `OnTimeBudgetExceeded`, unless retry's gate had already refused it
+with `ErrTimeBudgetExceeded`.
+
+The caller's context error comes once the caller's context reports its end. Go
+reports a passed deadline shortly after the deadline, when the context's timer
+runs, and the budget's context relays that end when its watcher runs. A
+downstream that stops on the caller's deadline by itself (a socket deadline, a
+gRPC or HTTP client) can fail inside that window. What the call returns then
+depends on retry:
+
+- with no retries left, the inner chain's error: the downstream's own, or
+  `ErrRetriesExhausted` wrapping it on retry's last attempt. A caller's context
+  that reports its end before the call returns still gives the caller's error;
+- with retries left and a budget deadline that is the caller's (adopted, or on
+  the same instant), retry's refusal, since the next attempt cannot fit:
+  `ErrTimeBudgetExceeded`, with `OnTimeBudgetExceeded`;
+- with retries left and a later budget deadline (the caller's comes strictly
+  first and `RespectInboundDeadline` is not set), retry handles the failure
+  like any other: it fires `OnRetry` and starts its backoff when the backoff
+  fits the budget. The backoff ends as soon as the caller's context reports its
+  end, and the call returns the caller's context error, without
+  `OnTimeBudgetExceeded`. If the retries run out before that, the call ends as
+  in the first case.
+
+`DoTimeout` has the same window.
+
+Config-expressible via `respect_inbound_deadline` (requires `time_budget`, else
 `ErrInboundDeadlineWithoutBudget`) and hot-reloadable via `Reconfigure`.
 
 For HTTP, where (unlike gRPC) the deadline is not propagated automatically, the

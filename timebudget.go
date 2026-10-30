@@ -52,9 +52,10 @@ type (
 	// budgetDeadlineCtx is a [context.Context] whose deadline is driven by the
 	// policy's injected [Clock] rather than the wall clock. It reports a real
 	// [context.Context.Deadline] so downstream callees (gRPC, HTTP) can shed work
-	// early, while its cancellation is fired by a [Clock] timer — so a fake clock
-	// cancels it deterministically in tests instead of waiting on real wall-clock
-	// time. See [WithTimeBudget] with [PropagateDeadline].
+	// early, while its cancellation is fired by a [Clock] timer when the deadline
+	// is the budget's own — so a fake clock cancels it deterministically in tests
+	// instead of waiting on real wall-clock time. A deadline that is the parent's
+	// arms no timer. See [WithTimeBudget] with [PropagateDeadline].
 	//
 	// Pattern: Adapter — bridges a Clock-driven timer to the context.Context
 	// interface so a fake clock fires a real downstream deadline deterministically.
@@ -68,6 +69,11 @@ type (
 		// parent's, so it is a deadline r8e set rather than one it adopted
 		// from the parent (see RespectInboundDeadline).
 		ownDeadline bool
+		// cut is true when the budget's own deadline ended the context:
+		// budgetDeadlineCtx.settle found the parent live, or past its own,
+		// later deadline. It is set once, under mu, when the context is
+		// resolved, and decides who owns the call (see budgetDeadlineFired).
+		cut bool
 	}
 )
 
@@ -78,7 +84,20 @@ type (
 // shed early. With it, the budget middleware derives a context whose
 // [context.Context.Deadline] reports the budget instant and whose cancellation
 // cancels an in-flight attempt once the budget expires, surfacing
-// [ErrTimeBudgetExceeded].
+// [ErrTimeBudgetExceeded] when the deadline is the budget's own, strictly
+// earlier than any deadline the context already has. A deadline that is the
+// caller's (it comes first or on the same instant, including one adopted
+// through [RespectInboundDeadline]) arms no budget timer: a call that the
+// caller's context ends returns that context's error, without
+// OnTimeBudgetExceeded. Before that, retry still refuses an attempt that
+// cannot fit, with ErrTimeBudgetExceeded (see [RespectInboundDeadline]).
+//
+// Like [DoTimeout], the budget decides who ended the call when its own
+// deadline fires: a caller that had already cancelled keeps the call and
+// gets its own context error. A caller whose own, later deadline has also
+// passed by then does not: the budget's deadline came first. A caller that
+// cancels later, while the cut attempt is still returning, does not change
+// the decision either.
 //
 // The deadline is driven by the policy's [Clock], not the wall clock, so it
 // stays deterministic under a fake test clock. Because a real
@@ -100,9 +119,10 @@ func PropagateDeadline() TimeBudgetOption {
 // wins", as in gRPC). Without it the budget is a fixed duration regardless of
 // any inbound deadline.
 //
-// It tightens the budget that retry and hedge consult (the cooperative gate),
-// so a doomed attempt is not started once the inbound deadline leaves too
-// little time; it never extends the budget beyond the configured duration.
+// It tightens the budget that retry and hedge consult (the cooperative gate):
+// retry does not start an attempt that cannot fit before the inbound deadline
+// and returns ErrTimeBudgetExceeded, and hedge fires no hedge once the budget
+// is spent. It never extends the budget beyond the configured duration.
 // Pair it with [PropagateDeadline] (egress) so a middle service both honors the
 // upstream deadline and re-emits the tightened value to its own downstream
 // callees. Like the budget itself the inbound deadline is read against the
@@ -156,8 +176,16 @@ func timeBudgetRemaining(ctx context.Context, clock Clock) (time.Duration, bool)
 // the context in a clock-driven deadline (see [PropagateDeadline]) that
 // downstream callees observe and that cancels an in-flight attempt when the
 // budget expires. Such a cancellation surfaces as [ErrTimeBudgetExceeded]
-// wrapping the downstream error, unifying it with the cooperative retry/hedge
-// stop path.
+// wrapping the error the inner chain returned, as retry's cooperative refusal
+// does. A failed call the caller's context ended returns that context's error
+// instead (see callerEndedTheCall).
+//
+// A downstream can stop on the propagated deadline by itself (a socket
+// deadline, a gRPC or HTTP client) and fail before the watcher has run. A
+// call that returns once the budget's deadline has passed therefore settles
+// the context before the attribution, as the watcher would have. For a
+// deadline that is the parent's, settle only records an end the parent has
+// already reported.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func applyHardDeadline[T any](
@@ -172,7 +200,11 @@ func applyHardDeadline[T any](
 
 	val, err := next(hardCtx)
 
-	if budgetDeadlineFired(ctx, hardCtx, err) {
+	if !params.clock.Now().Before(params.deadline) {
+		hardCtx.settle()
+	}
+
+	if budgetDeadlineFired(hardCtx, err) {
 		params.hooks.emitTimeBudgetExceeded()
 
 		var zero T
@@ -180,36 +212,89 @@ func applyHardDeadline[T any](
 		return zero, fmt.Errorf("%w: %w", ErrTimeBudgetExceeded, err)
 	}
 
+	if callerEndedTheCall(ctx, hardCtx, err) {
+		var zero T
+
+		return zero, ctx.Err() //nolint:wrapcheck // the caller's own context error
+	}
+
 	return val, err
 }
 
-// budgetDeadlineFired reports whether next failed because THIS budget's
-// clock-driven deadline cancelled an in-flight attempt: our own deadline expired
-// (hardCtx) while the parent is still live — mirroring DoTimeout's
-// timeout-vs-parent-cancel distinction, so a parent cancellation or a tighter
-// parent deadline is not misattributed to the budget.
+// budgetDeadlineFired reports whether next failed because THIS budget's own
+// deadline cut the call: hardCtx records whether its own deadline ended the
+// context (see budgetDeadlineCtx.settle). The decision is made once, the
+// first time the budget's deadline or the parent's end is observed, as
+// DoTimeout decides when its timeout fires: a parent that cancels afterwards,
+// while the cut attempt is still returning, does not take the call back. A
+// parent found cancelled, or a deadline that is the parent's (it arms no
+// budget timer, see newBudgetDeadlineCtx), leaves the call to the parent (see
+// callerEndedTheCall).
 //
-// The final clause skips re-attribution when the inner cooperative path already
-// raised ErrTimeBudgetExceeded: when the deadline cancels an in-flight attempt,
-// retry's own budget check often trips on the same expired budget, so wrapping
-// again here would double the sentinel and double-fire the hook and metric.
-func budgetDeadlineFired(
+// The final clause skips re-attribution when retry's cooperative check already
+// raised ErrTimeBudgetExceeded and fired the hook: retry refused an attempt
+// while the budget context was still live, and the budget timer fired before
+// applyHardDeadline checked. Without the clause, such a call would wrap the
+// sentinel twice and fire OnTimeBudgetExceeded twice. When the deadline cuts
+// an attempt in flight, retry raises no sentinel: it returns an error that is
+// not ErrTimeBudgetExceeded (the context's end, the attempt's own error, or
+// ErrRetriesExhausted wrapping it), and this function attributes any such
+// error.
+func budgetDeadlineFired(hardCtx *budgetDeadlineCtx, err error) bool {
+	return err != nil &&
+		hardCtx.cutByBudget() &&
+		!errors.Is(err, ErrTimeBudgetExceeded)
+}
+
+// callerEndedTheCall reports whether a failed call is the caller's: the
+// caller's context has ended and the budget's own deadline did not cut the
+// call first. hardCtx is nil for a cooperative budget, which sets no deadline
+// of its own. The call then returns the caller's context error, as DoTimeout
+// does, whatever error the inner chain reported once its context ended (a
+// downstream's own deadline error, or ErrRetriesExhausted on retry's last
+// attempt). An error that already carries ErrTimeBudgetExceeded, from retry's
+// cooperative refusal, keeps it.
+func callerEndedTheCall(
 	parent context.Context,
 	hardCtx *budgetDeadlineCtx,
 	err error,
 ) bool {
 	return err != nil &&
-		parent.Err() == nil &&
-		errors.Is(hardCtx.Err(), context.DeadlineExceeded) &&
+		parent.Err() != nil &&
+		(hardCtx == nil || !hardCtx.cutByBudget()) &&
 		!errors.Is(err, ErrTimeBudgetExceeded)
+}
+
+// applyCooperativeBudget runs next under the time budget in cooperative mode:
+// it attaches the budget value retry and hedge consult and sets no deadline.
+// A failed call the caller's context ended returns that context's error, as
+// in hard mode (see callerEndedTheCall).
+//
+//nolint:ireturn // generic type parameter T, not an interface
+func applyCooperativeBudget[T any](
+	ctx context.Context,
+	next func(context.Context) (T, error),
+	deadline time.Time,
+) (T, error) {
+	val, err := next(attachTimeBudget(ctx, deadline))
+
+	if callerEndedTheCall(ctx, nil, err) {
+		var zero T
+
+		return zero, ctx.Err() //nolint:wrapcheck // the caller's own context error
+	}
+
+	return val, err
 }
 
 // newBudgetDeadlineCtx derives a clock-driven deadline context from parent that
 // expires at deadline. deadline is the single source of truth — the absolute
 // instant Deadline reports AND the instant the watcher's timer fires (its
 // duration is derived as deadline-now), so the reported and enforced deadlines
-// cannot drift apart. The returned cancel func releases the watcher goroutine
-// and timer; callers must always invoke it.
+// cannot drift apart. A deadline that does not bind (see deadlineBinds) is the
+// parent's: the context then reports the parent's deadline, arms no timer and
+// ends only with the parent or the cancel func. The returned cancel func
+// releases the watcher goroutine and timer; callers must always invoke it.
 func newBudgetDeadlineCtx(
 	parent context.Context,
 	clock Clock,
@@ -220,11 +305,10 @@ func newBudgetDeadlineCtx(
 	// A budget that does not end strictly before the parent ends on the
 	// parent's deadline, so it is not the budget's own.
 	effective := deadline
-	ownDeadline := true
+	ownDeadline := deadlineBinds(parent, deadline)
 
-	if pd, ok := parent.Deadline(); ok && !deadline.Before(pd) {
-		effective = pd
-		ownDeadline = false
+	if !ownDeadline {
+		effective, _ = parent.Deadline() // set, since the deadline does not bind
 	}
 
 	bctx := &budgetDeadlineCtx{
@@ -236,17 +320,30 @@ func newBudgetDeadlineCtx(
 
 	cancel := func() { bctx.cancel(context.Canceled) }
 
-	// A parent already done, or an already-spent budget (deadline now or past),
-	// resolves immediately with no timer or goroutine to manage.
-	if err := parent.Err(); err != nil {
-		bctx.cancel(err)
+	// A parent already done resolves immediately, with no timer or goroutine
+	// to manage. settle decides as the watcher would: the budget instant was
+	// taken before this check, so a parent found past a later deadline of its
+	// own reached it after the budget's.
+	if parent.Err() != nil {
+		bctx.settle()
 
 		return bctx, cancel
 	}
 
+	if !ownDeadline {
+		// The deadline is the parent's: arm no timer and follow the parent
+		// alone, so the call ends when the caller's context does and that
+		// context already reports its end, as withPolicyTimeout does.
+		go bctx.watch(nil)
+
+		return bctx, cancel
+	}
+
+	// A budget of its own that is already spent (deadline now or past)
+	// resolves immediately too.
 	remaining := deadline.Sub(clock.Now())
 	if remaining <= 0 {
-		bctx.cancel(context.DeadlineExceeded)
+		bctx.settle()
 
 		return bctx, cancel
 	}
@@ -256,26 +353,71 @@ func newBudgetDeadlineCtx(
 	return bctx, cancel
 }
 
-// watch resolves the context when the budget timer fires, the parent is
-// cancelled, or the returned cancel func is called, then stops the timer. It is
-// a single goroutine that always exits, so it cannot leak.
+// watch resolves the context when the budget timer fires, the parent ends, or
+// the returned cancel func is called, then stops the timer. The timer and the
+// parent take the same path: when both are ready, select picks either one, and
+// settle decides from the parent's state, not from the arm. A nil timer (a
+// deadline that is the parent's) leaves only the parent and the cancel func.
+// It is a single goroutine that always exits, so it cannot leak.
 func (c *budgetDeadlineCtx) watch(timer Timer) {
+	var fired <-chan time.Time
+	if timer != nil {
+		fired = timer.C()
+		defer timer.Stop()
+	}
+
 	select {
-	case <-timer.C():
-		c.cancel(context.DeadlineExceeded)
+	case <-fired:
+		c.settle()
 	case <-c.parent.Done():
-		c.cancel(c.parent.Err())
+		c.settle()
 	case <-c.done:
 		// Resolved by an explicit cancel; nothing to record.
 	}
-
-	timer.Stop()
 }
 
-// cancel resolves the context with err the first time it is called; later calls
-// are no-ops, so the first cause (timer, parent, or explicit cancel) wins and
-// Err is non-nil once Done is closed.
+// cancel resolves the context with err and no cut, unless it is already
+// resolved. Only the returned cancel func uses it: the budget's deadline and
+// the parent's end go through settle.
 func (c *budgetDeadlineCtx) cancel(err error) {
+	c.resolve(err, false)
+}
+
+// settle resolves the context once the budget's own deadline or the parent's
+// end is observed, and decides who ended the call as DoTimeout does. The
+// watcher calls it, and so do newBudgetDeadlineCtx, for a parent already done
+// or a budget already spent, and applyHardDeadline, for a call that returns
+// after the deadline. A deadline that is the parent's (the budget then arms
+// no timer) ends only with the parent: while the parent is live, settle
+// leaves the context unresolved. A parent found cancelled keeps the call, and
+// so does a parent whose deadline is the one the context reports: the
+// context takes the parent's error. Any other end is the budget's. Its own
+// deadline comes strictly before the parent's, so a parent found past its
+// deadline reached it after the budget's: the context ends with
+// [context.DeadlineExceeded] and cut records that the budget ended the call.
+func (c *budgetDeadlineCtx) settle() {
+	err := c.parent.Err()
+	if err == nil && !c.ownDeadline {
+		// The deadline is the parent's, and the parent has not ended yet.
+		return
+	}
+
+	if err != nil &&
+		(!c.ownDeadline || !errors.Is(err, context.DeadlineExceeded)) {
+		c.resolve(err, false)
+
+		return
+	}
+
+	c.resolve(context.DeadlineExceeded, true)
+}
+
+// resolve sets the context's error and whether the budget cut the call, the
+// first time it is called. Every cause goes through it (settle for the
+// budget's deadline and the parent's end, cancel for the returned cancel
+// func), so the first cause wins, later calls are no-ops and Err is non-nil
+// once Done is closed.
+func (c *budgetDeadlineCtx) resolve(err error, cut bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -284,7 +426,17 @@ func (c *budgetDeadlineCtx) cancel(err error) {
 	}
 
 	c.err = err
+	c.cut = cut
 	close(c.done)
+}
+
+// cutByBudget reports whether the budget's own deadline ended the context (see
+// settle).
+func (c *budgetDeadlineCtx) cutByBudget() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.cut
 }
 
 // Deadline reports the clock-derived budget instant so downstream callees can

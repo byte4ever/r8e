@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 )
@@ -85,12 +86,23 @@ const (
 	defaultAdaptiveTimeoutMinSamples = 20
 )
 
-// DoTimeout executes fn with a timeout. If fn does not complete within d,
-// the context is cancelled and ErrTimeout is returned.
+// DoTimeout executes fn with a timeout. If fn does not complete within
+// timeout, the context is cancelled and ErrTimeout is returned.
 //
-// The context passed to fn records this deadline as r8e's own when it is
-// earlier than any deadline ctx already has, which is how
-// [IsCallerCancellation] tells it from the caller's. Its Err and
+// The timeout is r8e's only when it is earlier than any deadline ctx already
+// has. When ctx's own deadline falls before it or on the same instant,
+// DoTimeout arms no timer of its own: the call ends when ctx does, and
+// DoTimeout returns ctx's error, which ctx already reports, without firing
+// OnTimeout. That is the rule [IsCallerCancellation] applies too. A timeout
+// that binds stays r8e's even when ctx reaches its own, later deadline by the
+// time DoTimeout looks; a caller cancellation found then is the caller's.
+//
+// DoTimeout returns as soon as the timeout fires or ctx ends, without waiting
+// for fn: fn keeps running on its own goroutine until it returns, so it must
+// synchronise whatever it shares with the caller.
+//
+// The context passed to fn records this deadline as r8e's own when it binds,
+// which is how IsCallerCancellation tells it from the caller's. Its Err and
 // [context.Cause] are those of any context.WithTimeout context.
 //
 //nolint:ireturn // generic type parameter T, not an interface
@@ -107,9 +119,13 @@ func DoTimeout[T any](
 		return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
 	}
 
-	// Create derived context with timeout.
+	// Derive the timeout's context. A timeout that does not bind arms no
+	// timer: the derived context then only follows ctx.
 	timeoutCtx, cancel := withPolicyTimeout(ctx, timeout)
 	defer cancel()
+
+	timeoutDeadline, _ := timeoutCtx.Deadline() // ctx's when the timeout does not bind
+	binds := deadlineBinds(ctx, timeoutDeadline)
 
 	// Run fn in a goroutine and collect result via channel.
 	type result struct {
@@ -129,10 +145,13 @@ func DoTimeout[T any](
 	case r := <-ch:
 		return r.val, r.err
 	case <-timeoutCtx.Done():
-		// Distinguish between timeout and parent cancellation.
-		// If the parent context is done, the parent was cancelled externally.
-		if ctx.Err() != nil {
-			return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
+		// Distinguish between timeout and parent end. A done parent ended the
+		// call when it was cancelled, or when its own deadline came no later
+		// than the timeout (which then armed no timer). A parent that only
+		// reached its own, later deadline since the timeout fired did not:
+		// the binding timeout came strictly first.
+		if err := ctx.Err(); err != nil && (!binds || !errors.Is(err, context.DeadlineExceeded)) {
+			return zero, err //nolint:wrapcheck // preserving context error identity
 		}
 		// Otherwise, the derived context's deadline was exceeded.
 		hooks.emitTimeout()
@@ -141,24 +160,36 @@ func DoTimeout[T any](
 	}
 }
 
-// withPolicyTimeout derives a context.WithTimeout context for a timeout r8e
-// sets. When that timeout binds, being earlier than any deadline ctx already
-// has, the derived context also records its deadline under policyDeadlineKey.
-// A timeout that does not bind leaves the recorded deadline to whoever set the
-// earlier one. The recorded instant is the one timeoutCtx.Deadline() reports,
-// not a second clock read: IsCallerCancellation requires the two to be equal.
+// withPolicyTimeout derives the context for a timeout r8e sets. When the
+// timeout binds (see deadlineBinds), the derived context is a
+// context.WithDeadline context that also records its deadline under
+// policyDeadlineKey: the same instant its Deadline reports, as
+// IsCallerCancellation requires. A timeout that does not bind arms no timer of
+// its own: the derived context only follows ctx, which ends first or on the
+// same instant, so the call ends with ctx's error and the recorded deadline
+// stays with whoever set the earlier one.
 func withPolicyTimeout(
 	ctx context.Context,
 	timeout time.Duration,
 ) (context.Context, context.CancelFunc) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-
-	deadline, _ := timeoutCtx.Deadline() // always set by WithTimeout
-	if parentDeadline, ok := ctx.Deadline(); ok && !deadline.Before(parentDeadline) {
-		return timeoutCtx, cancel
+	deadline := time.Now().Add(timeout)
+	if !deadlineBinds(ctx, deadline) {
+		return context.WithCancel(ctx)
 	}
 
+	timeoutCtx, cancel := context.WithDeadline(ctx, deadline)
+
 	return context.WithValue(timeoutCtx, policyDeadlineKey{}, deadline), cancel
+}
+
+// deadlineBinds reports whether a deadline r8e sets at the instant deadline is
+// its own: strictly earlier than any deadline parent already has. A deadline on
+// the same instant as the parent's, or later, is the parent's. The policy
+// timeouts and the time budget share this rule.
+func deadlineBinds(parent context.Context, deadline time.Time) bool {
+	parentDeadline, ok := parent.Deadline()
+
+	return !ok || deadline.Before(parentDeadline)
 }
 
 // AdaptiveTimeout enables percentile-driven adaptive timeout on a [WithTimeout]

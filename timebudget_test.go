@@ -3,21 +3,40 @@ package r8e
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// budgetClock has a frozen, settable Now and fires timers immediately, so
-// time-budget tests are deterministic: remaining = deadline - Now is exact and
-// independent of the wall clock, while retry backoff sleeps complete at once.
-type budgetClock struct {
-	now time.Time
-	mu  sync.Mutex
-}
+type (
+	// budgetClock has a frozen, settable Now and fires timers immediately, so
+	// time-budget tests are deterministic: remaining = deadline - Now is exact
+	// and independent of the wall clock, while retry backoff sleeps complete
+	// at once.
+	budgetClock struct {
+		now time.Time
+		mu  sync.Mutex
+	}
+
+	// unseenParent is a caller context whose end the budget's watcher cannot
+	// see: Done never closes. It reports a deadline and ends with the error
+	// end sets, as a context the runtime ended before the watcher was
+	// scheduled.
+	unseenParent struct {
+		context.Context
+
+		err      error
+		deadline time.Time
+		mu       sync.Mutex
+	}
+)
 
 func newBudgetClock() *budgetClock {
 	return &budgetClock{now: time.Unix(1_700_000_000, 0)}
@@ -50,6 +69,24 @@ func (c *budgetClock) advance(d time.Duration) {
 	defer c.mu.Unlock()
 
 	c.now = c.now.Add(d)
+}
+
+func (p *unseenParent) Deadline() (time.Time, bool) { return p.deadline, true }
+
+func (p *unseenParent) Done() <-chan struct{} { return nil }
+
+func (p *unseenParent) Err() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.err
+}
+
+func (p *unseenParent) end(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.err = err
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +157,7 @@ func TestWithTimeBudgetStopsRetryEarly(t *testing.T) {
 	assert.Equal(t, 1, attempts, "no retry should run once the budget is spent")
 	assert.Equal(t, 1, *exceeded)
 	assert.Equal(t, int64(1), policy.Metrics().TimeBudgetExceeded)
+	assert.Zero(t, policy.Metrics().Retries, "a refused retry fires no OnRetry")
 }
 
 func TestWithTimeBudgetStopsAtExactBoundary(t *testing.T) {
@@ -501,10 +539,10 @@ func TestBudgetDeadlineCtxParentDeadlinePropagatesCause(t *testing.T) {
 
 	require.NoError(t, child.Err()) // live until the parent's deadline fires
 
-	// Two timers exist: parent's (index 0) and child's (index 1). Fire only the
-	// parent's so the child resolves via its parent-Done branch, not its own.
-	require.Eventually(t, func() bool { return clk.timerCount() >= 2 },
-		waitTimeout, waitTick)
+	// The child's deadline comes after the parent's, so it is the parent's:
+	// the child arms no timer of its own and resolves via its parent-Done
+	// branch. Only the parent's timer (index 0) exists.
+	require.Equal(t, 1, clk.timerCount(), "a deadline that is the parent's arms no timer")
 	clk.getTimer(0).fire()
 
 	<-child.Done()
@@ -667,10 +705,11 @@ func TestWithTimeBudgetPropagateCancelsInFlightAttempt(t *testing.T) {
 func TestWithTimeBudgetPropagateCountsExceededOnce(t *testing.T) {
 	t.Parallel()
 
-	// budget(1ms) << backoff(1h): once the hard deadline cancels the in-flight
-	// attempt, retry's own cooperative check also trips on the spent budget. The
-	// sentinel must be raised — and the hook/metric counted — exactly once, not
-	// doubled by both paths.
+	// budget(30m) < backoff(1h): the hard deadline cancels the in-flight
+	// attempt, and retry's gate then finds the context ended and returns its
+	// end, with no sentinel of its own. The budget layer raises the sentinel,
+	// and counts the hook and metric, exactly once. The budget is long enough
+	// that it is never spent before its timer exists.
 	clk := newTestClock()
 
 	exceeded := 0
@@ -679,7 +718,7 @@ func TestWithTimeBudgetPropagateCountsExceededOnce(t *testing.T) {
 		WithClock(clk),
 		WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded++ }}),
 		WithRetry(3, ConstantBackoff(time.Hour)),
-		WithTimeBudget(time.Millisecond, PropagateDeadline()),
+		WithTimeBudget(30*time.Minute, PropagateDeadline()),
 	)
 
 	started := make(chan struct{})
@@ -745,10 +784,9 @@ func TestWithTimeBudgetPropagateDoesNotAttributeParentDeadline(t *testing.T) {
 
 	// The PARENT context is already past its own deadline, so its failure
 	// surfaces as context.DeadlineExceeded — the same error our hard deadline
-	// would raise. The `parent.Err() == nil` guard must keep this attributed to
-	// the parent, NOT re-wrapped as a budget breach (mirrors DoTimeout's
-	// parent-cancel distinction). Dropping that guard would ship green without
-	// this test.
+	// would raise. The budget's deadline does not bind, so it never cuts the
+	// call: the call stays the parent's, NOT re-wrapped as a budget breach
+	// (mirrors DoTimeout's parent-deadline rule).
 	exceeded := 0
 
 	policy := NewPolicy[string]("parent-deadline",
@@ -1152,4 +1190,427 @@ func TestReconfigureRespectInboundDeadlineAbsent(t *testing.T) {
 	on := true
 	err := policy.Reconfigure(PolicyConfig{RespectInboundDeadline: &on})
 	require.ErrorIs(t, err, ErrInboundDeadlineWithoutBudget)
+}
+
+func TestApplyHardDeadlineKeepsARetryRefusalMadeBeforeTheCut(t *testing.T) {
+	t.Parallel()
+
+	clk := newTestClock()
+
+	var exceeded atomic.Int32
+
+	hooks := &Hooks{OnTimeBudgetExceeded: func() { exceeded.Add(1) }}
+
+	// next plays retry's cooperative refusal while the budget context is
+	// still live; the budget timer then fires before applyHardDeadline looks.
+	next := func(ctx context.Context) (string, error) {
+		require.NoError(t, ctx.Err())
+
+		hooks.emitTimeBudgetExceeded()
+		refused := fmt.Errorf("%w: %w", ErrTimeBudgetExceeded, errDownstream)
+
+		clk.getTimer(0).fire()
+		<-ctx.Done()
+
+		return "", refused
+	}
+
+	_, err := applyHardDeadline(context.Background(), next, hardDeadlineParams{
+		clock:    clk,
+		hooks:    hooks,
+		deadline: clk.Now().Add(time.Hour),
+	})
+
+	require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+	require.ErrorIs(t, err, errDownstream)
+	assert.EqualValues(t, 1, exceeded.Load(), "the hook fires once")
+	assert.Equal(t, 1, strings.Count(err.Error(), ErrTimeBudgetExceeded.Error()),
+		"the sentinel is wrapped once")
+}
+
+func TestApplyHardDeadlineKeepsARetryRefusalWhenTheCallerEndsAfter(t *testing.T) {
+	t.Parallel()
+
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Retry refused an attempt while the caller was live; the caller cancels
+	// right after, before applyHardDeadline looks. The refusal stands.
+	next := func(context.Context) (string, error) {
+		refused := fmt.Errorf("%w: %w", ErrTimeBudgetExceeded, errDownstream)
+		cancel()
+
+		return "", refused
+	}
+
+	_, err := applyHardDeadline(parent, next, hardDeadlineParams{
+		clock:    newTestClock(),
+		hooks:    &Hooks{},
+		deadline: time.Now().Add(time.Hour),
+	})
+
+	require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+	require.ErrorIs(t, err, errDownstream)
+}
+
+func TestBudgetDeadlineCtxSettleDecidesFromTheParent(t *testing.T) {
+	t.Parallel()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	live, cancelLive := context.WithDeadline(
+		context.Background(), time.Now().Add(time.Hour),
+	)
+	t.Cleanup(cancelLive)
+
+	expired, cancelExpired := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Hour),
+	)
+	t.Cleanup(cancelExpired)
+
+	tests := []struct {
+		parent      context.Context
+		wantErr     error
+		name        string
+		ownDeadline bool
+		wantCut     bool
+	}{
+		{
+			name: "parent live", parent: context.Background(), ownDeadline: true,
+			wantErr: context.DeadlineExceeded, wantCut: true,
+		},
+		{
+			name: "parent cancelled", parent: cancelled, ownDeadline: true,
+			wantErr: context.Canceled,
+		},
+		{
+			name: "parent past its later deadline", parent: expired, ownDeadline: true,
+			wantErr: context.DeadlineExceeded, wantCut: true,
+		},
+		{
+			name: "parent past the deadline it set", parent: expired,
+			wantErr: context.DeadlineExceeded,
+		},
+		{name: "parent live, with the deadline it set", parent: live},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := &budgetDeadlineCtx{
+				parent:      tt.parent,
+				done:        make(chan struct{}),
+				ownDeadline: tt.ownDeadline,
+			}
+
+			c.settle()
+
+			if tt.wantErr == nil {
+				require.NoError(t, c.Err(), "nothing has ended yet")
+			}
+
+			require.ErrorIs(t, c.Err(), tt.wantErr)
+			assert.Equal(t, tt.wantCut, c.cutByBudget())
+		})
+	}
+}
+
+func TestBudgetDeadlineCtxWatchDecidesTheSameWhicheverArmItPicks(t *testing.T) {
+	t.Parallel()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	expired, cancelExpired := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Hour),
+	)
+	t.Cleanup(cancelExpired)
+
+	tests := []struct {
+		parent  context.Context
+		wantErr error
+		name    string
+		wantCut bool
+	}{
+		{
+			name: "parent past its later deadline", parent: expired,
+			wantErr: context.DeadlineExceeded, wantCut: true,
+		},
+		{name: "parent cancelled", parent: cancelled, wantErr: context.Canceled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The budget timer has fired and the parent has ended, so select
+			// may pick either arm: the decision must not depend on which.
+			for range 200 {
+				c := &budgetDeadlineCtx{
+					parent:      tt.parent,
+					done:        make(chan struct{}),
+					ownDeadline: true,
+				}
+
+				timer := newTestTimer()
+				timer.fire()
+
+				c.watch(timer)
+
+				require.ErrorIs(t, c.Err(), tt.wantErr)
+				require.Equal(t, tt.wantCut, c.cutByBudget())
+			}
+		})
+	}
+}
+
+func TestApplyHardDeadlineKeepsTheCutWhenTheWatcherRunsLate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		wantErr     error
+		name        string
+		cancelAfter time.Duration
+		wantHooks   int32
+	}{
+		{
+			name:    "the caller's later deadline has passed",
+			wantErr: ErrTimeBudgetExceeded, wantHooks: 1,
+		},
+		{
+			name:        "the caller cancelled",
+			cancelAfter: 15 * time.Millisecond, wantErr: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var exceeded atomic.Int32
+
+				// The budget's deadline is 10ms, the caller's 20ms. The budget
+				// timer never fires, so the watcher only sees the caller's
+				// end, as on a loaded machine where it runs late.
+				deadline := time.Now().Add(10 * time.Millisecond)
+
+				parent, cancel := context.WithDeadline(
+					t.Context(), deadline.Add(10*time.Millisecond),
+				)
+				defer cancel()
+
+				if tt.cancelAfter > 0 {
+					time.AfterFunc(tt.cancelAfter, cancel)
+				}
+
+				_, err := applyHardDeadline(parent,
+					func(ctx context.Context) (string, error) {
+						<-ctx.Done()
+
+						return "", ctx.Err()
+					},
+					hardDeadlineParams{
+						clock:    newTestClock(),
+						hooks:    &Hooks{OnTimeBudgetExceeded: func() { exceeded.Add(1) }},
+						deadline: deadline,
+					})
+
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.Equal(t, tt.wantHooks, exceeded.Load())
+
+				if tt.wantHooks == 0 {
+					require.NotErrorIs(t, err, ErrTimeBudgetExceeded)
+				}
+			})
+		})
+	}
+}
+
+func TestNewBudgetDeadlineCtxSettlesAParentAlreadyDone(t *testing.T) {
+	t.Parallel()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	expired, cancelExpired := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Hour),
+	)
+	t.Cleanup(cancelExpired)
+
+	tests := []struct {
+		parent  context.Context
+		wantErr error
+		name    string
+		wantCut bool
+	}{
+		{
+			name: "parent past its later deadline", parent: expired,
+			wantErr: context.DeadlineExceeded, wantCut: true,
+		},
+		{name: "parent cancelled", parent: cancelled, wantErr: context.Canceled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// budgetClock's frozen Now is years behind the parent's real
+			// deadline, so the budget deadline is its own and came first.
+			clk := newBudgetClock()
+
+			c, cancelBudget := newBudgetDeadlineCtx(
+				tt.parent, clk, clk.Now().Add(time.Millisecond),
+			)
+			defer cancelBudget()
+
+			require.True(t, c.ownDeadline)
+			require.ErrorIs(t, c.Err(), tt.wantErr)
+			assert.Equal(t, tt.wantCut, c.cutByBudget())
+		})
+	}
+}
+
+func TestApplyHardDeadlineSettlesWhenTheDownstreamStopsOnTheDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		endErr         error
+		wantErr        error
+		name           string
+		callerDeadline time.Duration
+		endAt          time.Duration
+		returnAt       time.Duration
+		wantHooks      int32
+	}{
+		{
+			name: "the caller's later deadline has passed", callerDeadline: 15 * time.Millisecond,
+			endAt: 15 * time.Millisecond, endErr: context.DeadlineExceeded,
+			returnAt: 20 * time.Millisecond, wantErr: ErrTimeBudgetExceeded, wantHooks: 1,
+		},
+		{
+			name: "the caller is still live", callerDeadline: 15 * time.Millisecond,
+			returnAt: 20 * time.Millisecond, wantErr: ErrTimeBudgetExceeded, wantHooks: 1,
+		},
+		{
+			name: "the caller cancelled before the budget's deadline", callerDeadline: 15 * time.Millisecond,
+			endAt: 5 * time.Millisecond, endErr: context.Canceled,
+			returnAt: 20 * time.Millisecond, wantErr: context.Canceled,
+		},
+		{
+			name: "the downstream fails at the budget's deadline", callerDeadline: 15 * time.Millisecond,
+			returnAt: 10 * time.Millisecond, wantErr: ErrTimeBudgetExceeded, wantHooks: 1,
+		},
+		{
+			name: "the downstream fails before the budget's deadline", callerDeadline: 15 * time.Millisecond,
+			returnAt: 5 * time.Millisecond, wantErr: errDownstream,
+		},
+		{
+			name: "the deadline is the caller's", callerDeadline: 10 * time.Millisecond,
+			returnAt: 20 * time.Millisecond, wantErr: errDownstream,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var exceeded atomic.Int32
+
+				// The budget's deadline is 10ms. Neither the budget timer nor
+				// the caller's end reaches the watcher, so only the check after
+				// next can decide.
+				start := time.Now()
+				deadline := start.Add(10 * time.Millisecond)
+				parent := &unseenParent{
+					Context:  context.Background(),
+					deadline: start.Add(tt.callerDeadline),
+				}
+
+				if tt.endAt > 0 {
+					time.AfterFunc(tt.endAt, func() { parent.end(tt.endErr) })
+				}
+
+				// The downstream stops on its own timer and reports its own
+				// error, without looking at its context.
+				_, err := applyHardDeadline(parent,
+					func(context.Context) (string, error) {
+						time.Sleep(tt.returnAt)
+
+						return "", errDownstream
+					},
+					hardDeadlineParams{
+						clock:    newTestClock(),
+						hooks:    &Hooks{OnTimeBudgetExceeded: func() { exceeded.Add(1) }},
+						deadline: deadline,
+					})
+
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.Equal(t, tt.wantHooks, exceeded.Load())
+
+				if tt.wantHooks == 0 {
+					require.NotErrorIs(t, err, ErrTimeBudgetExceeded)
+				}
+			})
+		})
+	}
+}
+
+func TestApplyHardDeadlineKeepsASuccessAfterTheCut(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		endErr error
+		name   string
+		endAt  time.Duration
+	}{
+		{name: "the caller is still live"},
+		{
+			name:  "the caller's later deadline has passed",
+			endAt: 15 * time.Millisecond, endErr: context.DeadlineExceeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var exceeded atomic.Int32
+
+				// The budget's deadline is 10ms and the caller's 15ms. The
+				// downstream ignores its context and succeeds at 20ms. The
+				// check after next then settles the cut, and the success stays
+				// a success.
+				start := time.Now()
+				parent := &unseenParent{
+					Context:  context.Background(),
+					deadline: start.Add(15 * time.Millisecond),
+				}
+
+				if tt.endAt > 0 {
+					time.AfterFunc(tt.endAt, func() { parent.end(tt.endErr) })
+				}
+
+				val, err := applyHardDeadline(parent,
+					func(context.Context) (string, error) {
+						time.Sleep(20 * time.Millisecond)
+
+						return "ok", nil
+					},
+					hardDeadlineParams{
+						clock:    newTestClock(),
+						hooks:    &Hooks{OnTimeBudgetExceeded: func() { exceeded.Add(1) }},
+						deadline: start.Add(10 * time.Millisecond),
+					})
+
+				require.NoError(t, err)
+				assert.Equal(t, "ok", val)
+				assert.Zero(t, exceeded.Load())
+			})
+		})
+	}
 }
