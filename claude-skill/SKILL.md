@@ -41,7 +41,13 @@ AdaptiveConcurrency share the concurrency slot and are mutually exclusive.
 r8e.WithTimeout(5 * time.Second)
 ```
 
-Returns `r8e.ErrTimeout` if exceeded.
+Returns `r8e.ErrTimeout` if exceeded. The timeout is r8e's only when it falls
+strictly before the caller's own deadline: when the caller's deadline comes
+first or on the same instant, `Do` returns the caller's context error and
+`OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the
+caller's context ends, without
+waiting for the function, which keeps running until it returns: it must
+synchronise whatever it shares with the caller.
 
 **Adaptive timeout (percentile-driven):** `r8e.AdaptiveTimeout(opts...)` (a
 `TimeoutOption`) sizes each call's deadline from a sliding window of recent
@@ -85,7 +91,8 @@ r8e.WithTimeBudget(350 * time.Millisecond)
 One **total** time budget shared across retry + hedge. Before each retry, if the
 backoff alone would overrun the remaining budget, retry stops early with
 `r8e.ErrTimeBudgetExceeded` (wrapping the real downstream error) instead of
-sleeping into a doomed attempt; a hedge is not fired once the budget is spent.
+sleeping into a doomed attempt (a context that has already ended returns its
+own error instead); a hedge is not fired once the budget is spent.
 **Tighter than `PerAttemptTimeout`** (which bounds each attempt — the budget caps
 the sum). **Cooperative**, measured against the policy `Clock`: it gates whether
 more work starts but does not cancel an in-flight attempt — pair with
@@ -109,8 +116,40 @@ Add `r8e.RespectInboundDeadline()` — the **ingress** half of cross-service
 propagation — to tighten the budget to a deadline already on the incoming
 context: the effective budget becomes `min(clock.Now()+d, ctx.Deadline())`, so a
 service never runs its budget past the deadline its caller propagated ("smallest
-deadline wins"). It only ever shortens the budget. Config-expressible via
-`respect_inbound_deadline` (requires `time_budget`, else
+deadline wins"). It only ever shortens the budget. Retry's refusal, at the
+cooperative gate, of an attempt that cannot fit returns `ErrTimeBudgetExceeded`
+(hedge's gate fires no hedge and waits for the primary: its result, or the
+context's error once the context ends; hedge's gate itself raises no sentinel
+and fires no hook). With `PropagateDeadline`, the budget decides at its own
+deadline, as `DoTimeout` does: a caller that cancelled before it keeps the
+call; otherwise a failed call is the budget's (`ErrTimeBudgetExceeded`), even
+if the caller cancels or reaches its own, later deadline while the cut attempt
+returns. Without `WithHedge`, a success after the cut stays a success, without
+the hook; with `WithHedge`, hedge returns the context's error as soon as it
+sees the cut, so the call is the budget's (`ErrTimeBudgetExceeded`, the hook
+once) unless the downstream's success reached hedge first. A deadline
+that is not the budget's own (the caller's, first or on the same instant,
+adopted or not) is the caller's: a failed call returns the caller's context
+error without `OnTimeBudgetExceeded`. Without `PropagateDeadline` the budget
+sets no deadline and cuts nothing: a failed call whose caller's context has
+ended, before or after the budget's deadline, returns the caller's context
+error without `OnTimeBudgetExceeded`, unless retry's gate already refused it
+with `ErrTimeBudgetExceeded`. The caller's context error comes once that
+context reports its end, shortly after its deadline (the budget's context
+relays it when its watcher runs): a downstream that stops on the caller's
+deadline by itself can fail first. The call then returns the inner chain's
+error (the downstream's, or `ErrRetriesExhausted` wrapping it) when no retries
+are left and the caller's context has not reported its end by the time the
+call returns; retry's `ErrTimeBudgetExceeded` with the hook when retries
+are left and the budget's deadline is the caller's (adopted or on the same
+instant); and, when retries are left and the budget's deadline is later,
+retry handles the failure like any other: when the backoff fits the budget, it
+fires `OnRetry` and starts the backoff, which ends as soon as the caller's
+context reports its end, and the call returns the caller's context error
+without the hook. Retries that run out first end as in the first case: the
+inner chain's error, unless the caller's context reports its end before the
+call returns. `DoTimeout` has the same window.
+Config-expressible via `respect_inbound_deadline` (requires `time_budget`, else
 `r8e.ErrInboundDeadlineWithoutBudget`), hot-reloadable via `Reconfigure`. For HTTP
 (gRPC propagates automatically), the `httpx` package carries it on the wire as a
 relative, clock-skew-safe header: `httpx.InjectDeadline(req, clock)` (egress, pair

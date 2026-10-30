@@ -293,7 +293,8 @@ func WithTimeout(timeout time.Duration, opts ...TimeoutOption) Option {
 // whether more work starts but does not cancel an in-flight attempt — pair it
 // with [WithTimeout] (a hard deadline) or PerAttemptTimeout to bound a single
 // attempt. It is tighter than a per-attempt timeout because it caps the total
-// time across all attempts, not each one.
+// time across all attempts, not each one. A failed call that the caller's
+// context ended returns that context's error, in every mode.
 //
 // The budget gates only retry and hedge, so it requires [WithRetry] or
 // [WithHedge]; configured with neither it would do nothing, and [NewPolicy]
@@ -1001,7 +1002,7 @@ func newTimeBudgetEntry[T any](
 
 				// Cooperative-only: attach the budget value retry/hedge consult.
 				if !state.propagateDeadline {
-					return next(attachTimeBudget(ctx, deadline))
+					return applyCooperativeBudget[T](ctx, next, deadline)
 				}
 
 				// Hard mode: additionally derive a clock-driven context deadline
