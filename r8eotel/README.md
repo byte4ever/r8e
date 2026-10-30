@@ -68,7 +68,8 @@ result, err := traced.Do(ctx, fn) // same signature as policy.Do
 
 The root span carries `r8e.policy`, `r8e.attempts`, and (on error)
 `r8e.rejection_reason` — a short classification of the sentinel (`circuit_open`,
-`retries_exhausted`, `timeout`, …). Each child carries `r8e.attempt.number`.
+`circuit_ramping` for a call shed during ramp recovery, `retries_exhausted`,
+`timeout`, …). Each child carries `r8e.attempt.number`.
 `TracedPolicy[T]` forwards every `Policy[T]` method (`Do`, `Name`, `Reconfigure`,
 `Metrics`, `HealthStatus`). See [`examples/02-tracing`](examples/02-tracing).
 
