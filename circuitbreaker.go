@@ -22,6 +22,11 @@ type (
 		recoveryTimeout     time.Duration
 		halfOpenMaxAttempts int
 
+		// halfOpenProbeLease bounds how long a half-open probe may hold its
+		// slot (opt-in via HalfOpenProbeLease). A value <= 0 disables the
+		// lease: a probe holds its slot until it reports (default).
+		halfOpenProbeLease time.Duration
+
 		// Slow-call-rate trip (opt-in via SlowCallRate). slowCallDuration is the
 		// latency above which a completed call is "slow"; slowCallRateThreshold
 		// is the fraction of slow calls in the window that opens the breaker.
@@ -87,6 +92,12 @@ type (
 		// the slow-start curve. Guarded by mu.
 		rampStart time.Time
 
+		// probeAdmitted is when the newest half-open probe was admitted. Once
+		// every probe slot is taken and even that probe has held its slot for
+		// longer than the probe lease, all the probes in flight have expired
+		// (see HalfOpenProbeLease and admitLocked). Guarded by mu.
+		probeAdmitted time.Time
+
 		// slowWin is the count-based slow-call window (see slowCallWindow),
 		// allocated lazily on first observation. Guarded by mu.
 		slowWin slowCallWindow
@@ -142,9 +153,12 @@ type (
 		slow   bool
 	}
 
-	// admission is the result of admitLocked for an admitted call: whether it
-	// holds a half-open probe slot, and the lifecycle hook to fire after unlock
-	// (nil when the admission caused no transition).
+	// admission is the result of admitLocked for every call, admitted or
+	// rejected: whether an admitted call holds a half-open probe slot, and the
+	// lifecycle hook to fire after unlock (nil when the call caused no
+	// transition). A rejection can carry a hook too: an expired probe lease
+	// reopens the breaker and rejects the call. Callers fire the hook whatever
+	// the error.
 	admission struct {
 		emit       func()
 		holdsProbe bool
@@ -209,6 +223,40 @@ func FailureThreshold(n int) CircuitBreakerOption {
 func RecoveryTimeout(d time.Duration) CircuitBreakerOption {
 	return func(cfg *circuitBreakerConfig) {
 		cfg.recoveryTimeout = d
+	}
+}
+
+// HalfOpenProbeLease bounds how long a half-open probe may hold its slot (off
+// by default). Once every probe slot is taken and even the newest probe was
+// admitted more than d ago, the next call counts the probes in flight as one
+// failed probe: the breaker reopens, the recovery backoff grows as for any
+// failed probe (see [RecoveryBackoffMultiplier]), and that call gets
+// [ErrCircuitOpen].
+//
+// It is a safety net for a call that ignores its context and never returns:
+// such a call holds its probe slot until the process restarts, and once such
+// calls hold every slot, the breaker stays half-open. [WithTimeout] does not
+// cover that case: it runs outside the
+// breaker, answers the caller with [ErrTimeout] and leaves the call running,
+// still holding its slot. [WithTimeout] with a function that honours its
+// context remains the first defence.
+//
+// The lease runs from the probe's admission to its report. Inside a [Policy]
+// that span covers everything the breaker wraps: retries and their backoff,
+// and the waits of a rate limiter or bulkhead inside it. It also covers the
+// OnCircuitHalfOpen hook, which runs after the first probe's admission, and
+// the classifier (see [CircuitBreakerClassifier]). Set d above the
+// worst case of that span: once every slot is taken, probes still running
+// after d count as failed, even if they would have succeeded. A value <= 0
+// disables the lease.
+//
+// The late outcome of a probe admitted through [CircuitBreaker.Acquire], as
+// the policy middleware does, is ignored once the lease has reopened the
+// breaker. A probe admitted through [CircuitBreaker.Allow] is not tied to its
+// admission: its late [CircuitBreaker.Record] applies to the current state.
+func HalfOpenProbeLease(d time.Duration) CircuitBreakerOption {
+	return func(cfg *circuitBreakerConfig) {
+		cfg.halfOpenProbeLease = d
 	}
 }
 
@@ -426,6 +474,9 @@ func (cb *CircuitBreaker) Reconfigure(opts ...CircuitBreakerOption) {
 // [CircuitBreaker.Record]: any recorded outcome applies to the current state,
 // even one from a call admitted before the breaker opened. Prefer
 // [CircuitBreaker.Acquire], whose [CircuitPermit] ignores such stale outcomes.
+//
+// With [HalfOpenProbeLease], a rejected call can also reopen the breaker, and
+// fire OnCircuitOpen, when the probes in flight have outlived their lease.
 func (cb *CircuitBreaker) Allow() error {
 	// The state-transition methods capture the lifecycle hook to fire in a
 	// local and invoke it AFTER releasing cb.mu, so a user-supplied callback
@@ -433,11 +484,10 @@ func (cb *CircuitBreaker) Allow() error {
 	// re-entry or stall every caller behind a slow hook).
 	cb.mu.Lock()
 	adm, err := cb.admitLocked()
+	epoch := cb.epoch
 	cb.mu.Unlock()
 
-	if adm.emit != nil {
-		adm.emit()
-	}
+	cb.fireAdmission(adm, epoch)
 
 	return err
 }
@@ -498,9 +548,7 @@ func (cb *CircuitBreaker) admitWithClassifier() (classifiedAdmission, error) {
 	classify := cb.cfg.classifier
 	cb.mu.Unlock()
 
-	if adm.emit != nil {
-		adm.emit()
-	}
+	cb.fireAdmission(adm, epoch)
 
 	if err != nil {
 		return classifiedAdmission{}, err
@@ -516,8 +564,57 @@ func (cb *CircuitBreaker) admitWithClassifier() (classifiedAdmission, error) {
 	}, nil
 }
 
+// fireAdmission fires the lifecycle hook an admission captured, after unlock.
+// The hook that marks the entry into half-open runs after the first probe took
+// its slot and before the caller gets a permit (or a nil error) to free it with.
+// If that hook panics, the slot is freed here, and the panic goes on unchanged.
+func (cb *CircuitBreaker) fireAdmission(adm admission, epoch uint64) {
+	if adm.emit == nil {
+		return
+	}
+
+	if !adm.holdsProbe {
+		adm.emit()
+
+		return
+	}
+
+	returned := false
+
+	defer func() {
+		if !returned {
+			cb.releaseProbeOf(epoch)
+		}
+	}()
+
+	adm.emit()
+
+	returned = true
+}
+
+// releaseProbeOf frees a half-open probe slot taken in epoch, if the breaker is
+// still in that half-open phase.
+func (cb *CircuitBreaker) releaseProbeOf(epoch uint64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.epoch == epoch && cb.state == stateHalfOpen {
+		cb.releaseProbe()
+	}
+}
+
+// probeLeaseExpiredLocked reports whether a probe lease is set and the newest
+// half-open probe has held its slot for longer than it. Caller must hold mu.
+func (cb *CircuitBreaker) probeLeaseExpiredLocked() bool {
+	return cb.cfg.halfOpenProbeLease > 0 &&
+		cb.clock.Since(cb.probeAdmitted) > cb.cfg.halfOpenProbeLease
+}
+
 // admitLocked decides whether a call is admitted and applies the resulting
-// transition (see admission). Caller must hold mu.
+// transition (see admission). In half-open, with a probe lease set, once every
+// probe slot is taken and the newest probe has held its slot for longer than
+// the lease, the probes count as failed and the breaker reopens. Caller must
+// hold mu.
 func (cb *CircuitBreaker) admitLocked() (admission, error) {
 	switch cb.state {
 	case stateOpen:
@@ -531,6 +628,7 @@ func (cb *CircuitBreaker) admitLocked() (admission, error) {
 		cb.epoch++
 		cb.halfOpenSuccesses = 0
 		cb.halfOpenInFlight = 1
+		cb.probeAdmitted = cb.clock.Now()
 
 		return admission{emit: cb.hooks.emitCircuitHalfOpen, holdsProbe: true}, nil
 
@@ -538,10 +636,23 @@ func (cb *CircuitBreaker) admitLocked() (admission, error) {
 		// Admit at most halfOpenMaxAttempts concurrent probes; reject the rest
 		// so a recovering downstream is not hit by a thundering herd.
 		if cb.halfOpenInFlight >= cb.cfg.halfOpenMaxAttempts {
+			if cb.probeLeaseExpiredLocked() {
+				// Every probe in flight has held its slot for longer than the
+				// lease: count them as a failed probe and reopen, so a probe
+				// that never returns cannot keep the breaker half-open. The new
+				// epoch makes the late outcome of a permit stale; a late Record
+				// from a probe admitted through Allow still applies to the
+				// state current when it arrives.
+				cb.bumpRecoveryAttemptLocked()
+
+				return admission{emit: cb.openLocked(cb.hooks.emitCircuitOpen)}, ErrCircuitOpen
+			}
+
 			return admission{}, ErrCircuitOpen
 		}
 
 		cb.halfOpenInFlight++
+		cb.probeAdmitted = cb.clock.Now()
 
 		return admission{holdsProbe: true}, nil
 
@@ -658,7 +769,8 @@ func (cb *CircuitBreaker) recordLocked(in callInput) func() {
 // non-opening failure paths stamp it themselves), and returns the supplied trip
 // hook for the caller to fire after unlock. Callers are responsible for
 // updating recoveryAttempt before calling (recordClosed resets it;
-// recordHalfOpen bumps it via bumpRecoveryAttemptLocked). Caller must hold mu.
+// recordHalfOpen, recordRamping and an expired probe lease in admitLocked bump
+// it via bumpRecoveryAttemptLocked). Caller must hold mu.
 func (cb *CircuitBreaker) openLocked(emit func()) func() {
 	cb.state = stateOpen
 	cb.epoch++
@@ -670,8 +782,10 @@ func (cb *CircuitBreaker) openLocked(emit func()) func() {
 }
 
 // bumpRecoveryAttemptLocked increments recoveryAttempt when adaptive recovery
-// backoff is configured (recoveryBackoffMultiplier > 0). Called by
-// recordHalfOpen before a half-open → open transition. Caller must hold mu.
+// backoff is configured (recoveryBackoffMultiplier > 0). Called before every
+// reopening that a failed recovery causes: by recordHalfOpen and
+// recordRamping, and by admitLocked when a probe lease expires. Caller must
+// hold mu.
 func (cb *CircuitBreaker) bumpRecoveryAttemptLocked() {
 	if cb.cfg.recoveryBackoffMultiplier > 0 {
 		cb.recoveryAttempt++
