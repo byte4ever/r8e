@@ -84,6 +84,10 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.CircuitHalfOpens })
 	builder.counter("r8e.policy.circuit_ramps", "Circuit-breaker slow-start ramp transitions",
 		func(m *r8e.PolicyMetrics) int64 { return m.CircuitRamps })
+	builder.counter("r8e.policy.circuit_neutral_outcomes", "Neutral circuit-breaker outcomes, stale ones excluded",
+		func(m *r8e.PolicyMetrics) int64 { return m.CircuitNeutralOutcomes })
+	builder.counter("r8e.policy.circuit_stale_outcomes", "Circuit-breaker outcomes ignored as stale",
+		func(m *r8e.PolicyMetrics) int64 { return m.CircuitStaleOutcomes })
 	builder.counter("r8e.policy.rate_limited", "Calls rejected by the rate limiter",
 		func(m *r8e.PolicyMetrics) int64 { return m.RateLimited })
 	builder.counter("r8e.policy.bulkhead_rejected", "Calls rejected by the bulkhead",

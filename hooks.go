@@ -8,6 +8,15 @@ package r8e
 // synchronisation, which is safe only because the struct is read-only after
 // initialisation (there is no runtime subscription, unlike a true Observer; it
 // is a plain optional-callback set).
+//
+// A hook runs on the goroutine where its event happens, which in a [Policy]
+// is the goroutine of the call: hooks may be called concurrently from several
+// goroutines and must be safe for concurrent use. When the inner chain runs
+// on a goroutine of its own ([WithTimeout], [WithCoalesce], [RefreshAhead]),
+// a hook fired inside it, such as OnCircuitNeutral or OnCircuitStaleOutcome,
+// may run after [Policy.Do] has returned. So may a hook fired inside the
+// losing attempt of [WithHedge], such as OnPanic, since Do does not wait
+// for that attempt.
 type Hooks struct {
 	OnRetry           func(attempt int, err error)
 	OnCircuitOpen     func()
@@ -17,11 +26,21 @@ type Hooks struct {
 	// after recovering through half-open: admission then grows from the initial
 	// fraction to full over the ramp window (see [RampRecovery]) instead of
 	// jumping straight to closed.
-	OnCircuitRamping   func()
-	OnRateLimited      func()
-	OnBulkheadFull     func()
-	OnBulkheadAcquired func()
-	OnBulkheadReleased func()
+	OnCircuitRamping func()
+	// OnCircuitNeutral fires when a [CircuitPermit] reports [OutcomeNeutral]
+	// for a call admitted since the breaker last opened or entered half-open,
+	// such as a call its caller cancelled under [CallerCancellationIsNeutral]:
+	// the breaker counts it neither as a success nor as a failure.
+	OnCircuitNeutral func()
+	// OnCircuitStaleOutcome fires when a [CircuitPermit] reports an outcome,
+	// whatever it is, for a call admitted before the breaker last opened or
+	// entered half-open: the breaker ignores it. Such an outcome does not
+	// also fire OnCircuitNeutral.
+	OnCircuitStaleOutcome func()
+	OnRateLimited         func()
+	OnBulkheadFull        func()
+	OnBulkheadAcquired    func()
+	OnBulkheadReleased    func()
 	// OnBulkheadQueued fires when a full bulkhead enqueues a caller for the
 	// bounded FIFO wait instead of rejecting it (see [BulkheadMaxWait]).
 	OnBulkheadQueued func()
@@ -144,6 +163,18 @@ func (h *Hooks) emitCircuitRamping() {
 func (h *Hooks) emitCircuitHalfOpen() {
 	if h != nil && h.OnCircuitHalfOpen != nil {
 		h.OnCircuitHalfOpen()
+	}
+}
+
+func (h *Hooks) emitCircuitNeutral() {
+	if h != nil && h.OnCircuitNeutral != nil {
+		h.OnCircuitNeutral()
+	}
+}
+
+func (h *Hooks) emitCircuitStaleOutcome() {
+	if h != nil && h.OnCircuitStaleOutcome != nil {
+		h.OnCircuitStaleOutcome()
 	}
 }
 

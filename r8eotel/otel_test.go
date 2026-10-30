@@ -200,6 +200,44 @@ func TestRegisterReportsPolicyMetrics(t *testing.T) {
 	assert.Equal(t, int64(0), healthy, "open critical breaker => unhealthy")
 }
 
+// fixedSnapshot is a MetricsSource that always reports the same metrics.
+type fixedSnapshot []r8e.PolicyMetrics
+
+func (f fixedSnapshot) Snapshot() []r8e.PolicyMetrics { return f }
+
+func TestRegisterReportsCircuitOutcomeCounters(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	// Distinct values, so a getter that reads the wrong field shows.
+	source := fixedSnapshot{{
+		Name:                   "svc",
+		CircuitNeutralOutcomes: 3,
+		CircuitStaleOutcomes:   5,
+		CircuitRamps:           7,
+	}}
+
+	registration, err := r8eotel.Register(meter, source)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, registration.Unregister()) }()
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	for name, want := range map[string]int64{
+		"r8e.policy.circuit_neutral_outcomes": 3,
+		"r8e.policy.circuit_stale_outcomes":   5,
+		"r8e.policy.circuit_ramps":            7,
+	} {
+		got, policyAttr := collectInt64(t, rm, name)
+		assert.Equal(t, want, got, name)
+		assert.Equal(t, "svc", policyAttr, name)
+	}
+}
+
 // TestRegisterEmitsAllInstruments guards every instrument name: a typo or a
 // dropped instrument would make the corresponding metric disappear.
 func TestRegisterEmitsAllInstruments(t *testing.T) {
@@ -236,6 +274,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.retries", "r8e.policy.timeouts",
 		"r8e.policy.circuit_opens", "r8e.policy.circuit_closes",
 		"r8e.policy.circuit_half_opens", "r8e.policy.circuit_ramps",
+		"r8e.policy.circuit_neutral_outcomes", "r8e.policy.circuit_stale_outcomes",
 		"r8e.policy.rate_limited",
 		"r8e.policy.bulkhead_rejected", "r8e.policy.bulkhead_timeouts",
 		"r8e.policy.codel_shed",

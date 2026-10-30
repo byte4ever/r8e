@@ -704,18 +704,18 @@ func (cb *CircuitBreaker) complete(permit *CircuitPermit, elapsed time.Duration,
 }
 
 // completeLocked applies a permit's outcome and returns the hook to fire after
-// unlock. A permit from an earlier epoch is ignored entirely: its call was
-// admitted before the breaker last opened or entered half-open, so it says
-// nothing about the current recovery. A neutral outcome only frees the probe
-// slot the permit holds. Success and failure go through the same path as
-// Record. Caller must hold mu.
+// unlock. A permit from an earlier epoch is ignored: its call was admitted
+// before the breaker last opened or entered half-open, so it says nothing about
+// the current recovery, and only OnCircuitStaleOutcome fires. A neutral outcome
+// only frees the probe slot the permit holds, and fires OnCircuitNeutral.
+// Success and failure go through the same path as Record. Caller must hold mu.
 func (cb *CircuitBreaker) completeLocked(
 	permit *CircuitPermit,
 	elapsed time.Duration,
 	outcome Outcome,
 ) func() {
 	if permit.epoch != cb.epoch {
-		return nil
+		return cb.hooks.emitCircuitStaleOutcome
 	}
 
 	switch outcome {
@@ -724,7 +724,7 @@ func (cb *CircuitBreaker) completeLocked(
 			cb.releaseProbe()
 		}
 
-		return nil
+		return cb.hooks.emitCircuitNeutral
 	case OutcomeSuccess:
 		return cb.recordLocked(callInput{elapsed: elapsed})
 	default:

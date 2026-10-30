@@ -27,9 +27,24 @@ type (
 		// that runs its window to completion closes (counting in CircuitCloses), but
 		// a ramp cut short by a failed or slow call reopens instead (counting in
 		// CircuitOpens). So CircuitRamps − CircuitCloses is not a meaningful figure.
-		CircuitRamps     int64 `json:"circuit_ramps"`
-		RateLimited      int64 `json:"rate_limited"`
-		BulkheadRejected int64 `json:"bulkhead_rejected"`
+		CircuitRamps int64 `json:"circuit_ramps"`
+		// CircuitNeutralOutcomes counts calls the breaker's classifier reported
+		// as [OutcomeNeutral] (see [CircuitBreakerClassifier]), such as calls
+		// their callers cancelled, when the call was admitted since the breaker
+		// last opened or entered half-open: they count neither as successes nor
+		// as failures. A rise can hide a downstream that callers keep
+		// abandoning. A neutral outcome that is also stale counts in
+		// CircuitStaleOutcomes only.
+		CircuitNeutralOutcomes int64 `json:"circuit_neutral_outcomes"`
+		// CircuitStaleOutcomes counts outcomes the breaker ignored because their
+		// call was admitted before it last opened or entered half-open (see
+		// [CircuitPermit]): calls still running when the breaker opened or entered
+		// half-open.
+		// Each trip adds about as many as were in flight, whatever the recovery
+		// timeout. It does not overlap CircuitNeutralOutcomes.
+		CircuitStaleOutcomes int64 `json:"circuit_stale_outcomes"`
+		RateLimited          int64 `json:"rate_limited"`
+		BulkheadRejected     int64 `json:"bulkhead_rejected"`
 		// BulkheadTimeouts counts calls that waited the full bulkhead max-wait
 		// without a slot and gave up with [ErrBulkheadTimeout]; with
 		// BulkheadRejected (immediate rejections) it splits the two shed modes.
@@ -208,6 +223,8 @@ type (
 		circuitCloses        atomic.Int64
 		circuitHalfOpens     atomic.Int64
 		circuitRamps         atomic.Int64
+		circuitNeutral       atomic.Int64
+		circuitStale         atomic.Int64
 		rateLimited          atomic.Int64
 		bulkheadRejected     atomic.Int64
 		bulkheadTimeouts     atomic.Int64
@@ -274,10 +291,14 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnRetry(attempt, err)
 			}
 		},
-		OnCircuitOpen:      countingHook(&m.circuitOpens, user.OnCircuitOpen),
-		OnCircuitClose:     countingHook(&m.circuitCloses, user.OnCircuitClose),
-		OnCircuitHalfOpen:  countingHook(&m.circuitHalfOpens, user.OnCircuitHalfOpen),
-		OnCircuitRamping:   countingHook(&m.circuitRamps, user.OnCircuitRamping),
+		OnCircuitOpen:     countingHook(&m.circuitOpens, user.OnCircuitOpen),
+		OnCircuitClose:    countingHook(&m.circuitCloses, user.OnCircuitClose),
+		OnCircuitHalfOpen: countingHook(&m.circuitHalfOpens, user.OnCircuitHalfOpen),
+		OnCircuitRamping:  countingHook(&m.circuitRamps, user.OnCircuitRamping),
+		OnCircuitNeutral:  countingHook(&m.circuitNeutral, user.OnCircuitNeutral),
+		OnCircuitStaleOutcome: countingHook(
+			&m.circuitStale, user.OnCircuitStaleOutcome,
+		),
 		OnRateLimited:      countingHook(&m.rateLimited, user.OnRateLimited),
 		OnBulkheadFull:     countingHook(&m.bulkheadRejected, user.OnBulkheadFull),
 		OnBulkheadAcquired: user.OnBulkheadAcquired,
@@ -347,6 +368,8 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CircuitCloses:             p.metrics.circuitCloses.Load(),
 		CircuitHalfOpens:          p.metrics.circuitHalfOpens.Load(),
 		CircuitRamps:              p.metrics.circuitRamps.Load(),
+		CircuitNeutralOutcomes:    p.metrics.circuitNeutral.Load(),
+		CircuitStaleOutcomes:      p.metrics.circuitStale.Load(),
 		RateLimited:               p.metrics.rateLimited.Load(),
 		BulkheadRejected:          p.metrics.bulkheadRejected.Load(),
 		BulkheadTimeouts:          p.metrics.bulkheadTimeouts.Load(),
