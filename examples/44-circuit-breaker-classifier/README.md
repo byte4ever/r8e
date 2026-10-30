@@ -27,7 +27,8 @@ breaker.
 The classifier maps each call to `OutcomeSuccess`, `OutcomeFailure` or
 `OutcomeNeutral`. A neutral call leaves the failure counter and the slow-call
 window untouched; in half-open it frees the probe slot without counting. The
-example runs four phases against breakers that open after two failures:
+example runs five phases. The breakers of phases 1 to 4 open after two
+failures:
 
 1. **Business answers** — three "order not found" errors. The classifier marks
    them neutral, and the breaker stays closed.
@@ -42,6 +43,15 @@ example runs four phases against breakers that open after two failures:
    deadline set by r8e is never a caller cancellation, so both count as
    failures: the breaker opens and the third call fails fast with
    `ErrCircuitOpen`.
+5. **A call that outlives a trip** — on a third policy, which one failure
+   opens, a slow call starts while the breaker is closed. A failing call
+   opens the breaker, then the slow call succeeds. Its outcome is stale:
+   the breaker ignores it and stays open.
+
+Phases 3, 4 and 5 end with the policy's `CircuitNeutralOutcomes` and
+`CircuitStaleOutcomes` counters. The bulkhead policy counts two neutral
+outcomes, the main policy five (phases 1 and 2), and the third policy one
+stale outcome.
 
 ## How it works
 
@@ -67,6 +77,7 @@ flowchart LR
 | `IsCallerCancellation(ctx, err)` | True when the caller's context ended the call, cause included; false for a deadline r8e set (`WithTimeout`, a retry `PerAttemptTimeout`, a `PropagateDeadline` budget ending before the caller's deadline) |
 | `CallerCancellationIsNeutral` | Ready-made classifier: caller cancellation is neutral, the rest is classified as by default |
 | `IsLocalRejection(err)` | True when `err` is itself, not wrapped, one of `ErrRateLimited`, `ErrBulkheadFull`, `ErrBulkheadTimeout`, `ErrCoDelShed`, `ErrConcurrencyLimited`: what a guard inside the breaker returns. A function that returns one of them itself matches too, so wrap it there |
+| `CircuitNeutralOutcomes` / `CircuitStaleOutcomes` | `PolicyMetrics` counters, with the hooks `OnCircuitNeutral` / `OnCircuitStaleOutcome`: outcomes the breaker set aside as neutral, and outcomes it ignored as stale. A stale outcome counts once, as stale, even when it is neutral |
 | `CircuitBreaker.Acquire` / `CircuitPermit.Done` | The standalone API behind the middleware; an outcome from before the breaker last opened is ignored |
 
 ## When to use
@@ -103,10 +114,17 @@ go run ./examples/44-circuit-breaker-classifier/
   call 1: bulkhead full (state=closed)
   call 2: bulkhead full (state=closed)
   the call holding the slot: order 7 (state=closed)
+  classifier-demo-bulkhead: neutral outcomes=2, stale outcomes=0
 
 === Phase 4: a hanging downstream still opens the breaker ===
   call 1: timeout (state=closed)
   [hook] circuit OPENED
   call 2: timeout (state=open)
   call 3: circuit breaker is open (state=open)
+  classifier-demo: neutral outcomes=5, stale outcomes=0
+
+=== Phase 5: a call that outlives a trip does not count ===
+  call 1: downstream down (state=open)
+  the slow call: order 9 (state=open)
+  classifier-demo-stale: neutral outcomes=0, stale outcomes=1
 ```

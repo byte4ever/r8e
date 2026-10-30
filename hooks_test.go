@@ -147,6 +147,8 @@ func TestNilHooksDoNotPanic(t *testing.T) {
 		h.emitCircuitOpen()
 		h.emitCircuitClose()
 		h.emitCircuitHalfOpen()
+		h.emitCircuitNeutral()
+		h.emitCircuitStaleOutcome()
 		h.emitRateLimited()
 		h.emitBulkheadFull()
 		h.emitBulkheadAcquired()

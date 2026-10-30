@@ -257,7 +257,10 @@ permit's late outcome is then stale; an `Allow` probe's late `Record` applies to
 the current state. The lease runs from admission to report, which in a policy
 includes retries, backoff and the rate-limiter / bulkhead waits inside the
 breaker: set `d` above the worst case of that span. A panic in
-`OnCircuitHalfOpen` frees the probe slot too.
+`OnCircuitHalfOpen` frees the probe slot too. Counters `CircuitNeutralOutcomes`
+and `CircuitStaleOutcomes` (hooks `OnCircuitNeutral`, `OnCircuitStaleOutcome`)
+count neutral outcomes and outcomes ignored as stale; a stale outcome counts
+once, as stale, even when it is neutral.
 
 **Slow-call rate** (opt-in, off by default): `r8e.SlowCallRate(duration, rate)`
 trips the breaker when the fraction of calls slower than `duration` reaches
@@ -632,6 +635,8 @@ r8e.WithHooks(&r8e.Hooks{
     OnCircuitClose:     func() {},
     OnCircuitHalfOpen:  func() {},
     OnCircuitRamping:   func() {}, // breaker entered slow-start ramp recovery
+    OnCircuitNeutral:   func() {}, // a current (not stale) permit reported OutcomeNeutral
+    OnCircuitStaleOutcome: func() {}, // a permit's outcome was ignored as stale
     OnSlowCallRateExceeded: func() {}, // breaker opened by the slow-call rate
     OnRateLimited:      func() {},
     OnRateAdapted:      func(rate float64) {}, // AIMD moved the rate limiter's refill rate
@@ -677,7 +682,8 @@ all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 ```
 
 `PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
-`CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `RateLimited`, `BulkheadRejected`,
+`CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `CircuitNeutralOutcomes`,
+`CircuitStaleOutcomes`, `RateLimited`, `BulkheadRejected`,
 `BulkheadTimeouts`, `CoDelShed`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,
 `RetryBudgetExceeded`, `TimeBudgetExceeded`, `CoalesceLeaders`,
 `CoalesceFollowers`, `ConcurrencyRejected`, `Throttled`, `SLOShed`, `RateAdaptations`,

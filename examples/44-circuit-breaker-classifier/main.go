@@ -14,7 +14,9 @@
 // CircuitBreakerClassifier maps each call to OutcomeSuccess, OutcomeFailure or
 // OutcomeNeutral. A neutral call leaves the breaker untouched, while the caller
 // still receives the real error. The policy's own timeout is never a caller
-// cancellation, so a hanging downstream still opens the breaker.
+// cancellation, so a hanging downstream still opens the breaker. The policy's
+// metrics count the outcomes the breaker sets aside: neutral ones, and stale
+// ones from calls admitted before it last opened.
 //
 //nolint:forbidigo // This is an example program.
 package main
@@ -107,6 +109,15 @@ func main() {
 
 		report(policy, i, err)
 	}
+
+	// The breaker counts the outcomes it set aside: the three "not found"
+	// answers and the two callers that gave up were neutral.
+	counters(policy)
+
+	// Phase 5: a call admitted while the breaker is closed finishes after it
+	// opened. Its success is stale: the breaker ignores it and counts it apart.
+	fmt.Println("\n=== Phase 5: a call that outlives a trip does not count ===")
+	outliveATrip(ctx)
 }
 
 // burstPastBulkhead runs two calls while a third holds the only slot of a
@@ -158,6 +169,52 @@ func burstPastBulkhead(ctx context.Context) {
 
 	close(release)
 	fmt.Printf("  the call holding the slot: %s (state=%s)\n", <-held, policy.Metrics().CircuitState)
+	counters(policy)
+}
+
+// outliveATrip starts a slow call, opens the breaker with a failing call while
+// the slow one runs, then lets the slow call succeed. It uses a policy of its
+// own, which one failure opens.
+func outliveATrip(ctx context.Context) {
+	policy := r8e.NewPolicy[string]("classifier-demo-stale",
+		r8e.WithCircuitBreaker(
+			r8e.FailureThreshold(1),
+			r8e.CircuitBreakerClassifier(classify),
+		),
+	)
+
+	running := make(chan struct{})
+	release := make(chan struct{})
+	slow := make(chan string, 1)
+
+	go func() {
+		val, err := policy.Do(ctx, func(context.Context) (string, error) {
+			close(running)
+			<-release
+
+			return "order 9", nil
+		})
+		if err != nil {
+			val = err.Error()
+		}
+
+		slow <- val
+	}()
+
+	<-running
+
+	_, err := policy.Do(ctx, func(context.Context) (string, error) {
+		return "", errors.New("downstream down")
+	})
+	report(policy, 1, err)
+
+	close(release)
+
+	// Wait for the slow call to return: Do reports its outcome to the breaker,
+	// which counts it as stale, before it returns.
+	answer := <-slow
+	fmt.Printf("  the slow call: %s (state=%s)\n", answer, policy.Metrics().CircuitState)
+	counters(policy)
 }
 
 // waitOpened waits until the OnCircuitOpen hook has fired, or gives up after a
@@ -202,4 +259,12 @@ func hangingDownstream(ctx context.Context) (string, error) {
 
 func report(policy *r8e.Policy[string], call int, err error) {
 	fmt.Printf("  call %d: %v (state=%s)\n", call, err, policy.Metrics().CircuitState)
+}
+
+// counters prints the outcomes the policy's breaker set aside: neutral ones,
+// and stale ones from calls admitted before the breaker last opened.
+func counters(policy *r8e.Policy[string]) {
+	metrics := policy.Metrics()
+	fmt.Printf("  %s: neutral outcomes=%d, stale outcomes=%d\n",
+		metrics.Name, metrics.CircuitNeutralOutcomes, metrics.CircuitStaleOutcomes)
 }

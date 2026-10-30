@@ -211,7 +211,9 @@ func (o Outcome) String() string {
 // permit. Only the first call on this CircuitPermit variable has an effect
 // (see [CircuitPermit] about copies); later calls, and calls on the zero
 // CircuitPermit returned with an Acquire error, do nothing. An outcome whose
-// admission has gone stale is ignored entirely (see [CircuitPermit]).
+// admission has gone stale is ignored (see [CircuitPermit]) and only fires
+// OnCircuitStaleOutcome; otherwise a neutral outcome fires OnCircuitNeutral
+// (see [Hooks]).
 //
 // elapsed is the call's latency, measured with the breaker's [Clock]; it
 // feeds slow-call detection (see [SlowCallRate]).
