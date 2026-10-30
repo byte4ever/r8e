@@ -705,52 +705,38 @@ func TestWithTimeBudgetPropagateCancelsInFlightAttempt(t *testing.T) {
 func TestWithTimeBudgetPropagateCountsExceededOnce(t *testing.T) {
 	t.Parallel()
 
-	// budget(30m) < backoff(1h): the hard deadline cancels the in-flight
-	// attempt, and retry's gate then finds the context ended and returns its
-	// end, with no sentinel of its own. The budget layer raises the sentinel,
-	// and counts the hook and metric, exactly once. The budget is long enough
-	// that it is never spent before its timer exists.
-	clk := newTestClock()
+	// budget(1ms) << backoff(1h): the hard deadline cancels the in-flight
+	// attempt, and retry then finds the budget spent too. The sentinel must be
+	// raised — and the hook/metric counted — exactly once, whichever path
+	// reports the overrun. The synctest bubble moves time only once every
+	// goroutine waits, so the 1ms budget cannot run out before its deadline
+	// timer is armed, however loaded the machine.
+	synctest.Test(t, func(t *testing.T) {
+		var exceeded atomic.Int32
 
-	exceeded := 0
+		policy := NewPolicy[string]("exceeded-once", WithRegistry(NewRegistry()),
+			WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded.Add(1) }}),
+			WithRetry(3, ConstantBackoff(time.Hour)),
+			WithTimeBudget(time.Millisecond, PropagateDeadline()),
+		)
 
-	policy := NewPolicy[string]("exceeded-once",
-		WithClock(clk),
-		WithHooks(&Hooks{OnTimeBudgetExceeded: func() { exceeded++ }}),
-		WithRetry(3, ConstantBackoff(time.Hour)),
-		WithTimeBudget(30*time.Minute, PropagateDeadline()),
-	)
+		var startedLive atomic.Bool
 
-	started := make(chan struct{})
+		start := time.Now()
+		_, err := policy.Do(t.Context(), func(ctx context.Context) (string, error) {
+			startedLive.Store(ctx.Err() == nil)
+			<-ctx.Done()
 
-	type result struct {
-		val string
-		err error
-	}
+			return "", ctx.Err()
+		})
 
-	resCh := make(chan result, 1)
-
-	go func() {
-		v, err := policy.Do(context.Background(),
-			func(ctx context.Context) (string, error) {
-				close(started)
-				<-ctx.Done()
-
-				return "", ctx.Err()
-			})
-		resCh <- result{val: v, err: err}
-	}()
-
-	<-started
-	require.Eventually(t, func() bool { return clk.timerCount() >= 1 },
-		waitTimeout, waitTick)
-	clk.getTimer(0).fire()
-
-	got := <-resCh
-	require.ErrorIs(t, got.err, ErrTimeBudgetExceeded)
-	require.ErrorIs(t, got.err, context.DeadlineExceeded)
-	assert.Equal(t, 1, exceeded, "the budget sentinel fires exactly once")
-	assert.Equal(t, int64(1), policy.Metrics().TimeBudgetExceeded)
+		require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.True(t, startedLive.Load(), "the deadline cancels an attempt already running")
+		assert.Equal(t, time.Millisecond, time.Since(start), "the deadline fires when the budget runs out")
+		assert.EqualValues(t, 1, exceeded.Load(), "the budget sentinel fires exactly once")
+		assert.Equal(t, int64(1), policy.Metrics().TimeBudgetExceeded)
+	})
 }
 
 func TestWithTimeBudgetPropagatePassesThroughOtherErrors(t *testing.T) {
