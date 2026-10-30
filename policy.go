@@ -210,6 +210,14 @@ func (f optionFunc) apply(s *policySetup) { f(s) }
 // Name returns the policy's name.
 func (p *Policy[T]) Name() string { return p.name }
 
+// Registry returns the registry the policy joined when it was built: the one
+// given with [WithRegistry], or [DefaultRegistry]. It returns nil for a
+// policy with an empty name, which joins no registry. To remove a policy
+// once it is no longer needed, whichever registry it joined:
+//
+//	defer policy.Registry().Unregister(policy)
+func (p *Policy[T]) Registry() *Registry { return p.registry }
+
 // Do executes fn through the composed middleware chain.
 //
 //nolint:ireturn // generic type parameter T, not an interface
@@ -255,11 +263,13 @@ func WithHooks(h *Hooks) Option {
 // WithRegistry sets an explicit registry for the policy to register with.
 // If not provided, named policies auto-register with DefaultRegistry.
 //
-// A registry never removes a policy and accepts duplicate names, so
-// [DefaultRegistry] keeps every named policy built without this option for
-// the life of the process. A service that builds named policies repeatedly
-// (per request, per job, in tests) should use an empty name, or pass a
-// registry that it drops together with those policies.
+// A registry accepts duplicate names and keeps a policy until
+// [Registry.Unregister] removes it, so [DefaultRegistry] keeps every named
+// policy built without this option for the life of the process unless it is
+// unregistered. A service that builds named policies repeatedly (per request,
+// per job, in tests) should unregister each one when it is done with it
+// (see [Policy.Registry]), use an empty name, or pass a registry that it
+// drops together with those policies.
 func WithRegistry(reg *Registry) Option {
 	return optionFunc(func(s *policySetup) {
 		s.registry = reg
@@ -649,8 +659,9 @@ func WithReadinessImpact() Option {
 // NewPolicy creates a new [Policy] with the given name and options. Each
 // configured pattern contributes a middleware; patterns are auto-sorted by
 // priority via [SortPatterns] before chaining. A named policy auto-registers
-// with its registry (or [DefaultRegistry] if none is given), which never
-// removes it; see [WithRegistry] before building named policies repeatedly.
+// with its registry (or [DefaultRegistry] if none is given), which keeps it
+// until [Registry.Unregister] removes it; see [WithRegistry] before building
+// named policies repeatedly.
 func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	var setup policySetup
 	for _, opt := range opts {

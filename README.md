@@ -1284,6 +1284,13 @@ fmt.Println(status.Criticality) // CriticalityNone, CriticalityDegraded, Critica
 report := r8e.DefaultRegistry().Health() // aggregate: "healthy" | "degraded" | "unhealthy"
 ```
 
+**Removing a policy.** A named policy stays in its registry until `Registry.Unregister` removes it. A service that builds named policies per job, per tenant or per test should unregister each one when it is done, or the registry grows without bound and its health endpoints keep listing policies that no longer run. `policy.Registry()` returns the registry the policy joined (`DefaultRegistry`, the one given with `WithRegistry`, or the one r8econf uses), and nil for an unnamed policy; `Unregister` on a nil registry returns false. `Unregister` compares policies by identity, so another policy with the same name stays, and it is safe while readers iterate the registry. See [`examples/45-registry-unregister`](examples/45-registry-unregister).
+
+```go
+policy := r8e.NewPolicy[string]("job-42", r8e.WithTimeout(time.Second))
+defer policy.Registry().Unregister(policy)
+```
+
 ## Configuration
 
 Load policies from a JSON file:
@@ -1525,6 +1532,7 @@ go run ./examples/41-codel-queue/
 go run ./examples/42-nested-retry-budget/
 go run ./examples/43-deadline-propagation-cross-service/
 go run ./examples/44-circuit-breaker-classifier/
+go run ./examples/45-registry-unregister/
 ```
 
 ## License

@@ -728,7 +728,16 @@ expose direct `Reconfigure`. The retry budget reconfigures via
 
 ## Health and Readiness
 
-Named policies auto-register with `DefaultRegistry()`. Health is inferred from pattern state:
+Named policies auto-register with `DefaultRegistry()` (or the `WithRegistry`
+registry) and stay there until `reg.Unregister(policy)` removes them: it matches
+by identity (another policy with the same name stays), reports whether there was
+any registration, and is safe while readers iterate. `policy.Registry()` returns
+the registry the policy joined (nil for an unnamed one, and `Unregister` on nil
+returns false), so `defer policy.Registry().Unregister(policy)` works whatever
+registry the policy was built with. A service that builds named
+policies per job, tenant or test must unregister them (or use an empty name),
+else the registry grows without bound. Example: `examples/45-registry-unregister`.
+Health is inferred from pattern state:
 - Circuit breaker open -> `CriticalityCritical`, unhealthy
 - Rate limiter saturated / bulkhead full / retry budget exhausted -> `CriticalityDegraded`
 
