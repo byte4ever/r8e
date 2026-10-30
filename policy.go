@@ -1116,6 +1116,9 @@ func admitRecordEntry[T any](
 				if err := admit(ctx); err != nil {
 					var zero T
 
+					// Returned as-is: IsLocalRejection compares the rate
+					// limiter's error by identity, so wrapping it here would
+					// make a breaker count the rejection.
 					return zero, err //nolint:wrapcheck // admission error returned as-is
 				}
 
@@ -1143,6 +1146,9 @@ func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
 				if err := bh.Acquire(ctx); err != nil {
 					var zero T
 
+					// Returned as-is: IsLocalRejection compares it by
+					// identity, so wrapping it here would make a breaker count
+					// the rejection.
 					return zero, err //nolint:wrapcheck // bulkhead error returned as-is
 				}
 
@@ -1164,6 +1170,9 @@ func newAdaptiveEntry[T any](limiter *AdaptiveLimiter) PatternEntry[T] {
 				if err != nil {
 					var zero T
 
+					// Returned as-is: IsLocalRejection compares it by
+					// identity, so wrapping it here would make a breaker count
+					// the rejection.
 					return zero, err //nolint:wrapcheck // limiter error returned as-is
 				}
 

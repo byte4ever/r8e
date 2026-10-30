@@ -2,13 +2,14 @@
 // circuit breaker which calls say something about the downstream's health.
 //
 // The problem it solves: by default the breaker counts every non-nil error as a
-// failure and every nil error as a success. Two kinds of call break that rule.
-// A business answer such as "order not found" is an error for the caller, yet
-// it proves the downstream is up. A call whose caller gave up (a deadline, a
-// shutdown) proves nothing either way. Counting the first opens the breaker on a
-// healthy service; counting the second as a failure reopens a recovering
-// breaker, and reporting it as nil resets the failure counter so a hanging
-// downstream never trips the breaker.
+// failure and every nil error as a success. Three kinds of call break that
+// rule. A business answer such as "order not found" is an error for the caller,
+// yet it proves the downstream is up. A call whose caller gave up (a deadline, a
+// shutdown) proves nothing either way. A call the policy's own bulkhead turned
+// away never reached the downstream at all. Counting the first or the third
+// opens the breaker on a healthy service; counting the second as a failure
+// reopens a recovering breaker, and reporting it as nil resets the failure
+// counter so a hanging downstream never trips the breaker.
 //
 // CircuitBreakerClassifier maps each call to OutcomeSuccess, OutcomeFailure or
 // OutcomeNeutral. A neutral call leaves the breaker untouched, while the caller
@@ -35,7 +36,7 @@ func main() {
 
 	// WithTimeout returns to the caller as soon as its deadline passes, and the
 	// breaker records the call when the downstream function returns, a moment
-	// later. The hook signals this channel, so phase 3 can wait for the
+	// later. The hook signals this channel, so phase 4 can wait for the
 	// breaker to open instead of guessing how long that takes.
 	opened := make(chan struct{}, 1)
 
@@ -86,10 +87,16 @@ func main() {
 		report(policy, i, err)
 	}
 
-	// Phase 3: the downstream hangs. The policy's timeout cuts each call, and
+	// Phase 3: one call holds the bulkhead's only slot while two more arrive.
+	// The bulkhead turns them away; the classifier makes those rejections
+	// neutral, so they do not open the breaker.
+	fmt.Println("\n=== Phase 3: a burst past the bulkhead does not count ===")
+	burstPastBulkhead(ctx)
+
+	// Phase 4: the downstream hangs. The policy's timeout cuts each call, and
 	// those calls count as failures even with the classifier, so the second one
 	// opens the breaker and the third call fails fast.
-	fmt.Println("\n=== Phase 3: a hanging downstream still opens the breaker ===")
+	fmt.Println("\n=== Phase 4: a hanging downstream still opens the breaker ===")
 
 	for i := 1; i <= 3; i++ {
 		_, err := policy.Do(ctx, hangingDownstream)
@@ -102,6 +109,57 @@ func main() {
 	}
 }
 
+// burstPastBulkhead runs two calls while a third holds the only slot of a
+// bulkhead, then lets the held call finish. It uses a policy of its own: in the
+// main policy, WithTimeout returns to the caller before the call it abandons
+// frees its slot, so a bulkhead there would also turn away the calls of the
+// other phases.
+func burstPastBulkhead(ctx context.Context) {
+	policy := r8e.NewPolicy[string]("classifier-demo-bulkhead",
+		// One slot, so a second concurrent call is turned away at once. The
+		// bulkhead runs inside the breaker, which sees its rejections.
+		r8e.WithBulkhead(1),
+		r8e.WithCircuitBreaker(
+			r8e.FailureThreshold(2),
+			r8e.CircuitBreakerClassifier(classify),
+		),
+	)
+
+	holding := make(chan struct{})
+	release := make(chan struct{})
+	held := make(chan string, 1)
+
+	go func() {
+		val, err := policy.Do(ctx, func(ctx context.Context) (string, error) {
+			close(holding)
+
+			select {
+			case <-release:
+				return "order 7", nil
+			case <-ctx.Done():
+				return "", fmt.Errorf("wait for order: %w", ctx.Err())
+			}
+		})
+		if err != nil {
+			val = err.Error()
+		}
+
+		held <- val
+	}()
+
+	<-holding
+
+	for i := 1; i <= 2; i++ {
+		_, err := policy.Do(ctx, func(context.Context) (string, error) {
+			return "unreached", nil
+		})
+		report(policy, i, err)
+	}
+
+	close(release)
+	fmt.Printf("  the call holding the slot: %s (state=%s)\n", <-held, policy.Metrics().CircuitState)
+}
+
 // waitOpened waits until the OnCircuitOpen hook has fired, or gives up after a
 // second so a broken setup cannot hang the example.
 func waitOpened(opened <-chan struct{}) {
@@ -112,11 +170,13 @@ func waitOpened(opened <-chan struct{}) {
 	}
 }
 
-// classify makes a business "not found" neutral, and delegates everything else
-// to CallerCancellationIsNeutral: a caller cancellation is neutral, any other
+// classify makes neutral a business "not found" and a rejection by the
+// rate limiter, the bulkhead or the adaptive concurrency limiter, as
+// IsLocalRejection reports it, and delegates everything else to
+// CallerCancellationIsNeutral: a caller cancellation is neutral, any other
 // error is a failure, and nil is a success.
 func classify(ctx context.Context, err error) r8e.Outcome {
-	if errors.Is(err, errNotFound) {
+	if errors.Is(err, errNotFound) || r8e.IsLocalRejection(err) {
 		return r8e.OutcomeNeutral
 	}
 
