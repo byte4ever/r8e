@@ -111,6 +111,10 @@ type (
 		// HalfOpenMaxAttempts is the max probes in half-open state.
 		// Optional. Example: 2.
 		HalfOpenMaxAttempts *int `json:"half_open_max_attempts,omitempty" yaml:"half_open_max_attempts,omitempty"`
+		// HalfOpenProbeLease bounds how long a half-open probe may hold its
+		// slot (see [HalfOpenProbeLease]). Optional, off by default. Parsed via
+		// time.ParseDuration. Example: "1m".
+		HalfOpenProbeLease *string `json:"half_open_probe_lease,omitempty" yaml:"half_open_probe_lease,omitempty"`
 		// SlowCallDuration is the latency above which a call counts as slow,
 		// enabling slow-call-rate tripping. Optional, but must be paired with
 		// SlowCallRateThreshold. Parsed via time.ParseDuration. Example: "2s".
@@ -951,6 +955,15 @@ func cbOptionsFromConfig(cfg *CircuitBreakerConfig) ([]CircuitBreakerOption, err
 
 	if cfg.HalfOpenMaxAttempts != nil {
 		opts = append(opts, HalfOpenMaxAttempts(*cfg.HalfOpenMaxAttempts))
+	}
+
+	if cfg.HalfOpenProbeLease != nil {
+		lease, err := time.ParseDuration(*cfg.HalfOpenProbeLease)
+		if err != nil {
+			return nil, fmt.Errorf("circuit_breaker.half_open_probe_lease: %w", err)
+		}
+
+		opts = append(opts, HalfOpenProbeLease(lease))
 	}
 
 	slowOpts, err := slowCallOptionsFromConfig(cfg)

@@ -206,6 +206,19 @@ r8e.WithCircuitBreaker(opts ...CircuitBreakerOption)
 States: closed -> open (fast-fail `r8e.ErrCircuitOpen`) -> half-open -> closed
 (or -> ramping -> closed with ramp recovery). State transitions are mutex-guarded
 (linearizable); half-open admits at most `HalfOpenMaxAttempts` concurrent probes.
+A probe holds its slot until it reports, so a call that ignores its context can
+keep the breaker half-open forever. `WithTimeout` does not prevent it: it runs
+outside the breaker, answers `ErrTimeout` and leaves the call running, holding
+its slot. `r8e.HalfOpenProbeLease(d)` (opt-in, default off; config
+`half_open_probe_lease`, reconfigurable) bounds that: once every slot is taken
+and even the newest probe was admitted more than `d` ago, the next call counts
+the probes as one failed probe (the recovery backoff grows if
+`RecoveryBackoffMultiplier` is set) and reopens the breaker. A
+permit's late outcome is then stale; an `Allow` probe's late `Record` applies to
+the current state. The lease runs from admission to report, which in a policy
+includes retries, backoff and the rate-limiter / bulkhead waits inside the
+breaker: set `d` above the worst case of that span. A panic in
+`OnCircuitHalfOpen` frees the probe slot too.
 
 **Slow-call rate** (opt-in, off by default): `r8e.SlowCallRate(duration, rate)`
 trips the breaker when the fraction of calls slower than `duration` reaches
