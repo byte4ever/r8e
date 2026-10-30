@@ -106,6 +106,12 @@ FINAL VERDICT: REJECT
 13. No shared captured state.
 14. `ctx` honored end to end.
 15. No idempotency-key concern (read).
+16. Under `WithCircuitBreaker()`: a catalog call that hangs while the breaker
+    probes is cancelled through its `ctx` by `WithTimeout(2s)`, so it reports
+    and frees its half-open probe slot. No hung probe can hold the breaker
+    half-open.
+17. State shared with the caller: the fn returns its result and writes nothing
+    captured, so the call winding down after a timeout races nothing.
 
 ### Phase 2 — Adversarial scenarios
 - **Nil-deref on not-found.** Trigger: `404` returned as `(nil, nil)`.
@@ -176,6 +182,13 @@ FINAL VERDICT: CONDITIONAL APPROVE
 14. `429` recognised through `RetryAfterProvider`, no status parsing in the
     policy; retry tuning around it is the retry axis's.
 15. The op is safe to run zero, one, or many times.
+16. Under the breaker, a hung recommender call cannot keep its half-open probe
+    slot or its bulkhead slot: the client forwards `ctx` (stated in the client
+    contract), and `WithTimeout(300ms)` cancels it, so the probe reports.
+17. State shared with the caller: the fn returns its result and writes nothing
+    captured, so the call winding down after `Do` returned races nothing.
+18. `recommender.Get` is a plain HTTP client: it returns no r8e sentinel, so no
+    downstream refusal can pass for the policy's own rejection.
 
 ### Phase 2 — Adversarial scenarios
 - **Cancellation.** Trigger: caller cancels. Propagation: ctx → `recommender.Get`
@@ -190,6 +203,10 @@ FINAL VERDICT: CONDITIONAL APPROVE
 - **429 throttle.** Trigger: server 429 + Retry-After. Propagation: not retried
   (`RetryIf`), the empty fallback answers. Symptom: one request, no early
   re-send. Does not fail.
+- **Hang while the breaker probes.** Trigger: the recommender stops answering
+  during half-open. Propagation: `WithTimeout(300ms)` ends the probe through its
+  `ctx`, the probe reports a failure and the breaker reopens. Symptom: no probe
+  slot held. Does not fail.
 Fewer than 5 *failing* scenarios are findable: the call is an idempotent,
 ctx-honoring, classified read with a documented-safe degraded value — its
 failure modes are structurally bounded to "returns an error or an empty list,"

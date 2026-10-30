@@ -32,8 +32,16 @@ by axis, each with the concrete answer options and **what the answer changes**.
 3. **Does the downstream call honor `ctx` (cancellation/deadline)?**
    - Yes → timeout/budget can actually cancel in-flight work.
    - No / unsure → a timeout only stops *waiting*; flag that work leaks past it.
+     Under a breaker, a hung call also keeps its half-open probe slot until
+     restart → `HalfOpenProbeLease` (axis 4).
 4. **Does the call own resources it must release (body, conn, file) on every path?**
    → informs whether a fallback/timeout can strand a resource.
+5. **Does the call go through another r8e policy (a client library built on
+   r8e)?**
+   - Yes → the function wraps or replaces that policy's errors before returning
+     them, so its rejections are not taken for this policy's own
+     (`IsLocalRejection`) and the breaker still counts them.
+   - No → nothing to do.
 
 ## Axis 2 — timeouts / deadlines
 
@@ -47,6 +55,12 @@ by axis, each with the concrete answer options and **what the answer changes**.
    to further callees?**
    - Inbound deadline exists → `RespectInboundDeadline()`.
    - Fans out → `PropagateDeadline()` (+ httpx header for HTTP).
+4. **What deadline do the callers set, and how much of it is left when this
+   call starts?**
+   → `WithTimeout`, `PerAttemptTimeout` and the budget stay strictly shorter
+   than what is left. An r8e deadline equal or later arms no timer: the call
+   ends with the caller's context error, `OnTimeout` never fires, and a hang is
+   the caller's, not r8e's.
 
 ## Axis 3 — retry / amplification
 
@@ -82,10 +96,18 @@ by axis, each with the concrete answer options and **what the answer changes**.
    unwell (not-found, validation, business refusals)? Can the callers cancel
    the call, and what deadline do they set?**
    - Such errors exist, or callers cancel → `CircuitBreakerClassifier`: those
-     errors and caller cancellations are neutral for the breaker
-     (`CallerCancellationIsNeutral`), and `WithTimeout` stays shorter than the
-     callers' deadline so a hang still trips it.
-   - Neither → the default breaker counting is right.
+     errors, caller cancellations (`CallerCancellationIsNeutral`) and the
+     policy's own rejections (`IsLocalRejection`) are neutral for the breaker,
+     and `WithTimeout` stays strictly shorter than the callers' deadline so a
+     hang still trips it.
+   - Neither → the default breaker counting is right (the policy's own
+     rejections still need `IsLocalRejection` when it has a bulkhead, a rate
+     limiter or adaptive concurrency).
+7. **If the dependency hangs while the breaker probes it, can a call stay stuck
+   (it ignores `ctx`, or nobody knows)?**
+   - Yes / unsure → `HalfOpenProbeLease(d)`, `d` above the worst time a probe
+     can take (all attempts, backoff, bulkhead or rate-limiter wait).
+   - No (the call honors `ctx` under `WithTimeout`) → no lease needed.
 
 ## Axis 5 — fallback / cache
 
@@ -105,13 +127,19 @@ by axis, each with the concrete answer options and **what the answer changes**.
 ## Axis 6 — observability / ops
 
 1. **Which failure modes must be observable** (alerting, dashboards)?
-   → wire the corresponding `Hooks`.
+   → wire the corresponding `Hooks`, safe for concurrent use (they may run
+   after `Do` returned). With a classifier, include `OnCircuitNeutral`.
 2. **If this dependency is fully down, should this pod stop serving traffic?**
    - Yes AND it's dedicated → `WithReadinessImpact()`.
    - It's shared → do NOT gate readiness (fleet-wide flip).
 3. **Do operators need to retune this at runtime without a redeploy?**
    - Yes → express config-expressible params via `r8econf` JSON.
 4. **Is this a metrics/OTel shop?** → `r8eotel.Register` + `Trace`.
+5. **Is the policy built once at start-up, or per job / tenant / request?**
+   - Once → nothing to do.
+   - Repeatedly → `defer policy.Registry().Unregister(policy)`, an empty name, or
+     a `WithRegistry` registry dropped with the policies; else the registry and
+     its health endpoints grow without bound.
 
 ## Multi-service policies
 

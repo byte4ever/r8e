@@ -11,6 +11,13 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       adds ≥800ms of backoff alone — does the budget allow it?
 - [ ] Is `PerAttemptTimeout` set, and does it bound each attempt independently of
       the whole-call deadline?
+- [ ] Is `PerAttemptTimeout` STRICTLY shorter than the time the callers' deadline
+      leaves when the call starts? One on the same instant or later arms no
+      timer: a hung attempt is never cut, it runs into the caller's deadline,
+      and the retry never gets its next attempt.
+- [ ] With `WithTimeBudget`: the retry refuses an attempt that cannot fit with
+      `ErrTimeBudgetExceeded`, but only while the context is live; once the
+      caller's context has ended, it returns that context's error instead.
 
 ## Backoff & synchronization
 - [ ] Is the backoff `ConstantBackoff`? Then every retrier waits the same fixed
@@ -66,6 +73,11 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       the taxonomy contradicts itself.
 
 ## Cross-axis notes (note once, defer; do NOT score here)
+- [ ] Does the fn call a nested r8e policy? Exhausted attempts wrap its rejection
+      (`retries exhausted: bulkhead full`), which the outer breaker counts; a
+      `RetryIf` returning false or an exhausted retry budget passes it on bare,
+      which `IsLocalRejection` makes neutral. Note it, defer the counting to
+      review-r8e-policy-overload.
 - [ ] Retrying a WRITE also amplifies the side effect — note it, defer the
       duplicate-side-effect SAFETY verdict to review-r8e-policy-call.
 - [ ] The whole-call TIMEOUT / TimeBudget *sizing* the retries must fit → defer to

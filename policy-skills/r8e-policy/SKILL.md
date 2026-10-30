@@ -30,20 +30,20 @@ This skill release is calibrated for an **exact** r8e version. The canonical pin
 is [`../VERSIONS.json`](../VERSIONS.json); this section is kept in agreement with
 it (both are bumped together on each release — see `../MAINTENANCE.md`).
 
-- **r8e core**: `v0.11.0`
-- side packages: `otter v0.11.0`, `ristretto v0.11.0`, `r8eotel v0.11.0`
+- **r8e core**: `v0.12.0`
+- side packages: `otter v0.12.0`, `ristretto v0.12.0`, `r8eotel v0.12.0`
 
 Always propose r8e **at this pinned version** so the user's project and this skill
 agree. When you deliver a policy, include the matching install snippet:
 
 ```sh
-go get github.com/byte4ever/r8e@v0.11.0
+go get github.com/byte4ever/r8e@v0.12.0
 ```
 
 ```go
 // go.mod
-require github.com/byte4ever/r8e v0.11.0
-// + only if used: github.com/byte4ever/r8e/otter|ristretto|r8eotel v0.11.0
+require github.com/byte4ever/r8e v0.12.0
+// + only if used: github.com/byte4ever/r8e/otter|ristretto|r8eotel v0.12.0
 ```
 
 If the user is already on a different r8e version, say so explicitly: features
@@ -95,12 +95,12 @@ The six axes you must be able to answer for:
 
 | Axis | The question the policy cannot be written without |
 |---|---|
-| **call / Do** | Is the operation idempotent / a write? Safe to retry? Safe to duplicate (hedge)? Does the call honor `ctx`? |
-| **timeouts** | What is the downstream p50/p99? Is there a per-call budget or SLA? |
+| **call / Do** | Is the operation idempotent / a write? Safe to retry? Safe to duplicate (hedge)? Does the call honor `ctx`? Does it go through another r8e policy? |
+| **timeouts** | What is the downstream p50/p99? Is there a per-call budget or SLA? What deadline do the callers set, and how much of it is left when the call starts? |
 | **retry** | Which errors are permanent vs transient? Is the dependency shared across the fleet (amplification risk)? Does it emit `Retry-After`? |
 | **overload** | What is the downstream capacity (pool size, quota, RPS limit)? Is metastable collapse a risk? Which errors say nothing about its health (business `4xx`, caller cancellations), and what deadline do the callers set? |
 | **fallback / cache** | Is there a *safe* degraded value? Is stale data acceptable, and for how long? |
-| **observability** | Which failure modes must be visible? Should this policy gate readiness? Does config need hot reload? |
+| **observability** | Which failure modes must be visible? Should this policy gate readiness? Does config need hot reload? Is the policy built once, or per job / tenant / request? |
 
 ### 2. Map traits → patterns
 
@@ -165,6 +165,15 @@ do not patch the parameter by hand without re-justifying it.
 - Rewriting errors, or returning a failed status as `(resp, nil)`, to keep the
   breaker from counting it. Use `CircuitBreakerClassifier`: the caller keeps the
   real error.
+- Matching the local-rejection sentinels with `errors.Is` in a classifier. Use
+  `IsLocalRejection`: `errors.Is` also matches a nested policy's wrapped
+  rejection and hides the downstream's saturation from the breaker.
+- A `WithTimeout` (or `PerAttemptTimeout`, or a time budget) equal to or longer
+  than the time the callers' deadline leaves: it arms no timer and never ends a
+  call, so a hang is the caller's, not r8e's.
+- Building a named policy per job, tenant or request without
+  `defer policy.Registry().Unregister(policy)` (or an empty name, or a registry
+  dropped with it): the registry and its health endpoints grow without bound.
 
 ## References
 

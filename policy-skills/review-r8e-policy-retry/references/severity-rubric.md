@@ -53,6 +53,14 @@ doubt between two levels, the one with a concrete propagation path wins.
    still a retry against the server's own signal. Remediation: do not retry
    errors that carry a hint above the cap (`RetryIf` on `RetryAfterProvider`),
    or raise `MaxDelay` and the budget so the hint fits.
+6. **`PerAttemptTimeout` that never binds.** `PerAttemptTimeout(500ms)` meant to
+   cut hung attempts, under callers whose stated deadline is 500 ms or less.
+   Propagation: the per-attempt deadline arms no timer; a hung first attempt
+   runs into the caller's deadline and the call returns the caller's context
+   error, so the retry never gets its second attempt against a hang. Remediation:
+   a `PerAttemptTimeout` strictly below the time the callers' deadline leaves,
+   with room for the next attempt. Scope: requires the callers' deadline to be
+   stated; when it is UNKNOWN, NOTED "confirm".
 
 ## NOTED — observation for awareness, no action required
 
@@ -62,6 +70,10 @@ doubt between two levels, the one with a concrete propagation path wins.
    duplicate-effect SAFETY verdict to review-r8e-policy-call.
 3. `maxAttempts` is a round number but the worst-case sum demonstrably fits the
    budget and the dep is over-provisioned — no demonstrated amplification path.
+4. The fn calls a nested r8e policy, so what the retry returns (wrapped after
+   exhausted attempts, bare after a `RetryIf` stop or an exhausted budget)
+   decides what the outer breaker counts — note and defer to
+   review-r8e-policy-overload.
 
 ## Anti-calibration (do NOT do this)
 

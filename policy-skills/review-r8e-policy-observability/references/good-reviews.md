@@ -10,10 +10,10 @@ These are the highest-leverage examples — match their register and severity.
 ## Review A — `../../fixtures/poor.md` (payment charge) → REJECT
 
 ### Phase 1 — Enumeration
-1. Policy name is `""` (empty) → effectively anonymous; no meaningful identity in
-   the health registry.
-2. The policy IS a `NewPolicy` object (not an anonymous `r8e.Do`), so it registers
-   — but under an empty name, so it is unfindable in practice.
+1. Policy name is `""` (empty) → no health identity at all.
+2. The policy IS a `NewPolicy` object (not an anonymous `r8e.Do`), but an empty
+   name joins no registry (`policy.Registry()` is nil): it is absent from
+   `Health` / `CheckReadiness` / `Snapshot`, as invisible as an anonymous `Do`.
 3. Failure modes the policy actually has: coalesce, retry, hedge, fallback. No
    breaker, no bulkhead, no SLO.
 4. `WithHooks` is ABSENT entirely.
@@ -43,6 +43,8 @@ These are the highest-leverage examples — match their register and severity.
     here only that it is dead and unobservable).
 17. Of the modes that would page someone (duplicate charge, fabricated success),
     NONE is alertable — all silent.
+18. Registry growth: none possible, since an unnamed policy joins no registry,
+    however often it is built.
 
 ### Phase 2 — Adversarial scenarios
 - **Fleet-wide readiness flip.** Trigger: the shared payment gateway returns 5xx
@@ -60,9 +62,9 @@ These are the highest-leverage examples — match their register and severity.
   with no `OnRetry`. Symptom: 5× gateway load per decline, no alert. Detectability:
   only the gateway's own 402 rate; the client policy is blind.
 - **Unfindable health identity.** Trigger: on-call triages a checkout incident.
-  Propagation: the policy registered under `""` → no name to query. Symptom: the
-  breaker/retry/readiness state cannot be located by policy name. Detectability:
-  the absence itself is the problem.
+  Propagation: the unnamed policy never joined the registry → nothing to query.
+  Symptom: the retry/readiness state cannot be located by policy name.
+  Detectability: the absence itself is the problem.
 - **Config-only operability gap.** Trigger: an operator pulls the emitted JSON to
   "see the policy." Propagation: `WithCoalesce` (code-only) is silently absent.
   Symptom: the operator believes there is no coalescing when there is (a dead one).
@@ -137,6 +139,12 @@ FINAL VERDICT: REJECT
 16. Of the modes that matter (breaker open = catalog deemed down; fallback = serving
     a possibly-empty product authoritatively), NONE is alertable today — all rely on
     out-of-band metric scraping.
+17. Lifecycle: the context does not say where the policy is built. The snippet
+    shows `NewPolicy` next to `Do`, which is no evidence of per-request
+    construction → UNKNOWN; if it were built per request, the registry would
+    grow without bound.
+18. No hooks → no hook-concurrency concern; no classifier → no neutral outcomes
+    to surface.
 
 ### Phase 2 — Adversarial scenarios
 - **Silent breaker open.** Trigger: catalog 5xx crosses the failure threshold.
@@ -169,7 +177,8 @@ FINAL VERDICT: REJECT
   still increment — NOTED — but nothing is wired to alert on them.) Accepted only
   if the team confirms it alerts on those automatic counters out of band.
 - NOTED: #12 (no OTel; context doesn't mention it), #13 (cache is code-only,
-  absent from emitted JSON — flag for operator expectations).
+  absent from emitted JSON — flag for operator expectations), #17 (confirm the
+  policy is built once, or removed from its registry when done).
 
 ### Phase 4 — Verdict
 No BLOCKING. One IMPORTANT cluster: the policy has real failure modes (breaker,
@@ -210,10 +219,13 @@ FINAL VERDICT: CONDITIONAL APPROVE
    logs.
 7. `OnFallbackUsed` wired → `metrics.Inc("recommend.fallback")` — fallback
    activations are alertable.
-8. The three wired hooks match the three high-signal modes the policy has (breaker,
-   retry, fallback). Coverage of the modes that matter is complete.
+8. `OnCircuitNeutral` wired → `metrics.Inc("recommend.circuit_neutral")` — what
+   the classifier sets aside (caller cancellations, permanent `4xx`, the
+   bulkhead's own rejections) is counted, so callers abandoning a slow
+   recommender still show although the breaker ignores them.
 9. Metrics counters also increment automatically — the hooks ADD event-level
-   logging/alerting on top.
+   logging/alerting on top. The four wired hooks cover the high-signal modes the
+   policy has (breaker open, what the classifier sets aside, retry, fallback).
 10. `WithReadinessImpact()` is ABSENT — and a comment states it is deliberately NOT
     gated because the dependency is shared across the fleet (avoids the fleet-wide
     `/readyz` flip). The right call, and documented.
@@ -233,6 +245,13 @@ FINAL VERDICT: CONDITIONAL APPROVE
 15. No `WithChaos` → no kill-switch concern.
 16. Of the modes that page someone (breaker open, fallback storm), BOTH are
     alertable via the wired hooks. Nothing high-signal is silent.
+17. Hook safety: the hooks only call the metrics and logging libraries, stated
+    safe for concurrent use, and hold no state of their own, so running
+    concurrently, or after `Do` returned under `WithTimeout`, races nothing.
+18. Lifecycle: the policy is built once at service start (stated) → registered
+    once; no growth, no `Unregister` needed.
+19. Stale outcomes: nothing alerts on `CircuitStaleOutcomes`, which is correct:
+    they rise with every trip.
 
 ### Phase 2 — Adversarial scenarios
 - **Breaker open is announced.** Trigger: recommender 5xx crosses threshold.
@@ -251,8 +270,14 @@ FINAL VERDICT: CONDITIONAL APPROVE
 - **Retry burst is logged.** Trigger: a partial outage drives retries.
   Propagation: `OnRetry` logs each attempt+err (budget-gated). Symptom: visible in
   logs; no silent amplification. Does not fail.
+- **Callers abandon a slow recommender.** Trigger: users navigate away while
+  calls are slow but under 300 ms. Propagation: the classifier makes each
+  cancellation neutral, so neither the failure counter nor the slow-call window
+  moves; `OnCircuitNeutral` counts them. Symptom: the rise shows on
+  `recommend.circuit_neutral`. Does not fail.
 Fewer than 5 *failing* scenarios are findable: the policy is named (registered for
-health), wires hooks to every high-signal mode it has, deliberately and correctly
+health) and built once, wires concurrency-safe hooks to every high-signal mode it
+has, including what its classifier sets aside, deliberately and correctly
 leaves readiness ungated on a shared dependency, and its code-only pieces (the
 retry predicate and the breaker classifier) are not promised to operators as
 JSON-tunable — its operability gaps are structurally
@@ -266,14 +291,16 @@ bounded to "could optionally add OTel tracing."
 
 ### Phase 4 — Verdict
 Phases 1–2 produced no operability observation, and every adversarial scenario is
-dismissable in writing. The policy is named, hooked to the modes it has, and
-correctly ungated on a shared dependency (with the rationale in a comment).
+dismissable in writing. The policy is named and built once, hooked to the modes
+it has (neutral outcomes included) with concurrency-safe hooks, and correctly
+ungated on a shared dependency (with the rationale in a comment).
 **APPROVE.**
 
 ### Phase 5 — Meta-critique
 1. Most likely leniency: rubber-stamping because the fixture is labelled "good." I
-   re-derived operability from the artifact (named, three hooks matching three
-   modes, ungated shared dep with stated rationale), not from the label.
+   re-derived operability from the artifact (named and built once, four hooks
+   covering the high-signal modes, ungated shared dep with stated rationale), not
+   from the label.
 2. Under-examined: whether a hook the policy lacks for a present mode (e.g. an
    `OnBulkheadRejected` for the bulkhead) is a gap — but a saturated bulkhead on a
    best-effort recs path is low-signal, and the high-signal modes (breaker,

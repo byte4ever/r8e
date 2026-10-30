@@ -5,7 +5,8 @@ description: >-
   circuit breaker, bulkhead, adaptive concurrency, rate limit, throttle, SLO
   governor. Judges presence and sizing of these guards against the downstream's
   capacity and sharing, the brownout (slow-but-200) trip, what the breaker counts
-  (outcome classifier), healing slow-start, the
+  (outcome classifier, local rejections), half-open probes that never return
+  (probe lease), healing slow-start, the
   bulkhead/adaptive-concurrency mutual exclusion, and metastable collapse from
   retry/hedge amplification on a shared dependency with nothing to fast-fail. Use
   to review whether the policy can shed and fast-fail under overload. REJECT by
@@ -73,8 +74,15 @@ This reviewer judges ONLY the **overload / shedding controls and their sizing**:
   `Permanent` errors, caller cancellations and the rejections of the stages
   inside the breaker (rate limiter, bulkhead, adaptive concurrency) from
   tripping it, and, once
-  cancellations are neutral, an r8e deadline shorter than the callers' so a hang
-  still trips it.
+  cancellations are neutral, an r8e deadline strictly shorter than the callers'
+  so a hang still trips it. How it recognises local rejections:
+  `IsLocalRejection` (identity) versus `errors.Is`, which also hides a nested
+  policy's wrapped rejection; and a sentinel the fn returns bare, which
+  `IsLocalRejection` takes for a local one.
+- Half-open probes that never return: a call that ignores `ctx` keeps its probe
+  slot, `WithTimeout` does not free it, and the breaker can stay half-open until
+  restart. `HalfOpenProbeLease` as the safety net, and its `d` sized above a
+  probe's worst admission-to-report span.
 - `WithBulkhead` presence and sizing vs the downstream pool/capacity;
   `BulkheadMaxWait` (wait) vs reject under burst; `BulkheadCoDel` queue discipline.
 - `WithAdaptiveConcurrency` (Gradient2) for unknown/variable capacity — AND the
@@ -141,8 +149,14 @@ here; do not dismiss an observation as "probably not serious."
   concurrency inside the breaker reach it, and does a `CircuitBreakerClassifier`
   keep them from counting? Is the classifier itself right (genuine faults still
   fail)?
-- With caller cancellations neutral: is an r8e deadline shorter than the callers'
-  deadline, so a hanging dependency still trips the breaker?
+- With caller cancellations neutral: is an r8e deadline strictly shorter than
+  the callers' deadline, so a hanging dependency still trips the breaker?
+- Local rejections: does the classifier use `IsLocalRejection` (identity) or
+  `errors.Is` on the sentinels, and does the fn call a nested r8e policy or
+  return r8e sentinels bare?
+- Half-open probes: can a probe hang (the call ignores `ctx`, or its `ctx`
+  handling is UNKNOWN)? Is `HalfOpenProbeLease` set, and is its `d` above the
+  worst span from a probe's admission to its report?
 - Bulkhead present at all (any concurrency cap on in-flight work)?
 - Bulkhead size vs downstream pool/capacity: guessed vs traced to a stated pool.
 - Bulkhead wait vs reject under burst (`BulkheadMaxWait` semantics) — does a burst
@@ -176,7 +190,8 @@ shared dep), brownout that never trips a failure-only breaker, healing downstrea
 re-flooded on close, burst that exhausts the caller's pool with no bulkhead, a
 bulkhead/adaptive-concurrency build panic, a run of business errors, caller
 cancellations or the policy's own bulkhead rejections that opens the breaker on a
-healthy dependency.
+healthy dependency, a nested policy's saturation hidden as a local rejection, a
+hung probe that keeps the breaker half-open.
 
 ### Phase 3 — Scoring
 

@@ -37,6 +37,21 @@ Per-category checks for the wrapped call. Each check is phrased so a "yes" to th
       effect)?
 - [ ] Is there blocking/unbounded work (infinite read, no deadline) the policy
       cannot interrupt?
+- [ ] Under `WithCircuitBreaker`: can a call that ignores `ctx` hang during
+      half-open? It keeps its probe slot until it returns; `WithTimeout` answers
+      the caller but leaves the call running in its slot. Once such calls hold
+      every `HalfOpenMaxAttempts` slot, the breaker stays half-open and fails
+      every call until restart. (The `HalfOpenProbeLease` safety net and its
+      sizing are the overload axis's.)
+- [ ] Same for a bulkhead: does a hung call keep its slot after `WithTimeout`
+      returned, until every slot is held and every call gets `ErrBulkheadFull`?
+
+## State shared with the caller (Do returned, the call runs on)
+- [ ] Under `WithTimeout` (or `WithCoalesce`, `RefreshAhead`), `Do` returns as
+      soon as the deadline fires or the caller's `ctx` ends; the fn keeps running
+      on its own goroutine until it returns. Does the fn write to state the
+      caller reads after `Do` returned (a captured result variable, a buffer, a
+      request-scoped struct) without synchronisation?
 
 ## Resource cleanup (every exit path)
 - [ ] Response body / connection / file / lock released on the success path?
@@ -50,6 +65,11 @@ Per-category checks for the wrapped call. Each check is phrased so a "yes" to th
       distinguishable from transient ones — or are they all `error`?
 - [ ] Does the call ever return a NIL error with an empty/zero result that
       downstream treats as authoritative?
+- [ ] Does the call return an r8e sentinel BARE: a nested r8e policy's error
+      passed through as-is, or its own refusals written as `ErrRateLimited`,
+      `ErrBulkheadFull` and the like? `IsLocalRejection` then reads the
+      downstream's refusal as this policy's own guard turning the call away.
+      Enumerate it; what the breaker makes of it is the overload axis's.
 
 ## Panic & determinism
 - [ ] Can the fn panic (nil deref, type assertion, map write race)? Is

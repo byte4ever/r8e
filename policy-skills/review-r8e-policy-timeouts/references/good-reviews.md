@@ -123,6 +123,10 @@ FINAL VERDICT: REJECT
     UNKNOWN — could fire first and make the 2 s inert, but cannot be confirmed.
 15. The fn honors ctx, so the deadline can actually cancel — the timeout will bite
     once it is sized correctly (ctx-honoring itself is the call axis's to score).
+16. Deadline attribution: the callers' deadline is not stated, only the 500 ms
+    SLA. If the callers enforce that SLA as a context deadline, `WithTimeout(2s)`
+    never binds: it arms no timer, a hang ends at 500 ms with the caller's
+    context error, and `OnTimeout` never fires. The 2 s knob is then inert.
 
 ### Phase 2 — Adversarial scenarios
 - **One slow call blows the SLA.** Trigger: a tail call near 2 s (or the gateway
@@ -150,8 +154,10 @@ FINAL VERDICT: REJECT
   internal read an over-loose ceiling and unbounded retry SUM blow the SLA but do
   not produce an unbounded or unbuildable policy.
 - IMPORTANT: #5+#6 (`WithTimeout(2s)` ≈ 16× p99 and 4× the 500 ms SLA — a single
-  slow call breaches the SLA); #7+#8 (no `WithTimeBudget`, worst-case chain ≈ 6 s
-  ≫ 500 ms budget). Both rest on the stated SLA and concrete chain math.
+  slow call breaches the SLA; and if the callers enforce the SLA as a deadline,
+  #16, the 2 s ceiling never binds at all); #7+#8 (no `WithTimeBudget`,
+  worst-case chain ≈ 6 s ≫ 500 ms budget). Both rest on the stated SLA and
+  concrete chain math.
 - NOTED: #10 (no `AdaptiveTimeout` despite a tight SLA — static ceiling works,
   adaptive would tighten it); #14 (nested client timeout UNKNOWN — defer the
   cross-cut, reconcile if confirmed).
@@ -161,9 +167,9 @@ No BLOCKING — the call is bounded and the path degrades acceptably. Two IMPORT
 findings resting on the stated 500 ms SLA: the 2 s ceiling is ~4× the SLA so a
 single slow call breaches it, and with no `WithTimeBudget` the worst-case 3-attempt
 chain (≈ 6 s) is an order of magnitude over budget. **CONDITIONAL APPROVE**,
-accepted risks: size `WithTimeout` to ≈ p99 × 2–4 within the 500 ms SLA (~250–400 ms)
-AND add `WithTimeBudget(≤ 500ms)` to cap the retry sum; until then a single slow
-call or a brownout breaches the SLA.
+accepted risks: size `WithTimeout` to ≈ p99 × 2–4 within the 500 ms SLA (~250–400 ms),
+strictly below any deadline the callers set, AND add `WithTimeBudget(≤ 500ms)` to
+cap the retry sum; until then a single slow call or a brownout breaches the SLA.
 
 ### Phase 5 — Meta-critique
 1. Most likely leniency: accepting "it has a `WithTimeout`, so it is bounded" — it
@@ -217,6 +223,10 @@ FINAL VERDICT: CONDITIONAL APPROVE
     can actually cancel in-flight work, so the 300 ms ceiling is real, not just a
     stop-waiting (the ctx-honoring itself is the call axis's, but it ENABLES the
     deadline to bite here).
+16. Deadline attribution: the callers' deadline is stated: the edge proxy's 1 s
+    deadline on the inbound request, with at least 900 ms of it left when this
+    call starts. `WithTimeout(300ms)` ends strictly before it, so it binds: a
+    hang ends with `ErrTimeout` and `OnTimeout`, as r8e's, not as the caller's.
 
 ### Phase 2 — Adversarial scenarios
 - **A slow tail.** Trigger: a call past 300 ms. Propagation: `WithTimeout(300ms)`
@@ -239,7 +249,8 @@ Fewer than 5 *failing* scenarios are findable: the call has a hard deadline equa
 to its stated budget and ≈ p99 × 3.75, the single ceiling bounds the entire retry
 chain, ctx is honored so the deadline truly cancels, and there is no fan-out or
 ingress boundary requiring propagation — its latency surface is structurally
-bounded to "returns within 300 ms or surfaces `ErrTimeout`."
+bounded to "returns within 300 ms or surfaces `ErrTimeout`," and the 300 ms
+deadline binds, ending strictly before the callers' own.
 
 ### Phase 3 — Scoring
 - BLOCKING: none. The call is hard-bounded at the budget and the ceiling caps the
@@ -253,7 +264,8 @@ bounded to "returns within 300 ms or surfaces `ErrTimeout`."
 ### Phase 4 — Verdict
 Phases 1–2 produced no latency-bound observation: a hard `WithTimeout(300ms)`
 equal to the budget and ≈ p99 × 3.75 caps the whole call including the 3 capped,
-jittered retries, and ctx is honored so the deadline truly bites. Every adversarial
+jittered retries, it ends strictly before the callers' 1 s deadline so it binds,
+and ctx is honored so the deadline truly bites. Every adversarial
 scenario is dismissable in writing. **APPROVE.**
 
 ### Phase 5 — Meta-critique
