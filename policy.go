@@ -587,7 +587,10 @@ func WithCoalesce(keyFn func(context.Context) string) Option {
 // coalesced call then stores its result itself, under the cache key of the call
 // that started it, even when every caller has left before it returned. With one
 // keyFn for both, the next call for that key finds the result in the cache; a
-// call that started the group with an empty cache key stores nothing.
+// call that started the group with an empty cache key stores nothing. A
+// follower's own cache key is filled only if it is still waiting. With
+// different keyFns, two groups can write one cache key: the last to finish
+// wins, even if it started first.
 //
 // The underlying [Cache] is parameterised by [CacheEntry], e.g.
 // otter.MustNew[string, r8e.CacheEntry[T]](cfg). Configure stale-if-error,
@@ -1352,9 +1355,12 @@ func newCacheEntry[T any](
 
 // newCoalesceEntry builds the coalescing middleware. With a cache in the same
 // policy (readThrough not nil), it takes the miss's cache write out of the
-// context and lets the coalesced call settle it: that call runs detached from
-// its callers, and the cache would otherwise lose the result whenever every
-// caller left before it returned. Nothing below this layer sees the write.
+// context, so nothing below this layer sees it. When the call starts a
+// coalesced group, the coalesced call settles that write: it runs detached
+// from its callers, and the cache would otherwise lose the result whenever
+// every caller left before it returned. The write of a follower, or of a call
+// with an empty coalescing key, stays with the caller's own
+// [ReadThroughCache.Do].
 func newCoalesceEntry[T any](
 	coalescer *Coalescer[T],
 	keyFn func(context.Context) string,

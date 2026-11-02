@@ -51,9 +51,11 @@ type (
 	// background goroutine (deadline stripped, like [Coalescer]) and is
 	// deduplicated internally so only one reload per key is ever in flight; within
 	// a [Policy] [WithCache] requires a [WithTimeout] to bound that detached call.
-	// Within a [Policy] that also has [WithCoalesce], the miss's result is stored
-	// by the coalesced call, which may finish after every caller has left (see
-	// [WithCache]).
+	// Within a [Policy] that also has [WithCoalesce], the store of a miss may
+	// happen in the detached coalesced call: it stores under the cache key of the
+	// call that started the group, even after every caller has left. Any other
+	// miss is stored by its own call, and only if that call is still waiting
+	// when the chain returns (see [WithCache]).
 	//
 	// Construct one with [NewReadThroughCache]; it is safe for concurrent use as
 	// long as the underlying [Cache] is. For a simpler standalone (non-[Policy])
@@ -123,9 +125,12 @@ type (
 	pendingStoreKey struct{}
 
 	// pendingStore is the cache write owed for one miss, settled at most once.
-	// Without coalescing, the caller settles it when the chain returns. Within a
-	// [Policy] that coalesces, the coalesced call settles it first, whether or
-	// not its caller is still waiting, and the caller's settle does nothing.
+	// The caller settles it in [ReadThroughCache.Do] when the chain returns.
+	// Within a [Policy] that coalesces, the write of the call that starts a
+	// coalesced group also goes to the coalesced call, which settles it first,
+	// whether or not that caller is still waiting; the caller's settle then
+	// does nothing. The write of a follower, or of a call that opts out of
+	// coalescing, is settled by its own caller only, if it is still waiting.
 	pendingStore[T any] struct {
 		rc   *ReadThroughCache[T]
 		key  string

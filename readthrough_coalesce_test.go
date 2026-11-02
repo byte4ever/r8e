@@ -326,7 +326,7 @@ func TestWithCacheCoalesceWaitingCallerGetsError(t *testing.T) {
 		v, err := p.Do(context.Background(), func(context.Context) (string, error) {
 			time.Sleep(time.Second)
 
-			return "", errDownstream
+			return "partial", errDownstream
 		})
 		require.ErrorIs(t, err, errDownstream)
 		assert.Empty(t, v)
@@ -411,4 +411,104 @@ func TestReadThroughTakePendingIgnoresAnotherCache(t *testing.T) {
 	pending, rest = other.takePending(ctx)
 	assert.Same(t, foreign, pending)
 	assert.Nil(t, rest.Value(pendingStoreKey{}))
+}
+
+// A call with a cache key but no coalescing key is stored by its own caller.
+func TestWithCacheCoalesceOptOutCallIsStoredByItsCaller(t *testing.T) {
+	t.Parallel()
+
+	p := NewPolicy[string](
+		"",
+		WithCache(newMemCache[CacheEntry[string]](), cacheKeyOf, time.Hour),
+		WithCoalesce(coalesceKeyOf),
+		WithTimeout(10*time.Second),
+	)
+
+	_, err := p.Do(withKeys(context.Background(), "a", ""), constFn("v", new(atomic.Int64)))
+	require.NoError(t, err)
+
+	v, err := p.Do(withKeys(context.Background(), "a", ""), failIfCalled(t))
+	require.NoError(t, err)
+	assert.Equal(t, "v", v)
+}
+
+// A follower that is still waiting fills its own cache key with the shared
+// result, even when it differs from the key of the call that started the group.
+func TestWithCacheCoalesceWaitingFollowerFillsItsOwnKey(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int64
+
+		p := NewPolicy[string](
+			"",
+			WithCache(newMemCache[CacheEntry[string]](), cacheKeyOf, time.Hour),
+			WithCoalesce(coalesceKeyOf),
+			WithTimeout(10*time.Second),
+		)
+
+		leaderDone := make(chan struct{})
+
+		go func() {
+			defer close(leaderDone)
+
+			_, err := p.Do(withKeys(context.Background(), "a", "c"), slowFn(time.Second, "shared", &calls))
+			assert.NoError(t, err)
+		}()
+
+		synctest.Wait() // the leader is in flight
+
+		v, err := p.Do(withKeys(context.Background(), "b", "c"), failIfCalled(t))
+		require.NoError(t, err)
+		require.Equal(t, "shared", v)
+
+		<-leaderDone
+
+		for _, key := range []string{"a", "b"} {
+			got, err := p.Do(withKeys(context.Background(), key, ""), failIfCalled(t))
+			require.NoError(t, err)
+			assert.Equal(t, "shared", got, "key %s", key)
+		}
+
+		assert.Equal(t, int64(1), calls.Load())
+	})
+}
+
+// The coalescing layer returns the downstream error on every path: without a
+// cache write to settle, and for a call that opts out of coalescing.
+func TestWithCoalesceReturnsDownstreamError(t *testing.T) {
+	t.Parallel()
+
+	constKey := func(key string) func(context.Context) string {
+		return func(context.Context) string { return key }
+	}
+
+	tests := map[string][]Option{
+		"coalesced, no cache": {
+			WithCoalesce(constKey("k")),
+		},
+		"coalesced, cache opted out": {
+			WithCache(newMemCache[CacheEntry[string]](), constKey(""), time.Hour),
+			WithCoalesce(constKey("k")),
+		},
+		"coalescing opted out, no cache": {
+			WithCoalesce(constKey("")),
+		},
+		"coalescing opted out, with cache": {
+			WithCache(newMemCache[CacheEntry[string]](), constKey("k"), time.Hour),
+			WithCoalesce(constKey("")),
+		},
+	}
+
+	for name, opts := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			p := NewPolicy[string]("", append(opts, WithTimeout(10*time.Second))...)
+
+			v, err := p.Do(context.Background(), errFn(errDownstream, new(atomic.Int64)))
+			require.ErrorIs(t, err, errDownstream)
+			assert.Empty(t, v)
+		})
+	}
 }
