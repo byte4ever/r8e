@@ -440,8 +440,9 @@ func TestRateLimiterTinyRateRefill(t *testing.T) {
 	// addTokens = 1 * 1e-18 which truncates to 0.
 	rl := NewRateLimiter(1e-18, clk, &Hooks{})
 
-	// Drain the (extremely tiny) bucket — capacity is int64(1e-18 * 1e9) = 0,
-	// so the bucket starts with 0 tokens. Any Allow should fail.
+	// The bucket holds one token whatever the rate: the first call is admitted,
+	// and it empties the bucket.
+	require.NoError(t, rl.Allow(context.Background()))
 	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 
 	// Advance a tiny amount — refill should compute addTokens = 0.

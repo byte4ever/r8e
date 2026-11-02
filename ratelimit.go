@@ -271,6 +271,8 @@ func (c *aimdConfig) resolve(base float64) {
 }
 
 // NewRateLimiter creates a rate limiter that allows rate tokens per second.
+// The bucket holds one second of tokens, and at least one token, so a rate
+// below 1 req/s admits one call every 1/rate seconds.
 func NewRateLimiter(
 	rate float64,
 	clock Clock,
@@ -282,7 +284,7 @@ func NewRateLimiter(
 		o(&cfg)
 	}
 
-	capacity := int64(rate * float64(fixedPointScale))
+	capacity := bucketCapacity(rate)
 
 	rl := &RateLimiter{
 		clock: clock,
@@ -323,7 +325,7 @@ func newAIMDState(cfg *aimdConfig, baseRate float64, nowNano int64) *aimdState {
 }
 
 // Reconfigure changes the token-refill rate (tokens per second) at runtime.
-// The bucket capacity is recomputed and the current token count is clamped to
+// The bucket capacity (the rate, and at least one token) is recomputed and the current token count is clamped to
 // the new capacity. Safe for concurrent use with Allow.
 func (rl *RateLimiter) Reconfigure(rate float64) {
 	rl.storeRate(rate)
@@ -337,7 +339,7 @@ func (rl *RateLimiter) Reconfigure(rate float64) {
 // path observes the change without coordination; callers that need adjustments
 // serialised (Reconfigure, the AIMD controller) provide their own ordering.
 func (rl *RateLimiter) storeRate(rate float64) {
-	newCapacity := int64(rate * float64(fixedPointScale))
+	newCapacity := bucketCapacity(rate)
 
 	rl.rate.Store(rate)
 	rl.capacity.Store(newCapacity)
@@ -353,6 +355,19 @@ func (rl *RateLimiter) storeRate(rate float64) {
 			return
 		}
 	}
+}
+
+// bucketCapacity returns the bucket size for a refill rate, in fixed-point
+// tokens: one second of refill, and at least one token for any positive rate.
+// A call costs a whole token, so a smaller bucket would never admit a call
+// below 1 req/s, and an AIMD rate pushed under 1 req/s could never recover. A
+// rate of zero or less keeps an empty bucket: it admits nothing.
+func bucketCapacity(rate float64) int64 {
+	if rate <= 0 {
+		return 0
+	}
+
+	return int64(max(rate, 1) * float64(fixedPointScale))
 }
 
 // refill adds tokens based on elapsed time since the last refill. It uses a

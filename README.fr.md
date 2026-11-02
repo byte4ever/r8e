@@ -345,7 +345,7 @@ r8e.WithCircuitBreaker(
 
 ### Rate Limiter
 
-Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton.
+Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton. Le bucket contient une seconde de jetons, et au moins un jeton. Un débit sous 1 req/s marche donc : `WithRateLimit(0.125)` laisse passer un appel toutes les 8 secondes, soit environ 450 par heure.
 
 ```go
 // Mode rejet (par défaut) : 10 requêtes/seconde

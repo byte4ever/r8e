@@ -355,7 +355,7 @@ RampRecovery, like the slow-call tuners). Observability: `OnCircuitRamping` hook
 r8e.WithRateLimit(rate float64, opts ...RateLimitOption)
 ```
 
-Token-bucket. `rate` = tokens/sec. Option: `r8e.RateLimitBlocking()` (wait instead of reject).
+Token-bucket. `rate` = tokens/sec. Capacity = one second of tokens, at least one token, so a rate below 1/s admits one call every 1/rate seconds. Option: `r8e.RateLimitBlocking()` (wait instead of reject).
 Returns `r8e.ErrRateLimited` in non-blocking mode.
 
 **Adaptive rate (AIMD):** `r8e.AIMD(opts...)` (a `RateLimitOption`) makes the refill
