@@ -116,11 +116,16 @@ func TestRateLimiterRefillRacingDecreaseStaysWithinCapacity(t *testing.T) {
 		rl.tokens.Store(0)
 		clk.advance(time.Second)
 
+		var allowErr error
+
 		race(
-			func() { _ = rl.Allow(context.Background()) },
+			func() { allowErr = rl.Allow(context.Background()) },
 			func() { rl.Reconfigure(1) },
 		)
 
+		// Whatever the order, a token is there for the call: the clamp lowers
+		// the bucket to the new capacity, never below it.
+		require.NoError(t, allowErr)
 		require.LessOrEqual(t, rl.tokens.Load(), rl.capacity.Load())
 	}
 }
