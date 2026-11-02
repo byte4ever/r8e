@@ -870,7 +870,10 @@ Il unifie quatre comportements derrière une seule option :
 - **Negative caching** (`NegativeCache`) — un échec sans valeur périmée de repli
   est lui-même mis en cache pour un court TTL, donc les appels répétés vers une clé
   connue défaillante échouent vite avec l'erreur enregistrée au lieu de marteler
-  l'aval.
+  l'aval. Un appel dont le contexte est déjà fini quand il revient (annulé ou
+  échéance passée) n'est jamais mis en cache, quelle que soit son erreur. Gardez
+  le `WithTimeout` de la policy plus court que les échéances des appelants : un
+  aval bloqué finit alors en `ErrTimeout`, qui, lui, est mis en cache.
 
 `ForceRefresh(ctx)` retourne un contexte enfant qui fait qu'un appel contourne la
 lecture en cache et repeuple en cas de succès. Trois erreurs de configuration

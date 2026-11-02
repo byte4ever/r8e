@@ -855,7 +855,11 @@ It unifies four behaviours behind one option:
   [Stale Cache](#stale-cache) for in-chain use.
 - **Negative caching** (`NegativeCache`) — a failure with no stale value to fall
   back on is itself cached for a short TTL, so repeated calls for a known-bad key
-  fast-fail with the recorded error instead of hammering the downstream.
+  fast-fail with the recorded error instead of hammering the downstream. A call
+  whose own context is done when it returns (cancelled or past its deadline) is
+  never cached, whatever error it returns. Keep the policy's `WithTimeout` shorter
+  than your callers' deadlines, so a hanging downstream ends in a cached
+  `ErrTimeout`.
 
 `ForceRefresh(ctx)` returns a child context that makes one call bypass the cached
 read and repopulate on success. Three misconfigurations panic in `NewPolicy`: a
