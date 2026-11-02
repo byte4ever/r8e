@@ -34,8 +34,9 @@ type (
 	//   - Negative caching: with [NegativeCache] set, a failed execution with no
 	//     stale value to fall back on is itself cached for a short TTL, so repeated
 	//     calls for a known-bad key fast-fail with the recorded error instead of
-	//     hammering a failing downstream. A call whose own context is done when it
-	//     returns is never cached this way (see [NegativeCache]).
+	//     hammering a failing downstream. A call whose own context is done, or
+	//     past its deadline, when it returns is never cached this way (see
+	//     [NegativeCache]).
 	//
 	// Freshness is measured against the injected [Clock], not the underlying
 	// cache's own expiry, so behaviour is deterministic under a fake clock. The
@@ -316,7 +317,8 @@ func NewReadThroughCache[T any](
 // next before returning. Otherwise it executes next and: on success caches and
 // returns the result; on error serves a stale value if one is available (see
 // [StaleIfError]), else caches the error if negative caching is enabled (see
-// [NegativeCache]) and ctx is not done, and returns it.
+// [NegativeCache]) and ctx is neither done nor past its deadline, and returns
+// it.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func (rc *ReadThroughCache[T]) Do(
@@ -382,7 +384,7 @@ func (rc *ReadThroughCache[T]) Do(
 		// ctx decides, not the error, and a deadline set by an enclosing
 		// policy counts too: caching it would fail callers of this key that
 		// carry no such deadline.
-		if rc.negTTL > 0 && ctx.Err() == nil {
+		if rc.negTTL > 0 && !contextEnded(ctx) {
 			rc.storeNegative(key, err)
 		}
 
@@ -467,6 +469,22 @@ func (rc *ReadThroughCache[T]) takePending(
 	}
 
 	return pending, context.WithValue(ctx, pendingStoreKey{}, nil)
+}
+
+// contextEnded reports whether ctx is done or past its deadline. A context sets
+// its deadline error from a timer that runs on its own goroutine, so a
+// downstream that armed its own timer from ctx's deadline (a socket
+// SetDeadline) can return at the deadline while ctx.Err() is still nil. The
+// deadline is compared to time.Now(), the clock the context armed it with,
+// not to the injected Clock.
+func contextEnded(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+
+	deadline, ok := ctx.Deadline()
+
+	return ok && !deadline.After(time.Now())
 }
 
 // storeNegative caches a failed execution for the negative TTL so subsequent

@@ -228,3 +228,65 @@ func TestNegativeCacheKeepsCoalescedSuccessAfterLeaderDeadline(t *testing.T) {
 		assert.Equal(t, "v", v)
 	})
 }
+
+// pastDeadlineCtx reports a deadline that has passed while its Err is still
+// nil: the instant between a context's deadline and the run of the timer that
+// sets its error. A downstream that arms its own timer from Deadline (a
+// SetDeadline on a socket) can return inside that instant.
+type pastDeadlineCtx struct {
+	context.Context
+}
+
+func (pastDeadlineCtx) Deadline() (time.Time, bool) {
+	return time.Now().Add(-time.Millisecond), true
+}
+
+// A call whose deadline has passed is not cached, even when its context has
+// not yet set its error.
+func TestNegativeCacheIgnoresPassedDeadlineBeforeContextError(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+
+	p := newNegativeCachePolicy()
+	ctx := pastDeadlineCtx{Context: context.Background()}
+
+	_, err := p.Do(ctx, errFn(errors.New("i/o timeout"), &calls))
+	require.Error(t, err)
+	require.NoError(t, ctx.Err(), "the context has not set its error yet")
+
+	v, err := p.Do(context.Background(), constFn("v", &calls))
+	require.NoError(t, err)
+	assert.Equal(t, "v", v)
+	assert.Equal(t, int64(2), calls.Load(), "the second call went downstream")
+}
+
+// A downstream that times out on its own timer, armed from the context's
+// deadline, is not cached either.
+func TestNegativeCacheIgnoresDownstreamTimerOnCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int64
+
+		p := newNegativeCachePolicy()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		_, err := p.Do(ctx, func(ctx context.Context) (string, error) {
+			calls.Add(1)
+
+			dl, _ := ctx.Deadline()
+			<-time.After(time.Until(dl))
+
+			return "", errors.New("i/o timeout")
+		})
+		require.Error(t, err)
+
+		v, err := p.Do(context.Background(), constFn("v", &calls))
+		require.NoError(t, err)
+		assert.Equal(t, "v", v)
+		assert.Equal(t, int64(2), calls.Load(), "the second call went downstream")
+	})
+}
