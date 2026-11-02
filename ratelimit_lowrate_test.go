@@ -120,3 +120,19 @@ func TestRateLimiterNonPositiveRateAdmitsNothing(t *testing.T) {
 		})
 	}
 }
+
+// Reconfiguring a limiter to a rate of zero or less empties its bucket: no
+// call is admitted afterwards, even with tokens left from the previous rate.
+func TestRateLimiterReconfigureToNonPositiveRateAdmitsNothing(t *testing.T) {
+	t.Parallel()
+
+	clk := newRateLimitClock(time.Now())
+	rl := NewRateLimiter(10, clk, &Hooks{})
+
+	rl.Reconfigure(0)
+
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
+
+	clk.advance(time.Hour)
+	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
+}

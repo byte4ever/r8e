@@ -440,8 +440,8 @@ func TestRateLimiterTinyRateRefill(t *testing.T) {
 	// addTokens = 1 * 1e-18 which truncates to 0.
 	rl := NewRateLimiter(1e-18, clk, &Hooks{})
 
-	// The bucket holds one token whatever the rate: the first call is admitted,
-	// and it empties the bucket.
+	// A positive rate far below one token per second still gets a one-token
+	// bucket: the first call is admitted, and it empties the bucket.
 	require.NoError(t, rl.Allow(context.Background()))
 	require.ErrorIs(t, rl.Allow(context.Background()), ErrRateLimited)
 

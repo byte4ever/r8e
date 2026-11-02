@@ -343,7 +343,7 @@ r8e.WithCircuitBreaker(
 
 ### Rate Limiter
 
-Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token. The bucket holds one second of tokens, and at least one token, so a rate below 1 req/s still works: `WithRateLimit(0.125)` admits one call every 8 seconds, about 450 per hour.
+Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token. For a positive rate, the bucket holds one second of tokens, and at least one token, so a rate below 1 req/s still works: `WithRateLimit(0.125)` admits one call every 8 seconds, about 450 per hour. A rate of zero or less admits no call.
 
 ```go
 // Reject mode (default): 10 requests/second

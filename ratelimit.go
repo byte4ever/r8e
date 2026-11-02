@@ -271,8 +271,9 @@ func (c *aimdConfig) resolve(base float64) {
 }
 
 // NewRateLimiter creates a rate limiter that allows rate tokens per second.
-// The bucket holds one second of tokens, and at least one token, so a rate
-// below 1 req/s admits one call every 1/rate seconds.
+// For a positive rate, the bucket holds one second of tokens, and at least one
+// token, so a rate below 1 req/s admits one call every 1/rate seconds. A rate
+// of zero or less admits no call.
 func NewRateLimiter(
 	rate float64,
 	clock Clock,
@@ -325,8 +326,9 @@ func newAIMDState(cfg *aimdConfig, baseRate float64, nowNano int64) *aimdState {
 }
 
 // Reconfigure changes the token-refill rate (tokens per second) at runtime.
-// The bucket capacity (the rate, and at least one token) is recomputed and the current token count is clamped to
-// the new capacity. Safe for concurrent use with Allow.
+// The bucket capacity is recomputed (one second of tokens, at least one token
+// for a positive rate, none for a rate of zero or less), and the current token
+// count is clamped to the new capacity. Safe for concurrent use with Allow.
 func (rl *RateLimiter) Reconfigure(rate float64) {
 	rl.storeRate(rate)
 }
