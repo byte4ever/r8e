@@ -57,6 +57,7 @@ against. The single source of truth is [`VERSIONS.json`](VERSIONS.json):
 | `1.0.0` | `v0.10.0` | `v0.10.0` | `v0.10.0` | `v0.10.0` |
 | `1.1.0` | `v0.11.0` | `v0.11.0` | `v0.11.0` | `v0.11.0` |
 | `1.2.0` | `v0.12.0` | `v0.12.0` | `v0.12.0` | `v0.12.0` |
+| `1.2.1` | `v0.12.1` | `v0.12.0` | `v0.12.0` | `v0.12.0` |
 
 Releases are tagged `policy-skills/v<skill_version>` with a self-contained tarball
 asset. The authoring skill always proposes r8e **at the pinned version** so your
@@ -88,7 +89,7 @@ Windows (PowerShell):
 bundled script:
 
 ```bash
-ver=1.2.0
+ver=1.2.1
 curl -fsSL -o ps.tgz \
   "https://github.com/byte4ever/r8e/releases/download/policy-skills/v${ver}/policy-skills-v${ver}.tar.gz"
 tar -xzf ps.tgz && ./policy-skills/install.sh

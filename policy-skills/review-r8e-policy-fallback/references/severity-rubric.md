@@ -47,7 +47,13 @@ doubt between two levels, the one with a concrete propagation path wins.
    accepted only if the user explicitly documents the degraded value as acceptable.
 4. **Negative cache stickiness.** `NegativeCache(d)` caches a failure that may have
    been transient for the full `d`. Acceptable if only stable failures (404) reach
-   the negative cache; document which errors are cached.
+   the negative cache; document which errors are cached. A call whose own context
+   is done when it returns (cancelled, or past its deadline, whatever the error)
+   is never cached, so a caller's cancellation cannot stick. The flip side: a
+   negative cache meant to shield a hung or slow origin does nothing unless
+   `WithTimeout` is shorter than the callers' deadlines. Without it, every call
+   ends on the caller's deadline, none is cached, and each one waits on the
+   origin again. Flag that gap when the context states the intent.
 5. **`FallbackFunc` keyed on an r8e deadline that does not bind.** A
    `WithFallbackFunc` serves its degraded value only when `errors.Is(err,
    ErrTimeout)`, under `WithTimeout(300ms)`, while the stated caller (a page
