@@ -903,7 +903,10 @@ finishes its key is released, so a later call starts fresh. It is **not** a cach
 **Detached shared context.** The shared call runs under a context detached from
 any single caller (`context.WithoutCancel`), so one caller cancelling cannot
 abort work the whole group depends on, and the work runs to completion even if
-every caller leaves (handy for still populating a cache). Each caller — leader
+every caller leaves. With `WithCache` in the same policy, the shared call
+stores its own result under the cache key of the call that started it, even when
+every caller has left before it returned. With one key function for both, the
+next call for that key is a cache hit. Each caller — leader
 included — independently stops waiting the moment *its own* context is done and
 returns `ctx.Err()`, so a slow leader never pins a follower past its deadline.
 Detaching also strips the caller's deadline — which is why coalescing **requires**

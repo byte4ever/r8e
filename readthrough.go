@@ -51,6 +51,11 @@ type (
 	// background goroutine (deadline stripped, like [Coalescer]) and is
 	// deduplicated internally so only one reload per key is ever in flight; within
 	// a [Policy] [WithCache] requires a [WithTimeout] to bound that detached call.
+	// Within a [Policy] that also has [WithCoalesce], the store of a miss may
+	// happen in the detached coalesced call: it stores under the cache key of the
+	// call that started the group, even after every caller has left. Any other
+	// miss is stored by its own call, and only if that call is still waiting
+	// when the chain returns (see [WithCache]).
 	//
 	// Construct one with [NewReadThroughCache]; it is safe for concurrent use as
 	// long as the underlying [Cache] is. For a simpler standalone (non-[Policy])
@@ -70,6 +75,9 @@ type (
 		negTTL     time.Duration
 		refreshTTL time.Duration
 		refreshMu  sync.Mutex
+		// handOff makes each miss hand its cache write down the chain, for the
+		// coalescing layer of the same Policy (see [ReadThroughCache.takePending]).
+		handOff bool
 	}
 
 	// CacheEntry wraps a cached value with the metadata [ReadThroughCache] needs
@@ -104,11 +112,30 @@ type (
 		staleTTL   time.Duration
 		negTTL     time.Duration
 		refreshTTL time.Duration
+		handOff    bool
 	}
 
 	// forceRefreshKey is the private context key under which [ForceRefresh] marks
 	// a call to bypass the cache read.
 	forceRefreshKey struct{}
+
+	// pendingStoreKey is the context key under which [ReadThroughCache.Do] hands
+	// the cache write of a miss down the chain, to work that may outlive the
+	// caller (see [ReadThroughCache.takePending]).
+	pendingStoreKey struct{}
+
+	// pendingStore is the cache write owed for one miss, settled at most once.
+	// The caller settles it in [ReadThroughCache.Do] when the chain returns.
+	// Within a [Policy] that coalesces, the write of the call that starts a
+	// coalesced group also goes to the coalesced call, which settles it first,
+	// whether or not that caller is still waiting; the caller's settle then
+	// does nothing. The write of a follower, or of a call that opts out of
+	// coalescing, is settled by its own caller only, if it is still waiting.
+	pendingStore[T any] struct {
+		rc   *ReadThroughCache[T]
+		key  string
+		once sync.Once
+	}
 
 	// entryState classifies a cache entry against the [Clock] at lookup time, so
 	// the fresh/stale/negative/miss decision is computed once where the entry's
@@ -206,6 +233,15 @@ func CacheHooks(h *Hooks) CacheOption {
 	}
 }
 
+// cacheHandOff makes each miss hand its cache write down the chain (see
+// [ReadThroughCache.takePending]). Only a [Policy] that also coalesces sets it,
+// so a standalone [ReadThroughCache] keeps the whole miss on the caller's path.
+func cacheHandOff() CacheOption {
+	return func(o *cacheOptions) {
+		o.handOff = true
+	}
+}
+
 // NegativeCache enables negative caching: when an execution fails and no stale
 // value is available to serve, the error is cached for negTTL so subsequent
 // calls for the same key fast-fail with the recorded error instead of
@@ -258,6 +294,7 @@ func NewReadThroughCache[T any](
 		staleTTL:   cfg.staleTTL,
 		negTTL:     cfg.negTTL,
 		refreshTTL: cfg.refreshTTL,
+		handOff:    cfg.handOff,
 	}
 }
 
@@ -312,12 +349,18 @@ func (rc *ReadThroughCache[T]) Do(
 
 	rc.hooks.emitCacheMiss()
 
-	result, err := next(ctx)
+	pending := &pendingStore[T]{rc: rc, key: key}
+
+	callCtx := ctx
+	if rc.handOff {
+		callCtx = context.WithValue(ctx, pendingStoreKey{}, pending)
+	}
+
+	result, err := next(callCtx)
+	pending.settle(result, err)
 
 	switch {
 	case err == nil:
-		rc.store(key, result)
-
 		return result, nil
 	case haveStale:
 		rc.hooks.emitStaleServed()
@@ -379,6 +422,36 @@ func (rc *ReadThroughCache[T]) store(key string, result T) {
 		rc.freshTTL+rc.staleTTL,
 	)
 	rc.hooks.emitCacheStored()
+}
+
+// settle records the outcome of the miss. It is the one place that decides
+// what a miss writes on success: the result is stored, at most once. A failure
+// writes nothing here; the stale fallback and negative caching stay with
+// [ReadThroughCache.Do], on the caller's path.
+func (p *pendingStore[T]) settle(result T, err error) {
+	if err != nil {
+		return
+	}
+
+	p.once.Do(func() { p.rc.store(p.key, result) })
+}
+
+// takePending returns the cache write this cache handed down ctx for the
+// current miss, or nil, and ctx without it. The coalescing layer of the same
+// [Policy] calls it, just below the cache, and lets its coalesced call settle
+// the write. Nothing further down the chain can reach the write: not the
+// user's function, not a nested call to the same policy, not a refresh-ahead
+// reload started from there. A write handed down by another cache is left in
+// place, untouched.
+func (rc *ReadThroughCache[T]) takePending(
+	ctx context.Context,
+) (*pendingStore[T], context.Context) {
+	pending, ok := ctx.Value(pendingStoreKey{}).(*pendingStore[T])
+	if !ok || pending.rc != rc {
+		return nil, ctx
+	}
+
+	return pending, context.WithValue(ctx, pendingStoreKey{}, nil)
 }
 
 // storeNegative caches a failed execution for the negative TTL so subsequent

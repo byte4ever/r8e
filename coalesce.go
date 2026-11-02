@@ -25,10 +25,13 @@ type (
 	// The shared work runs in its own goroutine under a context detached from
 	// any single caller (context.WithoutCancel), so one caller cancelling cannot
 	// abort work the whole group depends on, and the work runs to completion even
-	// if every caller leaves (useful to still populate a cache for the next
-	// request). Each caller, including the leader, independently stops waiting as
-	// soon as its own context is done and returns ctx.Err(), so a slow leader
-	// never pins a follower past its deadline.
+	// if every caller leaves. Within a [Policy] that also has [WithCache], the
+	// shared call stores its own result under the cache key of the call that
+	// started it, so the next request for that key finds it in the cache;
+	// nothing is stored when that call's cache key is empty. Each caller,
+	// including the leader, independently stops waiting as soon as its own
+	// context is done and returns ctx.Err(), so a slow leader never pins a
+	// follower past its deadline.
 	//
 	// Detaching also strips the caller's deadline, so the shared call must be
 	// bounded some other way: a leader whose fn never returns parks a goroutine

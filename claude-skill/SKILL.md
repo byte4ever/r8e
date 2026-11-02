@@ -580,7 +580,10 @@ executes and caches a success for `ttl`. `keyFn` derives the key from `ctx` (sam
 idiom as `WithCoalesce`, so one keyFn drives both); an **empty** key opts out. Sits
 just inside Fallback and outside everything else, so a hit skips coalesce/timeout/…
 and a **fallback value is never cached** (only a genuine downstream success). Pair
-with `WithCoalesce` to collapse the miss stampede.
+with `WithCoalesce` to collapse the miss stampede; the coalesced call then stores
+its result itself, under the cache key of the call that started it, even when
+every caller left before it returned (one keyFn for both = the next call for that
+key hits).
 
 The backing `Cache` is parameterised by **`CacheEntry[T]`** (wrapper carrying age +
 recorded error), e.g. `otter.MustNew[string, r8e.CacheEntry[T]](cfg)`. Freshness
