@@ -245,8 +245,10 @@ func cacheHandOff() CacheOption {
 // NegativeCache enables negative caching: when an execution fails and no stale
 // value is available to serve, the error is cached for negTTL so subsequent
 // calls for the same key fast-fail with the recorded error instead of
-// re-executing. Keep negTTL short — it suppresses recovery for that long. A
-// non-positive negTTL leaves negative caching disabled.
+// re-executing. A call that ends because its own context is done (cancelled,
+// or past its deadline) is not a downstream failure and is never cached. Keep
+// negTTL short — it suppresses recovery for that long. A non-positive negTTL
+// leaves negative caching disabled.
 func NegativeCache(negTTL time.Duration) CacheOption {
 	return func(o *cacheOptions) {
 		o.negTTL = negTTL
@@ -367,7 +369,9 @@ func (rc *ReadThroughCache[T]) Do(
 
 		return staleValue, nil
 	default:
-		if rc.negTTL > 0 {
+		// The end of the caller's own context says nothing about the
+		// downstream: caching it would fail every caller of this key for negTTL.
+		if rc.negTTL > 0 && !endedByContext(ctx, err) {
 			rc.storeNegative(key, err)
 		}
 
