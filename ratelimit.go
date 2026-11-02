@@ -46,6 +46,9 @@ type (
 		capacity atomic.Int64
 		tokens   atomic.Int64
 		lastNano atomic.Int64
+		// rateMu serialises the writers of rate and capacity: Reconfigure and the
+		// AIMD step. Allow and refill only load the atomics and never take it.
+		rateMu sync.Mutex
 	}
 
 	// atomicFloat64 is a lock-free float64 cell, storing the value as its
@@ -328,19 +331,24 @@ func newAIMDState(cfg *aimdConfig, baseRate float64, nowNano int64) *aimdState {
 // Reconfigure changes the token-refill rate (tokens per second) at runtime.
 // The bucket capacity is recomputed (one second of tokens, at least one token
 // for a positive rate, none for a rate of zero or less), and the current token
-// count is clamped to the new capacity. Safe for concurrent use with Allow.
+// count is clamped to the new capacity. Safe for concurrent use with Allow and
+// RecordOutcome.
 func (rl *RateLimiter) Reconfigure(rate float64) {
-	rl.storeRate(rate)
+	rl.rateMu.Lock()
+	defer rl.rateMu.Unlock()
+
+	rl.storeRateLocked(rate)
 }
 
-// storeRate publishes a new refill rate: it updates the rate and the derived
-// capacity, then clamps the live token count down to the new capacity (a smaller
-// rate must not leave a backlog larger than the new bucket can hold). Growing the
-// rate leaves the current tokens untouched — the larger bucket simply fills over
-// time. The rate and capacity cells are atomic, so the lock-free acquire/refill
-// path observes the change without coordination; callers that need adjustments
-// serialised (Reconfigure, the AIMD controller) provide their own ordering.
-func (rl *RateLimiter) storeRate(rate float64) {
+// storeRateLocked publishes a new refill rate: it updates the rate and the
+// derived capacity, then clamps the live token count down to the new capacity
+// (a smaller rate must not leave a backlog larger than the new bucket can
+// hold). Growing the rate leaves the current tokens untouched — the larger
+// bucket simply fills over time. The cells are atomic, so the lock-free
+// acquire/refill path observes the change without coordination. The caller
+// holds rl.rateMu, so two writers cannot interleave their stores and leave a
+// capacity that does not match the rate.
+func (rl *RateLimiter) storeRateLocked(rate float64) {
 	newCapacity := bucketCapacity(rate)
 
 	rl.rate.Store(rate)
@@ -526,13 +534,21 @@ func (rl *RateLimiter) RecordOutcome(err error) {
 		return min(ctrl.maxRate, cur+ctrl.increase)
 	}
 
+	// The step reads the current rate and publishes the new one under rateMu,
+	// so a concurrent Reconfigure is either seen by the step or applied after
+	// it, never overwritten by a rate computed from the old one.
+	rl.rateMu.Lock()
+
 	newRate, changed := ctrl.adjust(now, rl.rate.Load(), step)
-	if !changed {
-		return
+	if changed {
+		rl.storeRateLocked(newRate)
 	}
 
-	rl.storeRate(newRate)
-	rl.hooks.emitRateAdapted(newRate)
+	rl.rateMu.Unlock()
+
+	if changed {
+		rl.hooks.emitRateAdapted(newRate)
+	}
 }
 
 // classify snapshots the classifier under the lock (so a concurrent
