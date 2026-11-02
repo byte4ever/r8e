@@ -65,7 +65,7 @@ against `api-constraints.md` before presenting.
 | Reads dominate, repeated keys | `WithCache[T](cache, keyFn, ttl)` | fresh hit short-circuits the chain |
 | Stale data tolerable on failure | `+ StaleIfError(d)` | RFC 5861 stale-on-error |
 | Hot key, avoid synchronous miss at expiry | `+ RefreshAhead(d<ttl)` (needs `WithTimeout`) | Caffeine refresh-after-write |
-| Failures are cacheable (avoid hammering) | `+ NegativeCache(d)` | repeats fast-fail |
+| Failures are cacheable (avoid hammering) | `+ NegativeCache(d)` (a hung origin also needs `WithTimeout` below the callers' deadlines) | repeats fast-fail; a call whose own ctx ended is never cached |
 | Miss stampede on a hot key | `+ WithCoalesce(keyFn)` (needs `WithTimeout`) | collapse concurrent misses |
 | Data changes frequently | keep `ttl` short, well under the change interval | stale authoritative data is a defect |
 | keyFn must distinguish requests | derive the key from request identity in ctx; empty key opts out | a colliding key returns wrong results |

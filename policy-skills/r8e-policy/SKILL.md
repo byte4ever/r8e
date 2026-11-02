@@ -30,19 +30,19 @@ This skill release is calibrated for an **exact** r8e version. The canonical pin
 is [`../VERSIONS.json`](../VERSIONS.json); this section is kept in agreement with
 it (both are bumped together on each release — see `../MAINTENANCE.md`).
 
-- **r8e core**: `v0.12.0`
+- **r8e core**: `v0.12.1`
 - side packages: `otter v0.12.0`, `ristretto v0.12.0`, `r8eotel v0.12.0`
 
 Always propose r8e **at this pinned version** so the user's project and this skill
 agree. When you deliver a policy, include the matching install snippet:
 
 ```sh
-go get github.com/byte4ever/r8e@v0.12.0
+go get github.com/byte4ever/r8e@v0.12.1
 ```
 
 ```go
 // go.mod
-require github.com/byte4ever/r8e v0.12.0
+require github.com/byte4ever/r8e v0.12.1
 // + only if used: github.com/byte4ever/r8e/otter|ristretto|r8eotel v0.12.0
 ```
 

@@ -204,6 +204,32 @@ on a fixture: the observability axis's new red lines (a named policy visibly
 built per inbound request, a hook visibly writing a plain map) need a visible
 failure mode, and `good.md` states that its policy is built once.
 
+## v1.2.1 — re-pin to r8e v0.12.1 (negative cache ignores ended calls)
+
+r8e v0.12.1 fixes four bugs. Only one reaches a reviewed surface: a call whose
+own context is done when it returns (cancelled, or past its deadline) is never
+cached by `NegativeCache`, whatever the error. A negative cache meant to shield
+a hung origin therefore needs a `WithTimeout` shorter than the callers'
+deadlines. Only the fallback axis changed (SKILL.md, checklist, severity rubric
+item IMPORTANT #4), with one row of the decision matrix. No fixture changed.
+
+Four blind runs on the fallback axis, same method: fresh isolated sub-agents,
+artifacts under neutral names with the expected-verdict header stripped, the
+r8e API skill at v0.12.1.
+
+### Round 1 (converged)
+
+| Test | Expected | Got | OK? |
+|---|---|---|---|
+| poor → fallback | REJECT | REJECT (1 BLOCKING: a static fallback fabricates a successful charge) | ✅ |
+| good → fallback | APPROVE | APPROVE (4 NOTED) | ✅ |
+| mediocre → fallback "principal engineer" | CONDITIONAL | CONDITIONAL (5 IMPORTANT: 1 h ttl over the change interval, `(nil, nil)` fallback, 404 merged with outage, keyFn wiring unknown, shared cached pointer) | — |
+| mediocre → fallback "intern" | CONDITIONAL | CONDITIONAL, the same five IMPORTANT | ✅ **identical** |
+
+Converged in one round. No fixture configures `NegativeCache`, so the new check
+could not fire: the run shows that the edit moves no verdict, not that the
+check catches its case.
+
 ## Spec deployment checklist (Appendix)
 
 - [x] Disposition opens with "Default verdict: REJECT" (every axis + orchestrator)

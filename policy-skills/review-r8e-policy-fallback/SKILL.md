@@ -150,7 +150,9 @@ here; do not dismiss an observation as "probably not serious."
 - `StaleIfError(d)` window: present? appropriate to the data's tolerance for
   staleness on failure (RFC 5861)?
 - `NegativeCache(d)`: are failures cached, and is caching them correct (a cached
-  404 vs a cached transient that should not stick)?
+  404 vs a cached transient that should not stick)? A call whose own context is
+  done when it returns is never cached, so a negative cache that shields a hung
+  origin needs a `WithTimeout` shorter than the callers' deadlines.
 - `RefreshAhead(d)` present + requires `WithTimeout`: is `RefreshAhead(d<ttl)`
   used, and is `WithTimeout` present (its required companion — absence is a
   build-time panic `ErrRefreshAheadWithoutTimeout`)?

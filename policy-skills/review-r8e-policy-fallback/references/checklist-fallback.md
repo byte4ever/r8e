@@ -51,6 +51,12 @@ do not pre-dismiss.
       ON FAILURE (RFC 5861), or must a failure surface fresh?
 - [ ] Is `NegativeCache(d)` caching the RIGHT failures (a stable 404), not a
       transient that should not stick for `d`?
+- [ ] If `NegativeCache(d)` is there to shield a hung or slow origin, is
+      `WithTimeout` shorter than the callers' deadlines? A call whose own
+      context is done when it returns (cancelled or past its deadline) is never
+      cached, so without that timeout the hung origin is asked again on every
+      call. Do not flag a caller's cancellation as poisoning the negative
+      cache: it is never cached.
 - [ ] Reliance on r8e NEVER caching the fallback value (only genuine successes):
       is that reliance correct here (a fallback won't poison the cache)?
 
