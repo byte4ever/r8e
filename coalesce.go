@@ -26,8 +26,9 @@ type (
 	// any single caller (context.WithoutCancel), so one caller cancelling cannot
 	// abort work the whole group depends on, and the work runs to completion even
 	// if every caller leaves. Within a [Policy] that also has [WithCache], the
-	// shared call stores its own result, so the next request finds it in the
-	// cache. Each caller, including the leader, independently stops waiting as
+	// shared call stores its own result under the cache key of the call that
+	// started it, so the next request for that key finds it in the cache. Each
+	// caller, including the leader, independently stops waiting as
 	// soon as its own context is done and returns ctx.Err(), so a slow leader
 	// never pins a follower past its deadline.
 	//
