@@ -116,19 +116,16 @@ func CircuitBreakerClassifier(fn func(context.Context, error) Outcome) CircuitBr
 // detected only when an r8e deadline ends the call before the caller gives
 // up: keep the policy's [WithTimeout] shorter than the callers' deadlines.
 func IsCallerCancellation(ctx context.Context, err error) bool {
-	return endedByContext(ctx, err) && !policyDeadlineEnded(ctx)
-}
-
-// endedByContext reports whether err is the end of ctx itself: ctx is done and
-// err is its error or its cause. It does not ask who set the deadline; see
-// [IsCallerCancellation] for that.
-func endedByContext(ctx context.Context, err error) bool {
 	ctxErr := ctx.Err()
 	if err == nil || ctxErr == nil {
 		return false
 	}
 
-	return errors.Is(err, ctxErr) || errors.Is(err, context.Cause(ctx))
+	if !errors.Is(err, ctxErr) && !errors.Is(err, context.Cause(ctx)) {
+		return false
+	}
+
+	return !policyDeadlineEnded(ctx)
 }
 
 // CallerCancellationIsNeutral is a classifier for [CircuitBreakerClassifier]:

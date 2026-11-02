@@ -34,7 +34,8 @@ type (
 	//   - Negative caching: with [NegativeCache] set, a failed execution with no
 	//     stale value to fall back on is itself cached for a short TTL, so repeated
 	//     calls for a known-bad key fast-fail with the recorded error instead of
-	//     hammering a failing downstream.
+	//     hammering a failing downstream. A call whose own context is done when it
+	//     returns is never cached this way (see [NegativeCache]).
 	//
 	// Freshness is measured against the injected [Clock], not the underlying
 	// cache's own expiry, so behaviour is deterministic under a fake clock. The
@@ -245,10 +246,16 @@ func cacheHandOff() CacheOption {
 // NegativeCache enables negative caching: when an execution fails and no stale
 // value is available to serve, the error is cached for negTTL so subsequent
 // calls for the same key fast-fail with the recorded error instead of
-// re-executing. A call that ends because its own context is done (cancelled,
-// or past its deadline) is not a downstream failure and is never cached. Keep
-// negTTL short — it suppresses recovery for that long. A non-positive negTTL
-// leaves negative caching disabled.
+// re-executing. Keep negTTL short — it suppresses recovery for that long. A
+// non-positive negTTL leaves negative caching disabled.
+//
+// A call whose own context is done when it returns (cancelled, or past its
+// deadline, whoever set it) is never cached, whatever error it returns: the
+// end of one caller's budget says nothing about the downstream, and caching it
+// would fail every caller of the key. So a downstream that fails more slowly
+// than its callers' deadlines is never cached negatively. Give the policy a
+// [WithTimeout] shorter than those deadlines, so that the policy, not the
+// caller, ends a hanging call and its [ErrTimeout] is cached.
 func NegativeCache(negTTL time.Duration) CacheOption {
 	return func(o *cacheOptions) {
 		o.negTTL = negTTL
@@ -309,7 +316,7 @@ func NewReadThroughCache[T any](
 // next before returning. Otherwise it executes next and: on success caches and
 // returns the result; on error serves a stale value if one is available (see
 // [StaleIfError]), else caches the error if negative caching is enabled (see
-// [NegativeCache]) and returns it.
+// [NegativeCache]) and ctx is not done, and returns it.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func (rc *ReadThroughCache[T]) Do(
@@ -369,9 +376,13 @@ func (rc *ReadThroughCache[T]) Do(
 
 		return staleValue, nil
 	default:
-		// The end of the caller's own context says nothing about the
-		// downstream: caching it would fail every caller of this key for negTTL.
-		if rc.negTTL > 0 && !endedByContext(ctx, err) {
+		// Once this call's context is done, the error says nothing reliable
+		// about the downstream: it may be the context's own error, or one the
+		// downstream built from it (a gRPC status, a %v wrap). The state of
+		// ctx decides, not the error, and a deadline set by an enclosing
+		// policy counts too: caching it would fail callers of this key that
+		// carry no such deadline.
+		if rc.negTTL > 0 && ctx.Err() == nil {
 			rc.storeNegative(key, err)
 		}
 

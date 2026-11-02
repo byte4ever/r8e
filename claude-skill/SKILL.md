@@ -599,8 +599,9 @@ loader yourself); inert + no-timeout-needed if `d ≥ ttl`), **stale-if-error** 
 `d` as a fallback; a stale call revalidates but serves the stale value + fires
 `OnStaleServed` if that fails; RFC 5861), **negative caching** (`NegativeCache(d)` —
 a failure with no stale fallback is cached `d` so repeats fast-fail with the
-recorded error; a call ended by its own ctx — cancelled or past its deadline — is
-never cached). `r8e.ForceRefresh(ctx)` bypasses the cached read for one call.
+recorded error; a call whose own ctx is done when it returns — cancelled or past its
+deadline, whatever the error — is never cached, so keep `WithTimeout` below callers'
+deadlines for a hung downstream to be cached as `ErrTimeout`). `r8e.ForceRefresh(ctx)` bypasses the cached read for one call.
 Three `NewPolicy` panics: nil keyFn → `ErrCacheNilKeyFunc`, nil cache →
 `ErrCacheNilCache`, ttl ≤ 0 → `ErrCacheNonPositiveTTL`. Code-only (absent from
 `PolicyConfig`/`BuildOptions`/`Reconfigure`). No health condition (healthy
