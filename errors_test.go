@@ -1,6 +1,7 @@
 package r8e_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -21,7 +22,7 @@ func TestTransientWrapsError(t *testing.T) {
 	err := r8e.Transient(cause)
 
 	require.Error(t, err)
-	require.Equal(t, "transient: connection reset", err.Error())
+	require.Equal(t, "connection reset", err.Error())
 }
 
 func TestTransientNilReturnsNil(t *testing.T) {
@@ -68,7 +69,7 @@ func TestPermanentWrapsError(t *testing.T) {
 	err := r8e.Permanent(cause)
 
 	require.Error(t, err)
-	require.Equal(t, "permanent: invalid argument", err.Error())
+	require.Equal(t, "invalid argument", err.Error())
 }
 
 func TestPermanentNilReturnsNil(t *testing.T) {
@@ -177,6 +178,46 @@ func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
 	wrapped := fmt.Errorf("layer: %w", inner)
 
 	require.True(t, r8e.IsPermanent(wrapped))
+}
+
+func TestPolicyErrorMessagesCarryNoClassificationPrefix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		wantMsg   string
+		permanent bool
+	}{
+		{
+			name:    "transient exhausts the retries",
+			err:     r8e.Transient(errors.New("http status 503")),
+			wantMsg: "retries exhausted: http status 503",
+		},
+		{
+			name:      "permanent stops the retries",
+			err:       r8e.Permanent(errors.New("http status 400")),
+			wantMsg:   "http status 400",
+			permanent: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			policy := r8e.NewPolicy[string]("",
+				r8e.WithRetry(2, r8e.ConstantBackoff(0)),
+			)
+
+			_, err := policy.Do(t.Context(),
+				func(context.Context) (string, error) { return "", tt.err },
+			)
+
+			require.EqualError(t, err, tt.wantMsg)
+			assert.Equal(t, tt.permanent, r8e.IsPermanent(err))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

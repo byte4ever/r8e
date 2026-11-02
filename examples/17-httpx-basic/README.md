@@ -49,13 +49,13 @@ go run ./examples/17-httpx-basic/
   status: 200
 
 === Permanent Error (400 Bad Request) ===
-  error: permanent: http status 400
+  error: http status 400
   is permanent: true
   status code: 400
   response available: true
 
 === Transient Error (503 Service Unavailable) ===
-  error: transient: http status 503
+  error: http status 503
   is transient: true
   status code: 503
 ```
