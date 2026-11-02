@@ -583,7 +583,9 @@ func WithCoalesce(keyFn func(context.Context) string) Option {
 // The cache sits just inside the fallback layer and outside every other pattern,
 // so a hit avoids even coalescing, and a fallback value is never cached (only a
 // genuine downstream success is). Pair it with [WithCoalesce] to collapse the
-// burst of concurrent misses on a hot key into one downstream call.
+// burst of concurrent misses on a hot key into one downstream call; the
+// coalesced call then stores its result itself, even when every caller has left
+// before it returned.
 //
 // The underlying [Cache] is parameterised by [CacheEntry], e.g.
 // otter.MustNew[string, r8e.CacheEntry[T]](cfg). Configure stale-if-error,
@@ -800,17 +802,8 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		entries = append(entries, newChaosEntry[T](setup.chaos, clock, &hooks))
 	}
 
-	if setup.cache != nil {
-		entries = append(entries, newCacheEntry[T](setup.cache, clock, &hooks))
-	}
-
-	if setup.coalesce != nil {
-		coalescer = NewCoalescer[T](&hooks)
-		entries = append(
-			entries,
-			newCoalesceEntry[T](coalescer, setup.coalesce.keyFn),
-		)
-	}
+	cacheEntries, coalescer := cacheAndCoalesceEntries[T](&setup, clock, &hooks)
+	entries = append(entries, cacheEntries...)
 
 	if setup.fallbackValue != nil {
 		entries = append(entries, newStaticFallbackEntry[T](*setup.fallbackValue, &hooks))
@@ -1280,15 +1273,47 @@ func (d *cacheDesc) refreshAheadEnabled() bool {
 	return cfg.refreshTTL > 0 && cfg.refreshTTL < d.ttl
 }
 
-// newCacheEntry builds the read-through-cache middleware. It asserts the erased
-// cache back to the policy's concrete Cache[string, CacheEntry[T]]; a mismatch
-// is a programmer error (a cache typed for a different T than the policy), so it
+// cacheAndCoalesceEntries builds the cache and coalescing entries the setup
+// asks for, and returns the coalescer (nil without [WithCoalesce]). They are
+// built together because the coalesced call writes into the cache of the same
+// policy (see [newCoalesceEntry]).
+func cacheAndCoalesceEntries[T any](
+	setup *policySetup,
+	clock Clock,
+	hooks *Hooks,
+) ([]PatternEntry[T], *Coalescer[T]) {
+	var (
+		entries     []PatternEntry[T]
+		readThrough *ReadThroughCache[T]
+	)
+
+	if setup.cache != nil {
+		var entry PatternEntry[T]
+
+		entry, readThrough = newCacheEntry[T](setup.cache, clock, hooks)
+		entries = append(entries, entry)
+	}
+
+	if setup.coalesce == nil {
+		return entries, nil
+	}
+
+	coalescer := NewCoalescer[T](hooks)
+	entries = append(entries, newCoalesceEntry[T](coalescer, setup.coalesce.keyFn, readThrough))
+
+	return entries, coalescer
+}
+
+// newCacheEntry builds the read-through-cache middleware, and returns the cache
+// it reads through for [newCoalesceEntry]. It asserts the erased cache back to
+// the policy's concrete Cache[string, CacheEntry[T]]; a mismatch is a
+// programmer error (a cache typed for a different T than the policy), so it
 // panics with a clear message, mirroring the fallback entries.
 func newCacheEntry[T any](
 	desc *cacheDesc,
 	clock Clock,
 	hooks *Hooks,
-) PatternEntry[T] {
+) (PatternEntry[T], *ReadThroughCache[T]) {
 	cache, ok := desc.cache.(Cache[string, CacheEntry[T]])
 	if !ok {
 		var zero T
@@ -1311,17 +1336,34 @@ func newCacheEntry[T any](
 				return rc.Do(ctx, desc.keyFn(ctx), next)
 			}
 		},
-	}
+	}, rc
 }
 
+// newCoalesceEntry builds the coalescing middleware. With a cache in the same
+// policy (readThrough not nil), the coalesced call stores its own successful
+// result: it runs detached from its callers, and the cache would otherwise lose
+// the result whenever every caller left before it returned.
 func newCoalesceEntry[T any](
 	coalescer *Coalescer[T],
 	keyFn func(context.Context) string,
+	readThrough *ReadThroughCache[T],
 ) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityCoalesce,
 		Name:     "coalesce",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
+			shared := next
+			if readThrough != nil {
+				shared = func(ctx context.Context) (T, error) {
+					result, err := next(ctx)
+					if err == nil {
+						readThrough.storePending(ctx, result)
+					}
+
+					return result, err //nolint:wrapcheck // the chain's error, returned as-is
+				}
+			}
+
 			return func(ctx context.Context) (T, error) {
 				key := keyFn(ctx)
 				if key == "" {
@@ -1329,7 +1371,7 @@ func newCoalesceEntry[T any](
 					return next(ctx)
 				}
 
-				return coalescer.Do(ctx, key, next)
+				return coalescer.Do(ctx, key, shared)
 			}
 		},
 	}

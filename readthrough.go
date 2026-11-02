@@ -110,6 +110,20 @@ type (
 	// a call to bypass the cache read.
 	forceRefreshKey struct{}
 
+	// pendingStoreKey is the context key under which [ReadThroughCache.Do] hands
+	// the cache write of a miss down the chain, to work that may outlive the
+	// caller (see [ReadThroughCache.storePending]).
+	pendingStoreKey struct{}
+
+	// pendingStore is the cache write owed for one miss. It stores at most once,
+	// whoever gets there first: the caller when next returns, or a coalesced call
+	// that finishes after every caller has left.
+	pendingStore[T any] struct {
+		rc   *ReadThroughCache[T]
+		key  string
+		once sync.Once
+	}
+
 	// entryState classifies a cache entry against the [Clock] at lookup time, so
 	// the fresh/stale/negative/miss decision is computed once where the entry's
 	// age and error live, rather than reconstructed by the caller.
@@ -312,11 +326,13 @@ func (rc *ReadThroughCache[T]) Do(
 
 	rc.hooks.emitCacheMiss()
 
-	result, err := next(ctx)
+	pending := &pendingStore[T]{rc: rc, key: key}
+
+	result, err := next(context.WithValue(ctx, pendingStoreKey{}, pending))
 
 	switch {
 	case err == nil:
-		rc.store(key, result)
+		pending.store(result)
 
 		return result, nil
 	case haveStale:
@@ -379,6 +395,22 @@ func (rc *ReadThroughCache[T]) store(key string, result T) {
 		rc.freshTTL+rc.staleTTL,
 	)
 	rc.hooks.emitCacheStored()
+}
+
+func (p *pendingStore[T]) store(result T) {
+	p.once.Do(func() { p.rc.store(p.key, result) })
+}
+
+// storePending stores result for the miss recorded in ctx, if ctx carries one
+// for this cache. A [Policy] calls it from its coalesced call, which runs
+// detached from its callers: the result then reaches the cache even when every
+// caller has left before it returned. The check on rc keeps a coalesced call
+// from writing into the cache of an enclosing policy.
+func (rc *ReadThroughCache[T]) storePending(ctx context.Context, result T) {
+	pending, ok := ctx.Value(pendingStoreKey{}).(*pendingStore[T])
+	if ok && pending.rc == rc {
+		pending.store(result)
+	}
 }
 
 // storeNegative caches a failed execution for the negative TTL so subsequent

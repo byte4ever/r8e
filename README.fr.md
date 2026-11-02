@@ -920,8 +920,9 @@ zéro. Ce n'est **pas** un cache — placez-en un devant ou derrière pour cela.
 **Contexte partagé détaché.** L'appel partagé s'exécute sous un contexte détaché
 de tout appelant (`context.WithoutCancel`) : l'annulation par un seul appelant ne
 peut pas avorter le travail dont dépend tout le groupe, et le travail va jusqu'au
-bout même si tous les appelants partent (utile pour quand même remplir un cache).
-Chaque appelant — leader compris — cesse d'attendre dès que *son propre* contexte
+bout même si tous les appelants partent. Avec `WithCache` dans la même politique,
+l'appel partagé écrit lui-même son résultat en cache : le cache est rempli même
+quand tous les appelants sont partis avant la fin. Chaque appelant — leader compris — cesse d'attendre dès que *son propre* contexte
 est terminé et renvoie `ctx.Err()`, donc un leader lent ne bloque jamais un
 follower au-delà de sa deadline. Le détachement retire aussi la deadline de
 l'appelant — c'est pourquoi le coalescing **exige** un `WithTimeout` pour borner
