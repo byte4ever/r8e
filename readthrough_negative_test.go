@@ -290,3 +290,24 @@ func TestNegativeCacheIgnoresDownstreamTimerOnCallerDeadline(t *testing.T) {
 		assert.Equal(t, int64(2), calls.Load(), "the second call went downstream")
 	})
 }
+
+// A downstream failure on a call whose deadline is still ahead is cached: a
+// deadline alone does not end the call.
+func TestNegativeCacheRecordsFailureUnderLiveDeadline(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+
+	p := newNegativeCachePolicy()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	_, err := p.Do(ctx, errFn(errDownstream, &calls))
+	require.ErrorIs(t, err, errDownstream)
+
+	v, err := p.Do(context.Background(), constFn("v", &calls))
+	require.ErrorIs(t, err, errDownstream, "served from the negative entry")
+	assert.Empty(t, v)
+	assert.Equal(t, int64(1), calls.Load())
+}
