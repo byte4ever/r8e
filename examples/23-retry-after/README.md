@@ -46,7 +46,7 @@ sequenceDiagram
 | `RetryAfterProvider` | An error exposing `RetryAfter() (time.Duration, bool)`; retry honors it in place of the computed backoff |
 | `httpx` adapter | Surfaces an HTTP `429`/`503` `Retry-After` header (delay-seconds or HTTP-date) as a `RetryAfterProvider` automatically |
 | `httpx.ErrorClass` | The classifier maps status codes to `Transient` / `Permanent` / `Success` so retry knows which responses to retry |
-| `MaxDelay` cap, then up to +10% jitter | The honored delay is capped, so a hostile `Retry-After` can't pin you indefinitely, then spread upward so capped clients don't retry together and none retries early |
+| `MaxDelay` cap, then up to +10% jitter | The honored delay is capped, so a hostile `Retry-After` can't pin you indefinitely, then spread upward so capped clients don't retry together; a hint at or below `MaxDelay` is never retried early |
 
 ## When to use
 

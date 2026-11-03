@@ -171,8 +171,9 @@ Returns `r8e.ErrRetriesExhausted` wrapping the last error.
 
 **Retry-After**: if a failed attempt's error implements `r8e.RetryAfterProvider`
 (`RetryAfter() (time.Duration, bool)`), retry honors that delay over the computed backoff: capped by `MaxDelay`, then
-spread upward by up to 10% (never before the hint; a capped hint waits between
-`MaxDelay` and 1.1 × `MaxDelay`). Attach a fixed hint to any error
+spread upward by up to 10%. A hint ≤ `MaxDelay` is a floor (never retried early);
+a hint above `MaxDelay` is cut to [`MaxDelay`, 1.1 × `MaxDelay`] and so re-sent
+before the server's time: against a hard quota, exclude it with `RetryIf`. Attach a fixed hint to any error
 with `r8e.RetryAfterError(err, d)`, or implement the interface on your own type;
 the httpx adapter's `StatusError` implements it from the HTTP `429`/`503`
 `Retry-After` header (delay-seconds or HTTP-date), so httpx honors it

@@ -56,7 +56,7 @@ func TestRetryAfterFromErrorAbsent(t *testing.T) {
 func TestJitteredRetryAfter(t *testing.T) {
 	t.Parallel()
 
-	// Non-positive and sub-resolution delays are returned unchanged.
+	// A non-positive delay returns 0; a sub-10ns delay is returned unchanged.
 	assert.Equal(t, time.Duration(0), jitteredRetryAfter(0))
 	assert.Equal(t, time.Duration(0), jitteredRetryAfter(-time.Second))
 	assert.Equal(t, 5*time.Nanosecond, jitteredRetryAfter(5*time.Nanosecond))
@@ -64,11 +64,18 @@ func TestJitteredRetryAfter(t *testing.T) {
 	// A normal delay is spread upward only, within +10%: a Retry-After is a
 	// minimum, never an average.
 	const base = 500 * time.Millisecond
+
+	lowest, highest := base+base, time.Duration(0)
+
 	for range 1000 {
 		got := jitteredRetryAfter(base)
 		assert.GreaterOrEqual(t, got, base)
 		assert.LessOrEqual(t, got, base+base/10)
+
+		lowest, highest = min(lowest, got), max(highest, got)
 	}
+
+	assert.GreaterOrEqual(t, highest-lowest, base/20, "the spread covers most of the 10% band")
 
 	// Near math.MaxInt64 the +10% jitter overflows int64 on ~half the draws;
 	// the result must always be clamped non-negative, never a wrapped negative.
@@ -164,14 +171,53 @@ func TestDoRetryRetryAfterCappedByMaxDelay(t *testing.T) {
 	durations := clk.getDurations()
 	require.Len(t, durations, 199)
 
-	distinct := map[time.Duration]bool{}
+	lowest, highest := 2*time.Second, time.Duration(0)
+
 	for _, d := range durations {
 		assert.GreaterOrEqual(t, d, time.Second, "the capped delay is the floor")
 		assert.LessOrEqual(t, d, time.Second+time.Second/10, "the jitter adds at most 10%")
-		distinct[d] = true
+
+		lowest, highest = min(lowest, d), max(highest, d)
 	}
 
-	assert.Greater(t, len(distinct), 1, "capped delays must stay spread")
+	assert.GreaterOrEqual(t, highest-lowest, time.Second/20, "capped delays must stay spread")
+}
+
+// An uncapped hint is spread too: clients that got the same Retry-After do
+// not all retry at the same instant.
+func TestDoRetryUncappedRetryAfterIsSpread(t *testing.T) {
+	t.Parallel()
+
+	clk := newImmediateTestClock()
+
+	_, err := DoRetry[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			return "", RetryAfterError(errors.New("429"), 500*time.Millisecond)
+		},
+		RetryParams{
+			MaxAttempts: 200,
+			Strategy:    ConstantBackoff(10 * time.Millisecond),
+			Hooks:       &Hooks{},
+			Clock:       clk,
+			Opts:        []RetryOption{MaxDelay(time.Hour)},
+		},
+	)
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+
+	durations := clk.getDurations()
+	require.Len(t, durations, 199)
+
+	lowest, highest := time.Hour, time.Duration(0)
+
+	for _, d := range durations {
+		assert.GreaterOrEqual(t, d, 500*time.Millisecond, "never before an uncapped hint")
+		assert.LessOrEqual(t, d, 550*time.Millisecond)
+
+		lowest, highest = min(lowest, d), max(highest, d)
+	}
+
+	assert.GreaterOrEqual(t, highest-lowest, 25*time.Millisecond, "uncapped hints are spread")
 }
 
 // A strategy backoff (no Retry-After) stays a hard cap: no jitter is added
@@ -193,9 +239,10 @@ func TestDoRetryStrategyBackoffCappedExactly(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, ErrRetriesExhausted)
+	require.Len(t, clk.getDurations(), 2)
 
 	for _, d := range clk.getDurations() {
-		assert.Equal(t, time.Second, d)
+		assert.Equal(t, time.Second, d, "a strategy backoff is capped exactly")
 	}
 }
 

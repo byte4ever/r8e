@@ -163,7 +163,8 @@ type (
 		// BaseDelay is the base delay for backoff calculation.
 		// Required. Parsed via time.ParseDuration. Example: "100ms".
 		BaseDelay *string `json:"base_delay,omitempty" yaml:"base_delay,omitempty"`
-		// MaxDelay caps the backoff delay.
+		// MaxDelay caps the backoff delay. A Retry-After hint is capped too,
+		// then spread upward by up to 10%, so it may wait up to 1.1× MaxDelay.
 		// Optional. Parsed via time.ParseDuration. Example: "30s".
 		MaxDelay *string `json:"max_delay,omitempty" yaml:"max_delay,omitempty"`
 		// MaxAttempts is the maximum number of retry attempts.

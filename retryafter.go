@@ -65,7 +65,7 @@ func retryAfterFromError(err error) (time.Duration, bool) {
 	return 0, false
 }
 
-// jitteredRetryAfter returns d spread uniformly over [d, d+10%] to avoid a
+// jitteredRetryAfter returns delay spread uniformly over [delay, delay+delay/10] to avoid a
 // thundering herd when many clients receive the same Retry-After. The spread is
 // upward only: a Retry-After is a minimum, and a retry sent before it lands on
 // another rejection. A non-positive delay returns 0, and a sub-10ns delay is

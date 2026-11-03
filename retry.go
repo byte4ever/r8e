@@ -147,8 +147,9 @@ func DoRetry[T any](
 			return zero, lastErr //nolint:wrapcheck // real downstream error
 		}
 
-		// Compute the wait before the next attempt: strategy backoff, a
-		// Retry-After override, then the MaxDelay cap.
+		// Compute the wait before the next attempt: the strategy backoff or a
+		// Retry-After hint, capped by MaxDelay; a hint is then spread upward
+		// by up to 10%, so it can wait past MaxDelay.
 		delay := nextBackoffDelay(attempt, err, params.Strategy, cfg.maxDelay)
 
 		// Honor a total time budget: stop early rather than sleep a backoff that
