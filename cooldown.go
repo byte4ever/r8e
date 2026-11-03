@@ -83,16 +83,28 @@ func CooldownClock(c Clock) CooldownOption {
 // NewCooldown builds a cooldown, disarmed. It panics with
 // [ErrCooldownNonPositiveMax] when [MaxCooldown] is not positive.
 func NewCooldown(opts ...CooldownOption) *Cooldown {
+	cfg, err := newCooldownConfig(opts)
+	if err != nil {
+		panic(err)
+	}
+
+	return &Cooldown{clock: cfg.clock, trigger: cfg.trigger, limit: cfg.limit}
+}
+
+// newCooldownConfig applies opts over the defaults and checks the result. It
+// holds the cooldown's only validity rules: NewCooldown panics with its error,
+// and checkSetupInvariants returns it.
+func newCooldownConfig(opts []CooldownOption) (cooldownConfig, error) {
 	cfg := cooldownConfig{clock: RealClock{}, limit: defaultMaxCooldown}
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	if cfg.limit <= 0 {
-		panic(ErrCooldownNonPositiveMax)
+		return cooldownConfig{}, ErrCooldownNonPositiveMax
 	}
 
-	return &Cooldown{clock: cfg.clock, trigger: cfg.trigger, limit: cfg.limit}
+	return cfg, nil
 }
 
 // Remaining reports how long the cooldown stays armed, zero when it is not.

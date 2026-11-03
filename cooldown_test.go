@@ -387,40 +387,55 @@ func TestWithCooldownArmsOnANonRetryableHint(t *testing.T) {
 
 // A cooldown armed by another policy while a retry sleeps its backoff stops
 // that retry: no attempt leaves, and the last error comes back as is.
+//
+// The cooldown is checked before the concurrency budget: with a budget that
+// has room the stopped retry takes no permit, and with a budget that has none
+// the caller still gets the last error, not ErrConcurrencyBudgetExceeded.
 func TestWithCooldownStopsARetryArmedFromOutside(t *testing.T) {
 	t.Parallel()
 
-	synctest.Test(t, func(t *testing.T) {
-		quota := NewCooldown()
-		budget := NewConcurrencyBudget(MinConcurrency(1))
-		other := NewPolicy[string]("", WithSharedCooldown(quota))
-		retrying := NewPolicy[string]("", WithSharedCooldown(quota),
-			WithRetry(3, ConstantBackoff(time.Second)), WithSharedConcurrencyBudget(budget))
+	floors := map[string]int{"budget with room": 1, "budget without room": 0}
 
-		var calls atomic.Int64
+	for name, floor := range floors {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-		done := make(chan error, 1)
+			synctest.Test(t, func(t *testing.T) {
+				var calls, refused atomic.Int64
 
-		go func() {
-			_, err := retrying.Do(t.Context(), func(context.Context) (string, error) {
-				calls.Add(1)
+				quota := NewCooldown()
+				budget := NewConcurrencyBudget(MinConcurrency(floor))
+				other := NewPolicy[string]("", WithSharedCooldown(quota))
+				retrying := NewPolicy[string]("", WithSharedCooldown(quota),
+					WithRetry(3, ConstantBackoff(time.Second)), WithSharedConcurrencyBudget(budget),
+					WithHooks(&Hooks{OnConcurrencyBudgetExceeded: func() { refused.Add(1) }}))
 
-				return "", errNoQuota
+				done := make(chan error, 1)
+
+				go func() {
+					_, err := retrying.Do(t.Context(), func(context.Context) (string, error) {
+						calls.Add(1)
+
+						return "", errNoQuota
+					})
+					done <- err
+				}()
+
+				// The first attempt failed with no hint; the retry sleeps its backoff.
+				synctest.Wait()
+
+				_, err := other.Do(t.Context(), hinted)
+				require.ErrorIs(t, err, errQuotaHit)
+
+				err = <-done
+				assert.Equal(t, errNoQuota, err, "the last error, as is")
+				require.NotErrorIs(t, err, ErrConcurrencyBudgetExceeded)
+				assert.Equal(t, int64(1), calls.Load(), "no retry left while armed")
+				assert.Zero(t, budget.InUse(), "the stopped retry took no concurrency permit")
+				assert.Zero(t, refused.Load(), "the budget was not consulted")
 			})
-			done <- err
-		}()
-
-		// The first attempt failed with no hint; the retry sleeps its backoff.
-		synctest.Wait()
-
-		_, err := other.Do(t.Context(), hinted)
-		require.ErrorIs(t, err, errQuotaHit)
-
-		err = <-done
-		assert.Equal(t, errNoQuota, err, "the last error, as is")
-		assert.Equal(t, int64(1), calls.Load(), "no retry left while armed")
-		assert.Zero(t, budget.InUse(), "the stopped retry took no concurrency permit")
-	})
+		})
+	}
 }
 
 // A hint on the last allowed attempt comes back as is too, not wrapped with

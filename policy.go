@@ -1012,11 +1012,11 @@ func validateSetup(setup *policySetup) {
 }
 
 // checkSetupInvariants returns the first misconfiguration in setup, or nil if
-// it is self-consistent: a cross-pattern conflict, or an out-of-range [Burst]. It is the single source of truth for
-// these rules: [validateSetup] panics with it (the options path) and
-// [BuildOptions] returns it (the config path), so an invariant added here is
-// enforced by both paths and the config path can never panic on one the options
-// path catches.
+// it is self-consistent: a cross-pattern conflict, an out-of-range [Burst] or a
+// non-positive [MaxCooldown]. It is the single source of truth for these rules:
+// [validateSetup] panics with it (the options path) and [BuildOptions] returns
+// it (the config path), so an invariant added here is enforced by both paths
+// and the config path can never panic on one the options path catches.
 func checkSetupInvariants(setup *policySetup) error {
 	// A retry budget gates retries; without a retry pattern it has nothing to do.
 	if setup.retryBudget != nil && setup.retry == nil {
@@ -1102,15 +1102,10 @@ func checkSetupInvariants(setup *policySetup) error {
 	}
 
 	if setup.cooldown {
-		// Apply the cooldown options to a probe config: a non-positive cap is
-		// caught here, before any pattern is built, on both paths.
-		cfg := cooldownConfig{limit: defaultMaxCooldown}
-		for _, opt := range setup.cooldownOpts {
-			opt(&cfg)
-		}
-
-		if cfg.limit <= 0 {
-			return ErrCooldownNonPositiveMax
+		// The cooldown options go through the same check as NewCooldown, before
+		// any pattern is built, on both paths.
+		if _, err := newCooldownConfig(setup.cooldownOpts); err != nil {
+			return err
 		}
 	}
 
