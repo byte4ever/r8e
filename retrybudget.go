@@ -13,6 +13,7 @@ type (
 		parent    *RetryBudget
 		maxTokens int
 		ratio     float64
+		shield    bool
 	}
 
 	// RetryBudgetOption configures a RetryBudget.
@@ -61,6 +62,9 @@ type (
 		tokens    float64
 		maxTokens float64
 		ratio     float64
+		// shield stops this budget's failures from debiting its parent while
+		// it is exhausted (see ShieldParent). Immutable after construction.
+		shield bool
 	}
 )
 
@@ -103,6 +107,23 @@ func Parent(parent *RetryBudget) RetryBudgetOption {
 	}
 }
 
+// ShieldParent bounds how much a sick child budget drains its parent (see
+// [Parent]). Without it, every failure of the child is also debited from the
+// parent, so a dead route keeps draining the shared parent through its
+// first-attempt failures alone, even once its own retries are cut, and the
+// healthy sibling routes lose their retries. With it, a failure recorded while
+// the child is exhausted (at or below half its capacity) is not passed to the
+// parent; once successes bring the child back above that threshold, its
+// failures debit the parent again. A sick child then drains the parent by
+// about half of its own capacity. Successes are always credited to the
+// parent. It has no effect on a budget without a parent, and it is set at
+// construction only: Reconfigure ignores it.
+func ShieldParent() RetryBudgetOption {
+	return func(cfg *retryBudgetConfig) {
+		cfg.shield = true
+	}
+}
+
 // NewRetryBudget creates an adaptive retry budget. The bucket starts full, so a
 // healthy service is never throttled until failures have drained it below half
 // capacity. Invalid parameters are clamped to the defaults rather than
@@ -123,6 +144,7 @@ func NewRetryBudget(opts ...RetryBudgetOption) *RetryBudget {
 
 	return &RetryBudget{
 		parent: cfg.parent,
+		shield: cfg.shield,
 		// Start with a full bucket so a healthy service is never throttled.
 		tokens:    maxTokens,
 		maxTokens: maxTokens,
@@ -204,16 +226,23 @@ func (b *RetryBudget) recordSuccess() {
 }
 
 // recordFailure removes one whole token from the bucket, floored at zero, then
-// charges every ancestor. It is a no-op on a nil budget. Like recordSuccess it
-// holds one lock at a time as it walks up the tree.
+// charges every ancestor, unless this budget shields its parent (see
+// ShieldParent) and was already exhausted when the failure arrived. It is a
+// no-op on a nil budget. Like recordSuccess it holds one lock at a time as it
+// walks up the tree.
 func (b *RetryBudget) recordFailure() {
 	if b == nil {
 		return
 	}
 
 	b.mu.Lock()
+	shielded := b.shield && b.tokens <= b.maxTokens/2
 	b.tokens = max(b.tokens-1, 0)
 	b.mu.Unlock()
+
+	if shielded {
+		return
+	}
 
 	b.parent.recordFailure()
 }
