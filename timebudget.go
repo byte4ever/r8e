@@ -99,9 +99,12 @@ type (
 // cancels later, while the cut attempt is still returning, does not change
 // the decision either.
 //
-// Unlike DoTimeout, the budget waits for the chain to return. A success that
-// comes back after the budget's deadline cut the call stays a success, where
-// DoTimeout, which has already returned [ErrTimeout], drops it.
+// Unlike DoTimeout, the budget waits for the chain to return. Without
+// [WithHedge], a success that comes back after the budget's deadline cut the
+// call stays a success, where DoTimeout, which has already returned
+// [ErrTimeout], drops it. With WithHedge, the hedge returns as soon as it
+// sees the cut, without waiting for the downstream, so the call fails with
+// ErrTimeBudgetExceeded.
 //
 // The deadline is driven by the policy's [Clock], not the wall clock, so it
 // stays deterministic under a fake test clock. Because a real
