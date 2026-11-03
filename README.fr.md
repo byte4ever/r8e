@@ -1097,7 +1097,8 @@ terminé, cette politique n'écrit plus d'entrée négative. En revanche, une
 politique ou un cache qui l'enveloppe met quand même en cache le
 `context.Canceled` qu'elle renvoie. Ne posez `ctx` que sur une politique dont
 tous les utilisateurs s'arrêtent avec son propriétaire. L'option se pose en code
-uniquement, et `Reconfigure` ne la change pas.
+uniquement, et `Reconfigure` ne la change pas. Voir
+[`examples/51-base-context`](examples/51-base-context).
 
 ```go
 base, stop := context.WithCancelCause(context.Background())
@@ -1792,6 +1793,7 @@ go run ./examples/47-rate-limit-burst/
 go run ./examples/48-honor-retry-after/
 go run ./examples/49-attempt-timeout/
 go run ./examples/50-shield-parent/
+go run ./examples/51-base-context/
 ```
 
 ## Licence

@@ -1069,7 +1069,7 @@ expires). A call with no coalescing key still runs on its caller's context.
 This policy stores no negative entry once `ctx` has ended; a policy or cache
 that wraps it still caches the `context.Canceled` it returns. Set `ctx` only on
 a policy whose holders all stop with its owner. Code-only, and `Reconfigure` does not
-change it.
+change it. See [`examples/51-base-context`](examples/51-base-context).
 
 ```go
 base, stop := context.WithCancelCause(context.Background())
@@ -1750,6 +1750,7 @@ go run ./examples/47-rate-limit-burst/
 go run ./examples/48-honor-retry-after/
 go run ./examples/49-attempt-timeout/
 go run ./examples/50-shield-parent/
+go run ./examples/51-base-context/
 ```
 
 ## License

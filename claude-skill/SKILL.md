@@ -622,7 +622,8 @@ cache (every holder, including calls started later) fails at once with
 reloads stop silently, calls with no coalescing key still run, and this policy
 stores no negative entry; a policy or cache wrapping it still caches the
 `context.Canceled` it returns. Set it only on a policy whose holders all stop
-with its owner. Code-only, not changed by Reconfigure. Under `testing/synctest`, a test function that
+with its owner. Code-only, not changed by Reconfigure (example:
+`examples/51-base-context`). Under `testing/synctest`, a test function that
 returns while a shared call is blocked makes `synctest.Test` panic ("deadlock:
 main bubble goroutine has exited but blocked goroutines remain"): first loop
 until `policy.Metrics().CoalesceInFlight == 0` (with `time.Sleep` in the bubble),
@@ -980,7 +981,7 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/50-shield-parent`.
+Examples: `examples/01-quickstart` through `examples/51-base-context`.
 
 ## Conventions: every feature ships with a documented example (mandatory)
 
