@@ -197,7 +197,7 @@ panics in `NewPolicy` (or `BuildOptions` returns `r8e.ErrRetryBudgetWithoutRetry
 for config-driven construction). A shared budget reports the same tokens/exhausted
 state under each sharing policy's name (aggregate gauge with max/avg, not sum).
 **Options**: `r8e.MaxTokens(n)` (default 10),
-`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree).
+`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree), `r8e.ShieldParent()` (on a child: while the child is exhausted its failures stop debiting the parent, so a dead route drains the parent by at most half its own capacity rounded up (capacity unchanged meanwhile); siblings keep their retries only if the parent stays above half its own capacity after that drain, so size it for it; no bound for a flapping child, whose successes still credit the parent; construction-only, code-only).
 When exhausted it suppresses the retry and
 returns the **real downstream error** (not a sentinel); first attempts always
 proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,
@@ -206,7 +206,9 @@ health condition (degraded).
 
 **Nested (tree) budgets** (`r8e.Parent(*RetryBudget)`): a budget can nest under a
 parent — a child's outcomes also roll up into the parent and every ancestor
-(parent = subtree aggregate, each level credits a success by its own ratio), and a
+(parent = subtree aggregate, each level credits a success by its own ratio; the
+exception is a child built with `ShieldParent()`, whose failures stop reaching its
+ancestors while it is exhausted), and a
 retry is permitted only when the child AND every ancestor allow it (short-circuited
 up the tree). So a gateway-wide parent caps aggregate retry pressure: a storm in
 one leaf drains the shared parent and throttles its siblings. `Exhausted()` stays

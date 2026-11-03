@@ -780,6 +780,25 @@ svcA    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))           
 svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
 ```
 
+**Shielding the parent (`ShieldParent`).** A dead route keeps draining the parent
+through its first-attempt failures alone, even once its own retries are cut, and
+its healthy siblings lose their retries. `ShieldParent()` on the child bounds
+that drain: while the child is exhausted, its failures are no longer passed to
+the parent, and they are again once successes bring the child back above half its
+capacity. A dead child then drains the parent by at most half of its own
+capacity, rounded up (5 tokens for `MaxTokens(10)`), as long as its capacity is
+not changed while it drains. Siblings keep their retries as long as
+the parent stays above half its own capacity after that drain, so size the
+parent for it. No bound is promised for a flapping child: its successes are
+still credited to the parent, and each one that lifts it back above the
+threshold lets the next failure through. While the shield holds, the parent's
+tokens leave out that child's failures but still count its successes: watch the
+child's own budget. Like `Parent`, it is set at construction and code-only.
+
+```go
+svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
+```
+
 A budget requires `WithRetry` — configuring one without a retry pattern panics
 in `NewPolicy` (or, for config-driven construction, `BuildOptions` returns
 `ErrRetryBudgetWithoutRetry`). Throttling is observable via the

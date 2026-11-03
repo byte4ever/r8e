@@ -789,6 +789,27 @@ svcA    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))   // remon
 svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
 ```
 
+**Protéger le parent (`ShieldParent`).** Une route morte continue de vider le
+parent par ses seuls échecs de première tentative, même une fois ses propres
+retries coupés, et les routes saines voisines perdent leurs retries.
+`ShieldParent()` sur l'enfant borne cette perte : tant que l'enfant est épuisé,
+ses échecs ne sont plus reportés sur le parent, et ils le sont de nouveau quand
+les succès le ramènent au-dessus de la moitié de sa capacité. Un enfant mort ne
+retire alors au parent au plus que la moitié de sa propre capacité, arrondie
+au-dessus (5 jetons pour `MaxTokens(10)`), tant que sa capacité ne change pas
+pendant ce temps. Les routes voisines gardent leurs retries tant
+que le parent reste au-dessus de la moitié de sa capacité après cette perte :
+dimensionnez le parent en conséquence. Aucune borne n'est promise pour un enfant
+instable : ses succès sont toujours crédités au parent, et chaque succès qui le
+ramène au-dessus du seuil laisse passer l'échec suivant. Tant que la protection
+joue, les jetons du parent ne comptent plus les échecs de cet enfant, mais
+comptent toujours ses succès : surveillez le budget de l'enfant. Comme `Parent`,
+l'option se pose à la construction, en code uniquement.
+
+```go
+svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
+```
+
 Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
 `NewPolicy` (ou, en construction par config, `BuildOptions` renvoie
 `ErrRetryBudgetWithoutRetry`). Le throttling est observable via le hook
