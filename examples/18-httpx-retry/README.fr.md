@@ -71,20 +71,20 @@ go run ./examples/18-httpx-retry/
 ```
 === Transient Recovery (503 → 503 → 200) ===
   server: attempt 1
-  [hook] retry #1: transient: http status 503
+  [hook] retry #1: http status 503
   server: attempt 2
-  [hook] retry #2: transient: http status 503
+  [hook] retry #2: http status 503
   server: attempt 3
   success! status: 200
 
 === Retries Exhausted (always 503) ===
-  error: retries exhausted: transient: http status 503
+  error: retries exhausted: http status 503
   retries exhausted: true
   last status code: 503
 
 === Permanent Stops Retries (400 on first attempt) ===
   server: attempt 1
-  error: permanent: http status 400
+  error: http status 400
   is permanent: true
   only 1 attempt (retries skipped)
 

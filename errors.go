@@ -259,16 +259,18 @@ var (
 	)
 )
 
-func (e *transientError) Error() string { return "transient: " + e.err.Error() }
+func (e *transientError) Error() string { return e.err.Error() }
 func (e *transientError) Unwrap() error { return e.err }
 
-func (e *permanentError) Error() string { return "permanent: " + e.err.Error() }
+func (e *permanentError) Error() string { return e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }
 
 func (e resilienceError) Error() string { return string(e) }
 
 // Transient wraps err to mark it as a transient (retriable) error.
-// Returns nil if err is nil.
+// The wrapper's message is err's message, unchanged. The mark states intent
+// only: [IsTransient] reports true for every error not marked [Permanent], so
+// Transient cannot make a permanent error retriable. Returns nil if err is nil.
 func Transient(err error) error {
 	if err == nil {
 		return nil
@@ -278,7 +280,8 @@ func Transient(err error) error {
 }
 
 // Permanent wraps err to mark it as a permanent (non-retriable) error.
-// Returns nil if err is nil.
+// The wrapper's message is err's message, unchanged: the mark is read with
+// [IsPermanent], never from the text. Returns nil if err is nil.
 func Permanent(err error) error {
 	if err == nil {
 		return nil

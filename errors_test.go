@@ -1,6 +1,7 @@
 package r8e_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -21,7 +22,7 @@ func TestTransientWrapsError(t *testing.T) {
 	err := r8e.Transient(cause)
 
 	require.Error(t, err)
-	require.Equal(t, "transient: connection reset", err.Error())
+	require.Equal(t, "connection reset", err.Error())
 }
 
 func TestTransientNilReturnsNil(t *testing.T) {
@@ -68,7 +69,7 @@ func TestPermanentWrapsError(t *testing.T) {
 	err := r8e.Permanent(cause)
 
 	require.Error(t, err)
-	require.Equal(t, "permanent: invalid argument", err.Error())
+	require.Equal(t, "invalid argument", err.Error())
 }
 
 func TestPermanentNilReturnsNil(t *testing.T) {
@@ -177,6 +178,83 @@ func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
 	wrapped := fmt.Errorf("layer: %w", inner)
 
 	require.True(t, r8e.IsPermanent(wrapped))
+}
+
+// Transient cannot make a permanent error retriable: the inner Permanent mark
+// still stops the retry after one attempt.
+func TestTransientCannotOverridePermanent(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("http status 400")
+	err := r8e.Transient(r8e.Permanent(cause))
+
+	require.True(t, r8e.IsPermanent(err))
+	require.False(t, r8e.IsTransient(err))
+
+	calls := 0
+	policy := r8e.NewPolicy[string]("",
+		r8e.WithRetry(3, r8e.ConstantBackoff(0)),
+	)
+
+	_, got := policy.Do(t.Context(), func(context.Context) (string, error) {
+		calls++
+
+		return "", err
+	})
+
+	assert.Equal(t, 1, calls)
+	require.ErrorIs(t, got, cause)
+	assert.NotErrorIs(t, got, r8e.ErrRetriesExhausted)
+}
+
+// doWithRetries runs one Do of a two-attempt policy whose function always
+// returns err, and returns the error Do returns.
+func doWithRetries(t *testing.T, err error) error {
+	t.Helper()
+
+	policy := r8e.NewPolicy[string]("",
+		r8e.WithRetry(2, r8e.ConstantBackoff(0)),
+	)
+
+	_, got := policy.Do(t.Context(),
+		func(context.Context) (string, error) { return "", err },
+	)
+
+	return got
+}
+
+// The classification wrappers add nothing to the message Do returns: a
+// transient error reads exactly as the same unclassified error, and a
+// permanent one reads as its cause, still classified.
+func TestPolicyErrorMessagesCarryNoClassificationPrefix(t *testing.T) {
+	t.Parallel()
+
+	t.Run("transient reads as unclassified", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("http status 503")
+
+		bare := doWithRetries(t, cause)
+		marked := doWithRetries(t, r8e.Transient(cause))
+
+		require.Error(t, bare)
+		require.Error(t, marked)
+		assert.Equal(t, bare.Error(), marked.Error())
+		require.ErrorIs(t, marked, cause)
+		require.ErrorIs(t, marked, r8e.ErrRetriesExhausted)
+	})
+
+	t.Run("permanent reads as its cause", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("http status 400")
+
+		err := doWithRetries(t, r8e.Permanent(cause))
+
+		require.EqualError(t, err, cause.Error())
+		require.ErrorIs(t, err, cause)
+		assert.True(t, r8e.IsPermanent(err))
+	})
 }
 
 // ---------------------------------------------------------------------------
