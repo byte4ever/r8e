@@ -54,6 +54,10 @@ does not take it back; a downstream returning its own error on the propagated
 deadline still gets `ErrTimeout` + one `OnTimeout`; a failed call the caller
 ended returns the caller's ctx error (an error returned before the caller's ctx
 reports its end stays fn's); a success seen before the timeout stays a success.
+Put the bulkhead in the same policy: it runs inside the timeout, so a call that
+outlives `Do` keeps its slot until fn returns and the bulkhead also caps those
+calls. A bulkhead around `Do` or in an outer policy frees its slot when `Do`
+returns.
 
 **Adaptive timeout (percentile-driven):** `r8e.AdaptiveTimeout(opts...)` (a
 `TimeoutOption`) sizes each call's deadline from a sliding window of recent
@@ -107,6 +111,15 @@ patterns (stamps a clock-based deadline into ctx that retry/hedge read).
 **Requires `WithRetry` or `WithHedge`** (gates only those) — neither panics
 `NewPolicy` with `r8e.ErrTimeBudgetWithoutConsumer`. Observability:
 `OnTimeBudgetExceeded` hook + `TimeBudgetExceeded` metric.
+
+The gate compares the backoff alone with the remaining budget, so an attempt
+can start with one second left. Cooperative: that attempt runs past the budget.
+With `WithTimeout` about equal to the budget, the timeout cuts it: `ErrTimeout`,
+without the previous attempt's error. Recommend `PropagateDeadline` with a
+`WithTimeout` longer than the budget: the budget cuts on time with
+`ErrTimeBudgetExceeded` wrapping the cut attempt's error. The budget's deadline
+binds only strictly before the timeout's, so `PropagateDeadline` changes nothing
+while `WithTimeout` <= budget. Earlier attempts' errors reach only `OnRetry`.
 
 Add `r8e.PropagateDeadline()` — `r8e.WithTimeBudget(d, r8e.PropagateDeadline())`
 — to also expose the budget as a **hard, clock-driven `ctx.Deadline()`** that
@@ -210,6 +223,20 @@ proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,
 `RetryBudgetExceeded`/`RetryBudgetTokens` metrics, `retry_budget_exhausted`
 health condition (degraded).
 
+**Sizing for recovery**: every retryable failure (first attempts included)
+removes a token, so an outage empties the bucket. From empty, with no failure in
+between, reopening takes about `MaxTokens / (2 × TokenRatio)` successes (51 with
+the defaults); each failure in between costs `1 / TokenRatio` more. It is a
+count of calls: at 50 calls/hour, a little over an hour with no retry after the
+downstream recovers. A larger `MaxTokens` absorbs more failures before the cut
+(about `MaxTokens / 2` from full) but lengthens recovery in proportion; a larger
+`TokenRatio` shortens it.
+
+**Hand-written retries**: `r8e.DoRetry(ctx, fn, r8e.RetryParams{..., Budget:
+budget})` credits successes, debits retryable failures and checks the budget
+(ancestors included) before each retry, like `WithSharedRetryBudget`. Set
+`Clock` (e.g. `r8e.RealClock{}`): DoRetry waits on it between attempts.
+
 **Nested (tree) budgets** (`r8e.Parent(*RetryBudget)`): a budget can nest under a
 parent — a child's outcomes also roll up into the parent and every ancestor
 (parent = subtree aggregate, each level credits a success by its own ratio; the
@@ -258,7 +285,7 @@ States: closed -> open (fast-fail `r8e.ErrCircuitOpen`) -> half-open -> closed
 (or -> ramping -> closed with ramp recovery). State transitions are mutex-guarded
 (linearizable); half-open admits at most `HalfOpenMaxAttempts` concurrent probes.
 A probe holds its slot until it reports, so a call that ignores its context can
-keep the breaker half-open forever. `WithTimeout` does not prevent it: it runs
+keep the breaker half-open until the process restarts. `WithTimeout` does not prevent it: it runs
 outside the breaker, answers `ErrTimeout` and leaves the call running, holding
 its slot. `r8e.HalfOpenProbeLease(d)` (opt-in, default off; config
 `half_open_probe_lease`, reconfigurable) bounds that: once every slot is taken
@@ -268,11 +295,19 @@ the probes as one failed probe (the recovery backoff grows if
 permit's late outcome is then stale; an `Allow` probe's late `Record` applies to
 the current state. The lease runs from admission to report, which in a policy
 includes retries, backoff and the rate-limiter / bulkhead waits inside the
-breaker: set `d` above the worst case of that span. A panic in
+breaker: set `d` above the worst case of that span. With `WithTimeout` in the
+same policy and an fn that honours its context, that span ends when fn returns
+after the timeout fires (the timeout wraps the breaker; backoff and limiter /
+bulkhead waits stop on ctx), so the lease only matters for an fn that ignores
+its context: a small multiple of the timeout (e.g. 2×; the ceiling with
+`AdaptiveTimeout`) is enough. A panic in
 `OnCircuitHalfOpen` frees the probe slot too. Counters `CircuitNeutralOutcomes`
 and `CircuitStaleOutcomes` (hooks `OnCircuitNeutral`, `OnCircuitStaleOutcome`)
 count neutral outcomes and outcomes ignored as stale; a stale outcome counts
-once, as stale, even when it is neutral.
+once, as stale, even when it is neutral. `OnCircuitNeutral` carries no cause:
+to log or count it, wrap the classifier in one that records `err` when it
+returns `OutcomeNeutral` (that wrapper also sees neutral outcomes later ignored
+as stale, so its count can exceed `CircuitNeutralOutcomes`).
 
 **Slow-call rate** (opt-in, off by default): `r8e.SlowCallRate(duration, rate)`
 trips the breaker when the fraction of calls slower than `duration` reaches
@@ -308,7 +343,11 @@ true when err is itself, unwrapped, `ErrRateLimited`, `ErrBulkheadFull`,
 classifier can make them neutral. A wrapped sentinel (the "retries exhausted:
 bulkhead full" a retry returns around a nested policy) does not match; a downstream function that
 returns one of them itself does, so wrap it. It is false for `ErrThrottled`,
-`ErrSLOShed` and `ErrCircuitOpen`. A deadline r8e set is never a caller
+`ErrSLOShed` and `ErrCircuitOpen`. It stays identity-based on purpose, so it
+does not see an application guard placed inside fn (a per-tenant quota): give
+that guard its own error type and return `OutcomeNeutral` for it with
+`errors.As` in the classifier (which also matches it inside
+`ErrRetriesExhausted`, even when an earlier attempt reached the downstream). A deadline r8e set is never a caller
 cancellation: `WithTimeout`
 (this or an enclosing policy), an enclosing retry's `PerAttemptTimeout`, and a
 `WithTimeBudget` + `PropagateDeadline` deadline that ends before the caller's
@@ -583,7 +622,11 @@ cache (every holder, including calls started later) fails at once with
 reloads stop silently, calls with no coalescing key still run, and this policy
 stores no negative entry; a policy or cache wrapping it still caches the
 `context.Canceled` it returns. Set it only on a policy whose holders all stop
-with its owner. Code-only, not changed by Reconfigure. Two `NewPolicy` panics: a **nil** keyFn
+with its owner. Code-only, not changed by Reconfigure. Under `testing/synctest`, a test function that
+returns while a shared call is blocked makes `synctest.Test` panic ("deadlock:
+main bubble goroutine has exited but blocked goroutines remain"): first loop
+until `policy.Metrics().CoalesceInFlight == 0` (with `time.Sleep` in the bubble),
+then call `synctest.Wait()`. Two `NewPolicy` panics: a **nil** keyFn
 → `r8e.ErrCoalesceNilKeyFunc`; **no `WithTimeout`** → `r8e.ErrCoalesceWithoutTimeout`.
 Not a cache (only dedups time-overlapping calls). Usable standalone via
 `r8e.NewCoalescer[T](hooks)` + `c.Do(ctx, key, fn)` (bound `fn` yourself — no
@@ -773,6 +816,9 @@ returns false), so `defer policy.Registry().Unregister(policy)` works whatever
 registry the policy was built with. A service that builds named
 policies per job, tenant or test must unregister them (or use an empty name),
 else the registry grows without bound. Example: `examples/45-registry-unregister`.
+`HealthReporter` is not generic, so to remove a group (one tenant's policies,
+any result types) collect them in a `[]r8e.HealthReporter` at construction and
+loop `reg.Unregister(p)` over it.
 Health is inferred from pattern state:
 - Circuit breaker open -> `CriticalityCritical`, unhealthy
 - Rate limiter saturated / bulkhead full / retry budget exhausted -> `CriticalityDegraded`
@@ -934,7 +980,7 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/44-circuit-breaker-classifier`.
+Examples: `examples/01-quickstart` through `examples/50-shield-parent`.
 
 ## Conventions: every feature ships with a documented example (mandatory)
 

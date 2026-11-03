@@ -250,6 +250,15 @@ func RecoveryTimeout(d time.Duration) CircuitBreakerOption {
 // after d count as failed, even if they would have succeeded. A value <= 0
 // disables the lease.
 //
+// With [WithTimeout] in the same policy, that span is bounded for a function
+// that honours its context: the timeout wraps the breaker and everything
+// inside it, and the retry backoff and the rate limiter and bulkhead waits
+// all stop when the context ends. Such a probe reports when fn returns on
+// the cancelled context. The lease then only matters for a function that
+// ignores its context, and a small multiple of the timeout is enough: twice
+// the timeout leaves fn as long again to return after the cut. With
+// [AdaptiveTimeout], size it from the WithTimeout duration, the ceiling.
+//
 // The late outcome of a probe admitted through [CircuitBreaker.Acquire], as
 // the policy middleware does, is ignored once the lease has reopened the
 // breaker. A probe admitted through [CircuitBreaker.Allow] is not tied to its

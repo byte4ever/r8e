@@ -30,7 +30,12 @@ type Hooks struct {
 	// OnCircuitNeutral fires when a [CircuitPermit] reports [OutcomeNeutral]
 	// for a call admitted since the breaker last opened or entered half-open,
 	// such as a call its caller cancelled under [CallerCancellationIsNeutral]:
-	// the breaker counts it neither as a success nor as a failure.
+	// the breaker counts it neither as a success nor as a failure. It
+	// carries no cause. To log or count why calls are neutral, wrap the
+	// classifier given to [CircuitBreakerClassifier] in one that records the
+	// error each time it returns OutcomeNeutral. That wrapper also sees the
+	// neutral outcomes the breaker then ignores as stale, so its count can be
+	// higher than this hook's.
 	OnCircuitNeutral func()
 	// OnCircuitStaleOutcome fires when a [CircuitPermit] reports an outcome,
 	// whatever it is, for a call admitted before the breaker last opened or
