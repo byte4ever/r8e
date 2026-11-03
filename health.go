@@ -88,6 +88,11 @@ const (
 	// ConditionConcurrencyBudgetExhausted means the concurrency budget is at its
 	// ceiling (degraded); retries/hedges are being shed but first attempts flow.
 	ConditionConcurrencyBudgetExhausted Condition = "concurrency_budget_exhausted"
+	// ConditionCoolingDown means the cooldown is armed (degraded): a server
+	// asked to wait and the policy refuses calls until then. It is never
+	// critical, so a Retry-After on a shared dependency does not take every
+	// instance out of rotation at once.
+	ConditionCoolingDown Condition = "cooling_down"
 )
 
 // conditionSeverity is the single source of truth for the degradation model: it
@@ -111,6 +116,7 @@ var conditionSeverity = []struct {
 	{ConditionSLOBurning, CriticalityDegraded},
 	{ConditionRetryBudgetExhausted, CriticalityDegraded},
 	{ConditionConcurrencyBudgetExhausted, CriticalityDegraded},
+	{ConditionCoolingDown, CriticalityDegraded},
 	{ConditionDependencyDegraded, CriticalityDegraded},
 	{ConditionCircuitHalfOpen, CriticalityNone},
 }
@@ -210,6 +216,11 @@ func (p *Policy[T]) collectConditions() ([]Condition, []PolicyStatus) {
 	// flow.
 	if p.concurrencyBudget != nil && p.concurrencyBudget.Exhausted() {
 		conditions = append(conditions, ConditionConcurrencyBudgetExhausted)
+	}
+
+	// Cooldown — degraded while a server's Retry-After deadline holds calls.
+	if p.cooldown != nil && p.cooldown.Armed() {
+		conditions = append(conditions, ConditionCoolingDown)
 	}
 
 	// Dependencies — a critically-down dependency degrades this policy.

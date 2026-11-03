@@ -59,6 +59,27 @@ var (
 	// ErrConcurrencyLimited is returned when the adaptive concurrency limiter is
 	// at its current limit and rejects a call.
 	ErrConcurrencyLimited error = resilienceError{code: "concurrency_limited", msg: "concurrency limited"}
+	// ErrCoolingDown is returned when a call arrives while the policy's
+	// cooldown is armed: a server asked to wait (a Retry-After hint) and the
+	// deadline has not passed (see [WithCooldown]). It is a local rejection
+	// (see [IsLocalRejection]).
+	ErrCoolingDown error = resilienceError{code: "cooling_down", msg: "cooling down"}
+	// ErrCooldownNonPositiveMax is the value [NewCooldown] and [NewPolicy]
+	// panic with when [MaxCooldown] is not positive, and the error
+	// [ValidateOptions], [BuildOptions], [Policy.Reconfigure] and
+	// [Cooldown.SetMaxCooldown] return for a non-positive cap.
+	ErrCooldownNonPositiveMax error = resilienceError{
+		code: "cooldown_non_positive_max",
+		msg:  "cooldown cap must be positive",
+	}
+	// ErrSharedCooldownConflict indicates a policy was given both
+	// [WithCooldown] and [WithSharedCooldown], the value [NewPolicy] panics
+	// with; or that Policy.Reconfigure was asked to change the cap of a shared
+	// cooldown, which only [Cooldown.SetMaxCooldown] does.
+	ErrSharedCooldownConflict error = resilienceError{
+		code: "shared_cooldown_conflict",
+		msg:  "a shared cooldown excludes a policy cooldown",
+	}
 	// ErrThrottled is returned when the adaptive throttler sheds a call locally
 	// to protect a struggling backend (see [WithAdaptiveThrottle]).
 	ErrThrottled error = resilienceError{code: "throttled", msg: "adaptively throttled"}

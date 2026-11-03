@@ -36,6 +36,13 @@ type (
 		Clock       Clock
 		Budget      *RetryBudget
 		Concurrency *ConcurrencyBudget
+		// Cooldown, when set, is armed by each failed attempt's Retry-After
+		// hint, and stops the loop, returning the last error as is, whenever
+		// it is armed after a failed attempt or before a retry leaves,
+		// whoever armed it (see WithCooldown). The first attempt is not
+		// gated: outside a Policy, check Cooldown.Armed before calling
+		// DoRetry.
+		Cooldown    *Cooldown
 		Opts        []RetryOption
 		MaxAttempts int
 	}
@@ -126,6 +133,13 @@ func DoRetry[T any](
 	)
 
 	for attempt := range maxAttempts {
+		// A cooldown armed during the backoff, by another call or another
+		// policy sharing it, stops the retry before it leaves: the last error
+		// comes back as is.
+		if attempt > 0 && params.Cooldown.Armed() {
+			return zero, lastErr //nolint:wrapcheck // the server's error, as with HonorRetryAfter
+		}
+
 		// A retry attempt (attempt > 0) must claim a concurrency-budget permit
 		// before it runs, so a burst of simultaneous retries cannot pile load
 		// onto a struggling downstream. The first attempt is the baseline and is
@@ -161,6 +175,11 @@ func DoRetry[T any](
 
 		lastErr = err
 
+		// A server's Retry-After hint arms the cooldown, whatever happens next.
+		if armedFor, armed := params.Cooldown.observe(err); armed {
+			params.Hooks.emitCooldownArmed(armedFor)
+		}
+
 		// If error is Permanent: stop immediately. A non-retryable failure
 		// leaves the budget untouched — it cannot drive a retry storm.
 		if IsPermanent(err) {
@@ -182,6 +201,14 @@ func DoRetry[T any](
 		// The check runs before the last-attempt exit, so the error comes back
 		// as is on every attempt, never wrapped with ErrRetriesExhausted.
 		if cfg.honorRetryAfter && hintExceedsMaxDelay(err, cfg.maxDelay) {
+			return zero, err
+		}
+
+		// While the cooldown is armed no attempt may leave: stop and return
+		// the server's error as is. Like the HonorRetryAfter check, it runs
+		// before the last-attempt exit, so a hint on the last attempt is not
+		// wrapped with ErrRetriesExhausted either.
+		if params.Cooldown.Armed() {
 			return zero, err
 		}
 

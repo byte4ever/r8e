@@ -2,5 +2,6 @@
 !.claude/settings.json
 .serena/
 .idea/
-docs/
+docs/*
+!docs/adr/
 coverage.out
