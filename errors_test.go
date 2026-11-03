@@ -180,44 +180,54 @@ func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
 	require.True(t, r8e.IsPermanent(wrapped))
 }
 
+// doWithRetries runs one Do of a two-attempt policy whose function always
+// returns err, and returns the error Do returns.
+func doWithRetries(t *testing.T, err error) error {
+	t.Helper()
+
+	policy := r8e.NewPolicy[string]("",
+		r8e.WithRetry(2, r8e.ConstantBackoff(0)),
+	)
+
+	_, got := policy.Do(t.Context(),
+		func(context.Context) (string, error) { return "", err },
+	)
+
+	return got
+}
+
+// The classification wrappers add nothing to the message Do returns: a
+// transient error reads exactly as the same unclassified error, and a
+// permanent one reads as its cause, still classified.
 func TestPolicyErrorMessagesCarryNoClassificationPrefix(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name      string
-		err       error
-		wantMsg   string
-		permanent bool
-	}{
-		{
-			name:    "transient exhausts the retries",
-			err:     r8e.Transient(errors.New("http status 503")),
-			wantMsg: "retries exhausted: http status 503",
-		},
-		{
-			name:      "permanent stops the retries",
-			err:       r8e.Permanent(errors.New("http status 400")),
-			wantMsg:   "http status 400",
-			permanent: true,
-		},
-	}
+	t.Run("transient reads as unclassified", func(t *testing.T) {
+		t.Parallel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+		cause := errors.New("http status 503")
 
-			policy := r8e.NewPolicy[string]("",
-				r8e.WithRetry(2, r8e.ConstantBackoff(0)),
-			)
+		bare := doWithRetries(t, cause)
+		marked := doWithRetries(t, r8e.Transient(cause))
 
-			_, err := policy.Do(t.Context(),
-				func(context.Context) (string, error) { return "", tt.err },
-			)
+		require.Error(t, bare)
+		require.Error(t, marked)
+		assert.Equal(t, bare.Error(), marked.Error())
+		require.ErrorIs(t, marked, cause)
+		require.ErrorIs(t, marked, r8e.ErrRetriesExhausted)
+	})
 
-			require.EqualError(t, err, tt.wantMsg)
-			assert.Equal(t, tt.permanent, r8e.IsPermanent(err))
-		})
-	}
+	t.Run("permanent reads as its cause", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("http status 400")
+
+		err := doWithRetries(t, r8e.Permanent(cause))
+
+		require.EqualError(t, err, cause.Error())
+		require.ErrorIs(t, err, cause)
+		assert.True(t, r8e.IsPermanent(err))
+	})
 }
 
 // ---------------------------------------------------------------------------

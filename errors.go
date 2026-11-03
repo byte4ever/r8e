@@ -268,8 +268,9 @@ func (e *permanentError) Unwrap() error { return e.err }
 func (e resilienceError) Error() string { return string(e) }
 
 // Transient wraps err to mark it as a transient (retriable) error.
-// The wrapper's message is err's message, unchanged: the mark is read with
-// [IsTransient], never from the text. Returns nil if err is nil.
+// The wrapper's message is err's message, unchanged. The mark states intent
+// only: [IsTransient] reports true for every error not marked [Permanent], so
+// Transient cannot make a permanent error retriable. Returns nil if err is nil.
 func Transient(err error) error {
 	if err == nil {
 		return nil
