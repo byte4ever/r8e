@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,19 +20,28 @@ type (
 	// [r8e.RetryAfterError] carries a delay hint, and any other error is
 	// transient.
 	//
-	// The error comes back from [Client.Do] as is: the adapter adds no
-	// [StatusError] and reads no Retry-After header on this path. Return
+	// The adapter adds nothing to that error: no [StatusError], and no
+	// Retry-After header is read on this path. Return
 	// &StatusError{Response: resp, StatusCode: resp.StatusCode}, wrapped in
-	// [r8e.Permanent] or not, to get both back.
+	// [r8e.Permanent] or not, to get both back. The policy may still wrap
+	// the error ([r8e.ErrRetriesExhausted] once retries run out,
+	// [r8e.ErrAttemptTimeout] for a cut attempt), so match it with errors.Is
+	// or errors.As, not ==.
 	//
 	// For a status of 300 or above, body holds the first [MaxClassifiedBody]
 	// bytes of the body. Below 300, body is nil and the body is not read, so
 	// a streamed success or an upgraded (101) connection stays as it is.
 	// body is the classifier's only view of the body: during the call,
 	// resp.Body is [http.NoBody]. The classifier must not modify body, since
-	// the caller reads the same bytes back. When the classifier returns nil
-	// or a permanent error, the caller gets the real body back, to read from
-	// the start; any other error drains and closes it, as a retry may follow.
+	// the caller reads the same bytes back.
+	//
+	// The body stays open, to read from the start, only where the caller can
+	// reach it whatever the policy does with the attempt: on a nil error,
+	// where Do returns resp, and on a permanent error that carries a
+	// [StatusError] for resp, where errors.As finds it even when a retrying
+	// policy makes Do return a nil response. Any other error closes the body,
+	// after draining it for a status of 200 or above, so the connection can
+	// be reused.
 	//
 	// The classifier runs inside the attempt. It may run on a goroutine other
 	// than the caller's, concurrently with itself (concurrent Do calls on one
@@ -61,11 +71,12 @@ const MaxClassifiedBody = 64 << 10
 // of [NewClient] for APIs whose status code alone does not tell a retriable
 // failure from a final one.
 //
-// When classify's error is not [r8e.Permanent], a retry may follow, so the
-// body is drained and closed to let the connection be reused (a 1xx body is
-// only closed). A permanent
-// error, or a nil one, leaves the body readable from the start. A failure
-// reading the body is transient, and classify is not called.
+// A nil error, or a permanent one that carries a [StatusError] for the
+// response, leaves the body readable from the start. Any other error drains
+// and closes the body (a 1xx body is only closed), since a retry may follow
+// or the policy may drop the response. A failure reading the body is
+// transient, and classify is not called. As for [NewClient], do not pass
+// [r8e.WithCoalesce] or [r8e.WithCache] (see [Client]).
 func NewResponseClient(
 	name string,
 	hc *http.Client,
@@ -116,14 +127,27 @@ func classifyHidingBody(resp *http.Response, body []byte, classify ResponseClass
 	return classify(resp, body)
 }
 
-// settleBody releases resp's body when err is non-nil and may be retried, so
-// the connection can be reused, and returns err unchanged.
+// settleBody leaves resp's body open only where the caller can reach it:
+// on a nil err, or on a permanent err that carries resp in a [StatusError].
+// Any other err releases the body, since a retry may follow or the policy may
+// drop resp. It returns err unchanged.
 func settleBody(resp *http.Response, err error) error {
-	if err != nil && !r8e.IsPermanent(err) {
+	if err != nil && (!r8e.IsPermanent(err) || !carriesResponse(err, resp)) {
 		releaseBody(resp)
 	}
 
 	return err
+}
+
+// carriesResponse reports whether err holds a [StatusError] for resp.
+func carriesResponse(err error, resp *http.Response) bool {
+	var statusErr *StatusError
+
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+
+	return statusErr.Response == resp
 }
 
 // releaseBody closes resp's body, best effort, after reading it to the end so

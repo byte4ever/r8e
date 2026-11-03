@@ -192,20 +192,33 @@ func TestResponseClassifierLeavesA2xxBodyUnread(t *testing.T) {
 	assert.False(t, body.closed.Load())
 }
 
-// A retriable outcome drains and closes the body so the connection can be
-// reused, for a 2xx as for an error status; a permanent one leaves the body
-// whole and open for the caller.
-func TestResponseClassifierClosesARetriableBody(t *testing.T) {
+// permanentStatusError marks resp's status as a permanent failure that
+// carries resp, as the README's classifier does.
+func permanentStatusError(resp *http.Response) error {
+	return r8e.Permanent(&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode})
+}
+
+// constErr returns a classifier outcome that ignores the response.
+func constErr(err error) func(*http.Response) error {
+	return func(*http.Response) error { return err }
+}
+
+// The body stays open only where the caller can reach it: on a permanent
+// error that carries the response in a StatusError. A retriable outcome, for
+// a 2xx as for an error status, and a permanent error without a StatusError
+// drain and close it.
+func TestResponseClassifierClosesAnUnreachableBody(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		err        error
+		classify   func(*http.Response) error
 		status     int
 		wantClosed bool
 	}{
-		"retriable error status": {status: http.StatusForbidden, err: errTokenExpired, wantClosed: true},
-		"retriable 2xx":          {status: http.StatusOK, err: errTokenExpired, wantClosed: true},
-		"permanent":              {status: http.StatusForbidden, err: r8e.Permanent(errMoved)},
+		"retriable error status":     {status: http.StatusForbidden, classify: constErr(errTokenExpired), wantClosed: true},
+		"retriable 2xx":              {status: http.StatusOK, classify: constErr(errTokenExpired), wantClosed: true},
+		"permanent, no StatusError":  {status: http.StatusForbidden, classify: constErr(r8e.Permanent(errMoved)), wantClosed: true},
+		"permanent with StatusError": {status: http.StatusForbidden, classify: permanentStatusError},
 	}
 
 	for name, tt := range tests {
@@ -218,23 +231,100 @@ func TestResponseClassifierClosesARetriableBody(t *testing.T) {
 				return respond(tt.status, body), nil
 			})}
 
-			cl := httpx.NewResponseClient("", hc, func(*http.Response, []byte) error { return tt.err })
+			cl := httpx.NewResponseClient("", hc, func(resp *http.Response, _ []byte) error { return tt.classify(resp) })
 
-			resp, err := cl.Do(t.Context(), getRequest(t))
-			require.ErrorIs(t, err, tt.err)
+			_, err := cl.Do(t.Context(), getRequest(t))
+			require.Error(t, err)
 			assert.Equal(t, tt.wantClosed, body.closed.Load(), "body closed")
 
 			if tt.wantClosed {
 				return
 			}
 
-			require.NotNil(t, resp)
+			var statusErr *httpx.StatusError
 
-			got, err := io.ReadAll(resp.Body)
+			require.ErrorAs(t, err, &statusErr)
+
+			got, err := io.ReadAll(statusErr.Response.Body)
 			require.NoError(t, err)
-			assert.Equal(t, "error body", string(got), "a permanent error leaves the body whole")
+			assert.Equal(t, "error body", string(got), "the body is whole")
 		})
 	}
+}
+
+// Under a retrying policy, Do returns a nil response on a permanent error, so
+// only a StatusError keeps the body reachable; without one the adapter closes
+// the body instead of leaking it.
+func TestResponseClassifierPermanentBodyUnderRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		classify  func(*http.Response) error
+		wantOpen  bool
+		wantCause error
+	}{
+		"no StatusError":   {classify: constErr(r8e.Permanent(errMoved)), wantCause: errMoved},
+		"with StatusError": {classify: permanentStatusError, wantOpen: true},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			body := newTrackedBody(strings.Repeat("x", httpx.MaxClassifiedBody+1))
+
+			hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return respond(http.StatusForbidden, body), nil
+			})}
+
+			cl := httpx.NewResponseClient("", hc,
+				func(resp *http.Response, _ []byte) error { return tt.classify(resp) },
+				r8e.WithClock(clocktest.New()),
+				r8e.WithRetry(3, r8e.ConstantBackoff(time.Millisecond)))
+
+			resp, err := cl.Do(t.Context(), getRequest(t))
+			require.Error(t, err)
+			assert.Nil(t, resp, "a retrying policy returns no response with an error")
+
+			if !tt.wantOpen {
+				require.ErrorIs(t, err, tt.wantCause)
+				assert.True(t, body.closed.Load(), "the unreachable body is closed")
+
+				return
+			}
+
+			assert.False(t, body.closed.Load(), "the reachable body stays open")
+
+			var statusErr *httpx.StatusError
+
+			require.ErrorAs(t, err, &statusErr)
+
+			got, err := io.ReadAll(statusErr.Response.Body)
+			require.NoError(t, err)
+			require.NoError(t, statusErr.Response.Body.Close())
+			assert.Len(t, got, httpx.MaxClassifiedBody+1, "the body is whole")
+		})
+	}
+}
+
+// The policy may wrap the classifier's error: once retries run out it adds
+// ErrRetriesExhausted, so the caller matches the error with errors.Is.
+func TestResponseClassifierErrorUnderRetry(t *testing.T) {
+	t.Parallel()
+
+	hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return respond(http.StatusForbidden, newTrackedBody("token")), nil
+	})}
+
+	cl := httpx.NewResponseClient("", hc,
+		func(*http.Response, []byte) error { return errTokenExpired },
+		r8e.WithClock(clocktest.New()),
+		r8e.WithRetry(2, r8e.ConstantBackoff(time.Millisecond)))
+
+	_, err := cl.Do(t.Context(), getRequest(t))
+	require.ErrorIs(t, err, errTokenExpired)
+	require.ErrorIs(t, err, r8e.ErrRetriesExhausted)
+	assert.NotEqual(t, errTokenExpired, err, "the error is wrapped, not returned as is")
 }
 
 // The classifier sees the body only through its body argument: reading or
@@ -468,8 +558,15 @@ func TestRetriableUpgradeIsNotDrained(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 
-			_, err := doWithin(t, tt.client(srv.Client()), upgradeRequest(t, ctx, srv.URL))
+			resp, err := doWithin(t, tt.client(srv.Client()), upgradeRequest(t, ctx, srv.URL))
 			tt.check(t, err)
+			require.NotNil(t, resp, "the 101 comes back with its error")
+
+			conn, ok := resp.Body.(io.Writer)
+			require.True(t, ok, "the upgraded body is writable")
+
+			_, err = io.WriteString(conn, "ping\n")
+			require.Error(t, err, "the upgraded connection is closed")
 		})
 	}
 }

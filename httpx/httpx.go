@@ -37,6 +37,11 @@ type (
 	// status code ([NewClient]) or by status, headers and
 	// the start of the body ([NewResponseClient]).
 	//
+	// Each caller must own the response it gets. Do not
+	// build a Client with [r8e.WithCoalesce] or
+	// [r8e.WithCache]: both hand one *http.Response, so
+	// one body stream, to every caller sharing it.
+	//
 	// Pattern: Adapter — bridges net/http and r8e's
 	// resilience policy by translating HTTP responses
 	// into r8e error classification.
@@ -139,10 +144,14 @@ func NewClient(
 // built by NewClient, when the Classifier returns
 // Transient or Permanent, the response is wrapped in a
 // StatusError accessible via errors.As. For a Client
-// built by NewResponseClient, an error the
-// ResponseClassifier returns comes back as is, with no
-// StatusError added; a body that cannot be read yields a
-// transient error wrapping the read failure.
+// built by NewResponseClient, the adapter adds no
+// StatusError to the ResponseClassifier's error, and a
+// body that cannot be read yields a transient error
+// wrapping the read failure. The policy may still wrap
+// any error (r8e.ErrRetriesExhausted once retries run
+// out), so match it with errors.Is or errors.As. Under a
+// retrying policy, Do returns a nil response with any
+// error: reach the response through a StatusError.
 //
 // Each attempt rewinds the request body via req.GetBody, so a retried
 // request with a body (POST/PUT) replays correctly. Requests built with
@@ -172,15 +181,17 @@ func (c *Client) Do(
 			}
 
 			if c.respClassifier != nil {
-				return resp, classifyResponse(resp, c.respClassifier) //nolint:nilnil // resp and error, as http.Client.Do
+				err = classifyResponse(resp, c.respClassifier)
+
+				return resp, err //nolint:nilnil // resp and error, as http.Client.Do
 			}
 
 			switch c.classifier(resp.StatusCode) {
 			case Success:
 				return resp, nil
 			case Transient:
-				// Drain and close body so the underlying
-				// TCP connection can be reused on retry.
+				// Release the body so the connection can be
+				// reused on retry (a 1xx body is only closed).
 				releaseBody(resp)
 
 				return resp, r8e.Transient( //nolint:nilnil // resp and error, as http.Client.Do

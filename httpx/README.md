@@ -31,11 +31,15 @@ and a user-provided HTTP status code classifier.
 | `ErrorClass` | Enum: `Success`, `Transient`, `Permanent` |
 | `StatusError` | Error type carrying the original `*http.Response` for inspection (added by `NewClient`; a `ResponseClassifier` returns it itself) |
 
+Each caller must own the response it gets. Do not build a `Client` with
+`r8e.WithCoalesce` or `r8e.WithCache`: both hand one `*http.Response`, so one
+body stream, to every caller sharing it.
+
 ## Request flow
 
 The diagram shows a `Client` built by `NewClient`. With `NewResponseClient`, the
-`ResponseClassifier` takes the `Classifier`'s place, and its error comes back as
-is, with no `StatusError` added.
+`ResponseClassifier` takes the `Classifier`'s place, and the adapter adds no
+`StatusError` to its error.
 
 ```mermaid
 flowchart TD
@@ -129,9 +133,12 @@ if errors.As(err, &statusErr) {
 |---|---|---|---|
 | 2xx (Success) | non-nil | `nil` | n/a |
 | Transient (e.g. 503) | non-nil | `Transient` | extractable |
-| Permanent (e.g. 400) | non-nil | `Permanent` | extractable |
+| Permanent (e.g. 400) | non-nil (`nil` under `WithRetry`) | `Permanent` | extractable |
 | Retries exhausted | `nil` | `ErrRetriesExhausted` | extractable (last attempt) |
 | Transport error | `nil` | transport error | not present |
+
+Under a retrying policy, `Do` returns a `nil` response with any error, a
+permanent one included: reach the response through `StatusError.Response`.
 
 ## Classifying from the body (`ResponseClassifier`)
 
@@ -166,10 +173,12 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   with. That error is classified as anywhere in r8e: `r8e.Permanent(err)` stops
   the retry, `r8e.RetryAfterError(err, d)` carries a delay hint, and any other
   error is transient.
-- `Do` returns that error as is. Unlike `NewClient`, this path adds no
+- The adapter adds nothing to that error: unlike `NewClient`, this path adds no
   `StatusError` and reads no `Retry-After` header. Return
   `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}`, as in the
-  example, to get both back.
+  example, to get both back. The policy may still wrap the error
+  (`r8e.ErrRetriesExhausted` once retries run out), so match it with
+  `errors.Is` or `errors.As`, never `==`.
 - For a status of 300 or above, `body` holds the first
   `httpx.MaxClassifiedBody` bytes (64 KiB), and the caller still reads the
   whole body from the start.
@@ -178,13 +187,15 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
 - `body` is the classifier's only view of the body: during the call,
   `resp.Body` is `http.NoBody`, so the classifier cannot consume the body the
   caller gets. Do not modify `body`: the caller reads the same bytes back.
-- The classifier runs inside the attempt: on another goroutine than the
-  caller's, concurrently with itself (concurrent `Do` calls, `WithHedge`), and
+- The classifier runs inside the attempt: possibly on another goroutine than
+  the caller's, concurrently with itself (concurrent `Do` calls, `WithHedge`), and
   possibly after `Do` has returned (an attempt cut by `WithTimeout`). Any state
   it shares must be safe for concurrent use.
-- When the error is not permanent, a retry may follow: the body is drained and
-  closed so the connection is reused. A permanent error, or `nil`, leaves the
-  body readable.
+- The body stays readable only where the caller can reach it: on `nil`, `Do`
+  returns `resp`; on a permanent error that carries a `StatusError` for `resp`,
+  as in the example, `errors.As` finds it even when `WithRetry` makes `Do`
+  return a `nil` response. Any other error drains and closes the body (a 101 is
+  only closed), so the connection is reused.
 - A failure reading the body is transient, and the classifier is not called.
 
 `NewClient` and its `Classifier` are unchanged.

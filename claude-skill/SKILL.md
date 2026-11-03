@@ -844,7 +844,8 @@ client := httpx.NewClient("api", http.DefaultClient, classifier,
 
 resp, err := client.Do(ctx, req)
 // Transient: body drained+closed for connection reuse during retries
-// Permanent: body preserved but caller must close it
+// Permanent: body preserved but caller must close it (under WithRetry resp
+// is nil: reach it via StatusError.Response)
 // Access status: var se *httpx.StatusError; errors.As(err, &se)
 // StatusError.RetryAfter() parses the Retry-After header; retry honors it
 // automatically (over the configured backoff) on 429/503.
@@ -854,17 +855,23 @@ When the status alone is ambiguous (same 403/404 for a retriable and a final
 case), use `httpx.NewResponseClient(name, hc, classify, opts...)` with
 `classify func(resp *http.Response, body []byte) error`: nil = success; the returned
 error is classified as usual (`r8e.Permanent` stops, `r8e.RetryAfterError`
-hints, anything else is transient). The error comes back as is: no
+hints, anything else is transient). The adapter adds nothing to the error: no
 `StatusError`, no `Retry-After` header read, unless `classify` returns
-`&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}` itself.
+`&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}` itself; the
+policy may still wrap it (`ErrRetriesExhausted`), so match with
+`errors.Is`/`errors.As`, never `==`.
 Status >= 300: `body` = first `httpx.MaxClassifiedBody` (64 KiB) bytes and the
 caller still reads the whole body; below 300 (2xx, 101 upgrade): `body` is nil
 and the body is not read. During the call `resp.Body` is `http.NoBody`: `body`
 is classify's only view, and must not be modified (the caller reads the same
-bytes). A non-permanent error drains and closes the body; a body read failure
-is transient and skips `classify`. `classify` runs inside the attempt: maybe on
+bytes). The body stays open only on nil or on a permanent error carrying a
+`StatusError` for `resp` (under `WithRetry`, `Do` returns a nil response on any
+error, so reach it with `errors.As`); any other error drains and closes it (a
+101 is only closed); a body read failure is transient and skips `classify`. `classify` runs inside the attempt: maybe on
 another goroutine, concurrently with itself (hedge, concurrent `Do`), and after
-`Do` returned (`WithTimeout` cut) — keep it stateless or synchronised.
+`Do` returned (`WithTimeout` cut) — keep it stateless or synchronised. Never
+build an httpx `Client` with `WithCoalesce` or `WithCache`: every sharing caller
+would get the same `*http.Response` and body stream.
 
 ## Presets
 

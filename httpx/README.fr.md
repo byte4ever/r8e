@@ -34,11 +34,16 @@ l'utilisateur.
 | `ErrorClass` | Enum : `Success`, `Transient`, `Permanent` |
 | `StatusError` | Type d'erreur portant le `*http.Response` original pour inspection (ajouté par `NewClient` ; un `ResponseClassifier` le renvoie lui-même) |
 
+Chaque appelant doit avoir sa propre réponse. Ne construisez pas un `Client`
+avec `r8e.WithCoalesce` ou `r8e.WithCache` : les deux donnent le même
+`*http.Response`, donc le même flux de corps, à tous les appelants qui le
+partagent.
+
 ## Flux de requete
 
 Le diagramme montre un `Client` construit par `NewClient`. Avec
 `NewResponseClient`, le `ResponseClassifier` prend la place du `Classifier`, et
-son erreur revient telle quelle, sans `StatusError` ajouté.
+l'adapter n'ajoute pas de `StatusError` à son erreur.
 
 ```mermaid
 flowchart TD
@@ -133,9 +138,13 @@ if errors.As(err, &statusErr) {
 |---|---|---|---|
 | 2xx (Success) | non-nil | `nil` | n/a |
 | Transitoire (ex. 503) | non-nil | `Transient` | extractible |
-| Permanent (ex. 400) | non-nil | `Permanent` | extractible |
+| Permanent (ex. 400) | non-nil (`nil` avec `WithRetry`) | `Permanent` | extractible |
 | Tentatives epuisees | `nil` | `ErrRetriesExhausted` | extractible (derniere tentative) |
 | Erreur de transport | `nil` | erreur de transport | absent |
+
+Avec une politique qui retente, `Do` renvoie une réponse `nil` avec toute
+erreur, permanente comprise : passez par `StatusError.Response` pour retrouver
+la réponse.
 
 ## Classer à partir du corps (`ResponseClassifier`)
 
@@ -171,11 +180,13 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   tentative. Cette erreur est classée comme partout dans r8e :
   `r8e.Permanent(err)` arrête le retry, `r8e.RetryAfterError(err, d)` porte un
   délai, et toute autre erreur est transitoire.
-- `Do` renvoie cette erreur telle quelle. Contrairement à `NewClient`, ce chemin
-  n'ajoute pas de `StatusError` et ne lit pas l'en-tête `Retry-After`. Pour
-  retrouver les deux, renvoyez
+- L'adapter n'ajoute rien à cette erreur : contrairement à `NewClient`, ce
+  chemin n'ajoute pas de `StatusError` et ne lit pas l'en-tête `Retry-After`.
+  Pour retrouver les deux, renvoyez
   `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}`, comme dans
-  l'exemple.
+  l'exemple. La politique peut quand même envelopper l'erreur
+  (`r8e.ErrRetriesExhausted` une fois les tentatives épuisées) : comparez-la
+  avec `errors.Is` ou `errors.As`, jamais avec `==`.
 - Pour un statut de 300 ou plus, `body` contient les `httpx.MaxClassifiedBody`
   premiers octets (64 Kio), et l'appelant relit tout le corps depuis le début.
 - En dessous de 300, `body` vaut `nil` et le corps n'est pas lu : un succès en
@@ -184,13 +195,16 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   `resp.Body` vaut `http.NoBody`, et le classifier ne peut pas consommer le
   corps que reçoit l'appelant. Ne modifiez pas `body` : l'appelant relit ces
   mêmes octets.
-- Le classifier tourne dans la tentative : sur une autre goroutine que celle de
-  l'appelant, en parallèle de lui-même (appels `Do` concurrents, `WithHedge`),
+- Le classifier tourne dans la tentative : parfois sur une autre goroutine que
+  celle de l'appelant, en parallèle de lui-même (appels `Do` concurrents, `WithHedge`),
   et parfois après le retour de `Do` (une tentative coupée par `WithTimeout`).
   Tout état qu'il partage doit supporter l'accès concurrent.
-- Quand l'erreur n'est pas permanente, un retry peut suivre : le corps est vidé
-  puis fermé pour réutiliser la connexion. Une erreur permanente, ou `nil`,
-  laisse le corps lisible.
+- Le corps reste lisible seulement là où l'appelant peut l'atteindre : sur
+  `nil`, `Do` renvoie `resp` ; sur une erreur permanente qui porte un
+  `StatusError` pour `resp`, comme dans l'exemple, `errors.As` le retrouve même
+  quand `WithRetry` fait renvoyer à `Do` une réponse `nil`. Toute autre erreur
+  vide puis ferme le corps (un 101 est seulement fermé), pour réutiliser la
+  connexion.
 - Un échec de lecture du corps est transitoire, et le classifier n'est pas
   appelé.
 
