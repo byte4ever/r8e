@@ -224,6 +224,20 @@ func (c *manualClock) NewTimer(time.Duration) r8e.Timer {
 	return tm
 }
 
+// awaitTimers waits until the clock has handed out n timers. A waiter shows
+// in Queued before it creates its max-wait timer, so a test that fires
+// timers right after seeing the waiter queued must wait for the timer too.
+func (c *manualClock) awaitTimers(t *testing.T, n int) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		return len(c.timers) >= n
+	}, time.Second, time.Microsecond, "waiter did not start its max-wait timer")
+}
+
 // fireAll fires every timer handed out so far, simulating max-wait elapsing.
 func (c *manualClock) fireAll() {
 	c.mu.Lock()
@@ -362,6 +376,7 @@ func TestBulkheadWaitTimeout(t *testing.T) {
 
 	res := startWaiter(t.Context(), t, bh, 1)
 
+	mc.awaitTimers(t, 1)
 	mc.fireAll() // max-wait elapses
 
 	require.ErrorIs(t, <-res, r8e.ErrBulkheadTimeout)
@@ -522,6 +537,7 @@ func TestPolicyBulkheadWaitMiddleware(t *testing.T) {
 	require.Eventually(t, func() bool { return p.Metrics().BulkheadQueued == 1 },
 		time.Second, time.Millisecond)
 
+	mc.awaitTimers(t, 1)
 	mc.fireAll() // the queued call's max-wait elapses
 
 	require.ErrorIs(t, <-res, r8e.ErrBulkheadTimeout)
@@ -577,6 +593,7 @@ func TestBulkheadGrantRacesTimeout(t *testing.T) {
 		go func() { res <- bh.Acquire(t.Context()) }()
 		require.Eventually(t, func() bool { return bh.Queued() == 1 },
 			time.Second, time.Microsecond)
+		mc.awaitTimers(t, 1)
 
 		var wg sync.WaitGroup
 
