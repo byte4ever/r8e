@@ -50,8 +50,13 @@ type Hooks struct {
 	// OnCoDelShed fires when the bulkhead's controlled-delay discipline sheds a
 	// queued caller because the wait queue was overloaded and the caller had waited
 	// past the slough timeout (see [BulkheadCoDel]), returning [ErrCoDelShed].
-	OnCoDelShed      func()
-	OnTimeout        func()
+	OnCoDelShed func()
+	OnTimeout   func()
+	// OnAttemptTimeout fires when the deadline set by [PerAttemptTimeout] cuts
+	// a failed retry attempt (decided when the deadline fires); attempt is
+	// 1-indexed, like OnRetry's. The attempt's error is then wrapped with
+	// [ErrAttemptTimeout].
+	OnAttemptTimeout func(attempt int)
 	OnHedgeTriggered func()
 	OnHedgeWon       func()
 	OnFallbackUsed   func(err error)
@@ -223,6 +228,12 @@ func (h *Hooks) emitCoDelShed() {
 func (h *Hooks) emitTimeout() {
 	if h != nil && h.OnTimeout != nil {
 		h.OnTimeout()
+	}
+}
+
+func (h *Hooks) emitAttemptTimeout(attempt int) {
+	if h != nil && h.OnAttemptTimeout != nil {
+		h.OnAttemptTimeout(attempt)
 	}
 }
 
