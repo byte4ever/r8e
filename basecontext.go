@@ -17,8 +17,8 @@ type detacher func(parent context.Context) (ctx context.Context, stop func())
 //
 // The base context only stops detached calls; a call on the caller's path is
 // not affected. A nil ctx is ignored. Code-only: it has no config key and
-// Reconfigure does not change it. There is no Policy.Close, because a policy is
-// often shared and closing it would cut other callers' calls.
+// Reconfigure does not change it. A policy has no close method of its own,
+// because it is often shared and closing it would cut other callers' calls.
 func WithBaseContext(ctx context.Context) Option {
 	return optionFunc(func(s *policySetup) {
 		if ctx != nil {
