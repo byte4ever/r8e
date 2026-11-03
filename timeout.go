@@ -91,11 +91,22 @@ const (
 //
 // The timeout is r8e's only when it is earlier than any deadline ctx already
 // has. When ctx's own deadline falls before it or on the same instant,
-// DoTimeout arms no timer of its own: the call ends when ctx does, and
-// DoTimeout returns ctx's error, which ctx already reports, without firing
-// OnTimeout. That is the rule [IsCallerCancellation] applies too. A timeout
-// that binds stays r8e's even when ctx reaches its own, later deadline by the
-// time DoTimeout looks; a caller cancellation found then is the caller's.
+// DoTimeout arms no timer of its own: the call ends when ctx does, without
+// firing OnTimeout. That is the rule [IsCallerCancellation] applies too.
+//
+// Who ended the call is decided when the binding timeout fires, as for a time
+// budget: a caller that cancels, or reaches its own later deadline, after
+// that does not take the call back, and a caller that cancels before it keeps
+// the call. fn may stop on the propagated deadline by itself and return its
+// own error (a socket or client deadline) at the instant the timeout fires:
+// an error fn returns once the binding timeout has passed is ErrTimeout too,
+// with one OnTimeout, whichever of the two DoTimeout sees first. A failed call
+// the timeout did not cut, once ctx reports its end, returns ctx's error
+// rather than fn's, again whichever DoTimeout sees first, as a time budget
+// does. An error fn returns before ctx reports its end stays fn's, even on
+// ctx's own deadline: only r8e's deadline is decided on the clock. The check
+// applies to errors only: a success DoTimeout receives before it sees the
+// timeout stays a success, even on the deadline.
 //
 // DoTimeout returns as soon as the timeout fires or ctx ends, without waiting
 // for fn: fn keeps running on its own goroutine until it returns, so it must
@@ -124,9 +135,6 @@ func DoTimeout[T any](
 	timeoutCtx, cancel := withPolicyTimeout(ctx, timeout)
 	defer cancel()
 
-	timeoutDeadline, _ := timeoutCtx.Deadline() // ctx's when the timeout does not bind
-	binds := deadlineBinds(ctx, timeoutDeadline)
-
 	// Run fn in a goroutine and collect result via channel.
 	type result struct {
 		val T
@@ -140,24 +148,65 @@ func DoTimeout[T any](
 		ch <- result{val: v, err: err}
 	}()
 
-	// Wait for fn to complete or context to expire.
+	// Wait for fn to complete or context to expire. Both arms give the same
+	// answer for the same history: the timeout cut the call (see
+	// policyDeadlineCut), or the caller ended it and its error comes back, or
+	// fn's own result does.
 	select {
-	case r := <-ch:
-		return r.val, r.err
-	case <-timeoutCtx.Done():
-		// Distinguish between timeout and parent end. A done parent ended the
-		// call when it was cancelled, or when its own deadline came no later
-		// than the timeout (which then armed no timer). A parent that only
-		// reached its own, later deadline since the timeout fired did not:
-		// the binding timeout came strictly first.
-		if err := ctx.Err(); err != nil && (!binds || !errors.Is(err, context.DeadlineExceeded)) {
-			return zero, err //nolint:wrapcheck // preserving context error identity
+	case res := <-ch:
+		switch {
+		case res.err == nil:
+			return res.val, nil
+		case policyDeadlineCut(ctx, timeoutCtx):
+			// Cut by the timeout: answered below.
+		case ctx.Err() != nil:
+			// The caller ended the call, as the other arm would report it.
+			return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
+		default:
+			return res.val, res.err
 		}
-		// Otherwise, the derived context's deadline was exceeded.
-		hooks.emitTimeout()
-
-		return zero, ErrTimeout
+	case <-timeoutCtx.Done():
+		if !policyDeadlineCut(ctx, timeoutCtx) {
+			// The parent ended the call: it was cancelled before the timeout
+			// fired, or its own deadline came no later than the timeout,
+			// which then armed no timer.
+			return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
+		}
 	}
+
+	hooks.emitTimeout()
+
+	return zero, ErrTimeout
+}
+
+// policyDeadlineCut reports whether the deadline r8e set on derived (see
+// withPolicyTimeout) cut the call running under it: the timeout of DoTimeout,
+// or the per-attempt deadline of PerAttemptTimeout. The deadline must bind
+// (see deadlineBinds): one that does not bind leaves derived with parent's
+// deadline. The decision is then the first end derived records: its own
+// deadline means a cut, a parent cancelled before it means none, whatever
+// happens to parent afterwards. A binding deadline comes strictly before any
+// deadline of parent, so DeadlineExceeded as the first end is r8e's own.
+// When derived has not reported an end yet, the clock decides: a call that
+// returns on or after the deadline, before the context's timer ran, is cut
+// unless parent was cancelled.
+func policyDeadlineCut(parent, derived context.Context) bool {
+	deadline, ok := derived.Deadline()
+	if !ok || !deadlineBinds(parent, deadline) {
+		return false
+	}
+
+	if err := derived.Err(); err != nil {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
+
+	if time.Now().Before(deadline) {
+		return false
+	}
+
+	err := parent.Err()
+
+	return err == nil || errors.Is(err, context.DeadlineExceeded)
 }
 
 // withPolicyTimeout derives the context for a timeout r8e sets. When the

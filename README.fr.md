@@ -193,7 +193,7 @@ func main() {
 
 ### Timeout
 
-Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant.
+Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant. On décide qui a terminé l'appel quand le timeout tombe, comme pour un budget de temps posé avec `PropagateDeadline` : un appelant qui a annulé avant garde l'appel, et un appelant qui annule ou atteint sa propre deadline plus tard ne le reprend pas. Un service appelé qui s'arrête de lui-même sur la deadline propagée (une deadline de socket ou de client) et renvoie sa propre erreur à cet instant obtient quand même `ErrTimeout` et un seul `OnTimeout`. Un appel en échec que l'appelant a terminé renvoie l'erreur du contexte de l'appelant, même si le service appelé répond par sa propre erreur à cet instant ; une erreur qui revient avant que le contexte de l'appelant signale sa fin reste celle du service appelé. Un succès qui arrive à `Do` avant qu'il voie le timeout reste un succès.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
@@ -267,6 +267,8 @@ policy := r8e.NewPolicy[string]("retry-example",
     ),
 )
 ```
+
+**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative en échec, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline. L'erreur de la tentative reste dans la chaîne, et rien n'y est ajouté : `errors.Is(err, context.DeadlineExceeded)` n'est vrai que si cette erreur correspond elle-même à `context.DeadlineExceeded`. C'est le cas de l'erreur du contexte, et d'une erreur de timeout du service appelé qui lui correspond, comme le timeout d'en-têtes de réponse de net/http ; ce n'est pas le cas d'une erreur de deadline de socket. Pour détecter la coupure, utilisez `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. La coupure se décide quand la deadline tombe, comme pour `WithTimeout` : un appelant qui annule pendant que la tentative coupée se termine ne la reprend pas, et un appelant qui annule avant la deadline garde la tentative. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée. Une tentative coupée marquée `Permanent` est enveloppée elle aussi, et arrête toujours le retry.
 
 **Retry-After :** si l'erreur d'une tentative échouée implémente
 `r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
@@ -813,6 +815,27 @@ svcA    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))   // remon
 svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
 ```
 
+**Protéger le parent (`ShieldParent`).** Une route morte continue de vider le
+parent par ses seuls échecs de première tentative, même une fois ses propres
+retries coupés, et les routes saines voisines perdent leurs retries.
+`ShieldParent()` sur l'enfant borne cette perte : tant que l'enfant est épuisé,
+ses échecs ne sont plus reportés sur le parent, et ils le sont de nouveau quand
+les succès le ramènent au-dessus de la moitié de sa capacité. Un enfant mort ne
+retire alors au parent au plus que la moitié de sa propre capacité, arrondie
+au-dessus (5 jetons pour `MaxTokens(10)`), tant que sa capacité ne change pas
+pendant ce temps. Les routes voisines gardent leurs retries tant
+que le parent reste au-dessus de la moitié de sa capacité après cette perte :
+dimensionnez le parent en conséquence. Aucune borne n'est promise pour un enfant
+instable : ses succès sont toujours crédités au parent, et chaque succès qui le
+ramène au-dessus du seuil laisse passer l'échec suivant. Tant que la protection
+joue, les jetons du parent ne comptent plus les échecs de cet enfant, mais
+comptent toujours ses succès : surveillez le budget de l'enfant. Comme `Parent`,
+l'option se pose à la construction, en code uniquement.
+
+```go
+svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
+```
+
 Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
 `NewPolicy` (ou, en construction par config, `BuildOptions` renvoie
 `ErrRetryBudgetWithoutRetry`). Le throttling est observable via le hook
@@ -1289,7 +1312,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (36) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Hooks disponibles sur `Hooks` (37) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnAttemptTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 

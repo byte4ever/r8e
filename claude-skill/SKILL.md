@@ -47,7 +47,13 @@ first or on the same instant, `Do` returns the caller's context error and
 `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the
 caller's context ends, without
 waiting for the function, which keeps running until it returns: it must
-synchronise whatever it shares with the caller.
+synchronise whatever it shares with the caller. The decision is taken when the
+timeout fires (same rule as `WithTimeBudget(..., PropagateDeadline())`): a
+caller that cancelled first keeps the call; a later cancel or caller deadline
+does not take it back; a downstream returning its own error on the propagated
+deadline still gets `ErrTimeout` + one `OnTimeout`; a failed call the caller
+ended returns the caller's ctx error (an error returned before the caller's ctx
+reports its end stays fn's); a success seen before the timeout stays a success.
 
 **Adaptive timeout (percentile-driven):** `r8e.AdaptiveTimeout(opts...)` (a
 `TimeoutOption`) sizes each call's deadline from a sliding window of recent
@@ -167,6 +173,8 @@ r8e.WithRetry(maxAttempts int, strategy BackoffStrategy, opts ...RetryOption)
 
 **Options**: `r8e.MaxDelay(d)`, `r8e.PerAttemptTimeout(d)`, `r8e.RetryIf(func(error) bool)`.
 
+A failed attempt cut by `PerAttemptTimeout` carries `r8e.ErrAttemptTimeout` around its own error (nothing is added: `errors.Is(err, context.DeadlineExceeded)` holds only when the attempt's own error matches it, as the context's error or net/http's response-header timeout do and a socket deadline error does not; detect the cut with `errors.Is(err, r8e.ErrAttemptTimeout)`), fires `OnAttemptTimeout(attempt)` and counts in the `AttemptTimeouts` metric. The cut is decided when the deadline fires: a caller that cancels while the attempt is still returning does not take it back. It does not apply when the caller's deadline or cancellation, `WithTimeout` or a time budget ends the attempt first: keep `PerAttemptTimeout` strictly shorter than those. A cut `Permanent` error is wrapped too and still stops the retry.
+
 Returns `r8e.ErrRetriesExhausted` wrapping the last error.
 
 **Retry-After**: if a failed attempt's error implements `r8e.RetryAfterProvider`
@@ -195,7 +203,7 @@ panics in `NewPolicy` (or `BuildOptions` returns `r8e.ErrRetryBudgetWithoutRetry
 for config-driven construction). A shared budget reports the same tokens/exhausted
 state under each sharing policy's name (aggregate gauge with max/avg, not sum).
 **Options**: `r8e.MaxTokens(n)` (default 10),
-`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree).
+`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree), `r8e.ShieldParent()` (on a child: while the child is exhausted its failures stop debiting the parent, so a dead route drains the parent by at most half its own capacity rounded up (capacity unchanged meanwhile); siblings keep their retries only if the parent stays above half its own capacity after that drain, so size it for it; no bound for a flapping child, whose successes still credit the parent; construction-only, code-only).
 When exhausted it suppresses the retry and
 returns the **real downstream error** (not a sentinel); first attempts always
 proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,
@@ -204,7 +212,9 @@ health condition (degraded).
 
 **Nested (tree) budgets** (`r8e.Parent(*RetryBudget)`): a budget can nest under a
 parent — a child's outcomes also roll up into the parent and every ancestor
-(parent = subtree aggregate, each level credits a success by its own ratio), and a
+(parent = subtree aggregate, each level credits a success by its own ratio; the
+exception is a child built with `ShieldParent()`, whose failures stop reaching its
+ancestors while it is exhausted), and a
 retry is permitted only when the child AND every ancestor allow it (short-circuited
 up the tree). So a gateway-wide parent caps aggregate retry pressure: a storm in
 one leaf drains the shared parent and throttles its siblings. `Exhausted()` stays
@@ -640,7 +650,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`, `r8e.ErrChaosInjected`.
+`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrAttemptTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`, `r8e.ErrChaosInjected`.
 
 **Sentinel codes**: `r8e.ErrorCode(err)` returns the short, stable code of the sentinel `err` carries (`"circuit_open"`, `"timeout"`, `"retries_exhausted"`, …), wrapped or not, and `""` for none. The envelopes `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` and `ErrConcurrencyBudgetExceeded` yield to the cause they wrap (a retried panic reports `"panic_recovered"`, a retried timeout `"timeout"`); an error with only envelopes reports the outermost. Use it for log fields and metric labels; `r8eotel` builds `r8e.rejection_reason` from it. It reaches a sentinel through `Unwrap` only: an error type of your own that matches a sentinel through its `Is` method carries no code, so wrap the sentinel with `%w`.
 
@@ -665,6 +675,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnBulkheadTimeout:  func() {},  // queued caller gave up after max-wait
     OnCoDelShed:        func() {},  // controlled-delay queue shed a stale caller under overload
     OnTimeout:          func() {},
+    OnAttemptTimeout:   func(attempt int) {}, // retry attempt cut by PerAttemptTimeout
     OnHedgeTriggered:   func() {},
     OnHedgeWon:         func() {},
     OnFallbackUsed:     func(err error) {},
@@ -699,7 +710,7 @@ m := policy.Metrics()              // r8e.PolicyMetrics for one policy
 all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 ```
 
-`PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
+`PolicyMetrics` has counters (`Retries`, `Timeouts`, `AttemptTimeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `CircuitNeutralOutcomes`,
 `CircuitStaleOutcomes`, `RateLimited`, `BulkheadRejected`,
 `BulkheadTimeouts`, `CoDelShed`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,

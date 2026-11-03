@@ -238,6 +238,34 @@ func TestRegisterReportsCircuitOutcomeCounters(t *testing.T) {
 	}
 }
 
+// The attempt_timeouts counter reports AttemptTimeouts, not a neighbouring
+// field.
+func TestRegisterReportsAttemptTimeouts(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	source := fixedSnapshot{{
+		Name:               "svc",
+		AttemptTimeouts:    11,
+		Timeouts:           12,
+		TimeBudgetExceeded: 13,
+	}}
+
+	registration, err := r8eotel.Register(meter, source)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, registration.Unregister()) }()
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	got, policyAttr := collectInt64(t, rm, "r8e.policy.attempt_timeouts")
+	assert.Equal(t, int64(11), got)
+	assert.Equal(t, "svc", policyAttr)
+}
+
 // TestRegisterEmitsAllInstruments guards every instrument name: a typo or a
 // dropped instrument would make the corresponding metric disappear.
 func TestRegisterEmitsAllInstruments(t *testing.T) {
@@ -280,7 +308,8 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.codel_shed",
 		"r8e.policy.hedges_triggered", "r8e.policy.hedges_won",
 		"r8e.policy.fallbacks_used", "r8e.policy.retry_budget_exceeded",
-		"r8e.policy.time_budget_exceeded", "r8e.policy.coalesce_leaders",
+		"r8e.policy.time_budget_exceeded", "r8e.policy.attempt_timeouts",
+		"r8e.policy.coalesce_leaders",
 		"r8e.policy.coalesce_followers", "r8e.policy.concurrency_rejected",
 		"r8e.policy.throttled", "r8e.policy.slo_shed",
 		"r8e.policy.rate_adaptations",

@@ -106,6 +106,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.RetryBudgetExceeded })
 	builder.counter("r8e.policy.time_budget_exceeded", "Retries stopped early by the time budget",
 		func(m *r8e.PolicyMetrics) int64 { return m.TimeBudgetExceeded })
+	builder.counter("r8e.policy.attempt_timeouts", "Retry attempts cut by the per-attempt timeout",
+		func(m *r8e.PolicyMetrics) int64 { return m.AttemptTimeouts })
 	builder.counter("r8e.policy.coalesce_leaders", "Calls that ran a shared coalesced execution",
 		func(m *r8e.PolicyMetrics) int64 { return m.CoalesceLeaders })
 	builder.counter("r8e.policy.coalesce_followers", "Calls deduplicated by request coalescing",
