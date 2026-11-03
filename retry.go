@@ -58,7 +58,25 @@ func HonorRetryAfter() RetryOption {
 	}
 }
 
-// PerAttemptTimeout sets a timeout for each individual retry attempt.
+// PerAttemptTimeout sets a timeout for each individual retry attempt. When that
+// deadline cuts a failed attempt, the attempt's error is wrapped with
+// [ErrAttemptTimeout] and [Hooks.OnAttemptTimeout] fires. The deadline binds
+// only when it is earlier than the caller's and than any enclosing r8e
+// deadline; otherwise the attempt ends on that other deadline and carries no
+// ErrAttemptTimeout.
+//
+// The cut is decided when the deadline fires, as for [WithTimeout] and a time
+// budget: a caller that cancels later, or whose later deadline passes, while
+// the cut attempt is still returning does not take it back. A caller that
+// cancels before the deadline keeps the attempt. An attempt that returns its
+// own error on the deadline, before its context reports it, counts as cut.
+//
+// The wrap keeps the attempt's own error in the chain and adds nothing to it,
+// so errors.Is(err, context.DeadlineExceeded) holds only when that error
+// matches context.DeadlineExceeded itself (the context's error does, and so
+// does net/http's response-header timeout). Detect the cut with
+// errors.Is(err, ErrAttemptTimeout). A cut attempt marked [Permanent], or
+// rejected by [RetryIf], is wrapped too and still stops the retry.
 func PerAttemptTimeout(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.perAttemptTimeout = d
@@ -122,7 +140,10 @@ func DoRetry[T any](
 			permit = params.Concurrency
 		}
 
-		result, err := runRetryAttempt(ctx, fn, cfg, permit)
+		result, cut, err := runRetryAttempt(ctx, fn, cfg, permit)
+		if cut {
+			params.Hooks.emitAttemptTimeout(attempt + 1)
+		}
 
 		// On success: credit the retry budget and return immediately.
 		if err == nil {
@@ -136,12 +157,12 @@ func DoRetry[T any](
 		// If error is Permanent: stop immediately. A non-retryable failure
 		// leaves the budget untouched — it cannot drive a retry storm.
 		if IsPermanent(err) {
-			return zero, err //nolint:wrapcheck // caller's error returned as-is
+			return zero, err //nolint:wrapcheck // caller's error, wrapped with ErrAttemptTimeout when cut
 		}
 
 		// If retryIf predicate is set and returns false: stop (non-retryable).
 		if cfg.retryIf != nil && !cfg.retryIf(err) {
-			return zero, err //nolint:wrapcheck // caller's error returned as-is
+			return zero, err //nolint:wrapcheck // caller's error, wrapped with ErrAttemptTimeout when cut
 		}
 
 		// Retryable failure: charge it against the retry budget. The terminal
@@ -224,7 +245,10 @@ func DoRetry[T any](
 // runRetryAttempt executes one attempt of fn, optionally under a per-attempt
 // timeout, and releases the concurrency-budget permit (when permit is non-nil)
 // as the attempt returns. The release is deferred so it runs even if fn panics,
-// keeping the permit accounting balanced without a WithRecover boundary.
+// keeping the permit accounting balanced without a WithRecover boundary. When
+// the per-attempt deadline cut a failed attempt (see policyDeadlineCut), cut
+// is true and err is fn's error wrapped with ErrAttemptTimeout; otherwise err is
+// fn's error unchanged.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func runRetryAttempt[T any](
@@ -232,19 +256,26 @@ func runRetryAttempt[T any](
 	fn func(context.Context) (T, error),
 	cfg retryConfig,
 	permit *ConcurrencyBudget,
-) (T, error) {
+) (result T, cut bool, err error) {
 	if permit != nil {
 		defer permit.release()
 	}
 
-	if cfg.perAttemptTimeout > 0 {
-		attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
-		defer attemptCancel()
+	if cfg.perAttemptTimeout <= 0 {
+		result, err = fn(ctx)
 
-		return fn(attemptCtx)
+		return result, false, err
 	}
 
-	return fn(ctx)
+	attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
+	defer attemptCancel()
+
+	result, err = fn(attemptCtx)
+	if err != nil && policyDeadlineCut(ctx, attemptCtx) {
+		return result, true, fmt.Errorf("%w: %w", ErrAttemptTimeout, err)
+	}
+
+	return result, false, err
 }
 
 // hintExceedsMaxDelay reports whether err carries a Retry-After hint, before
