@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/byte4ever/r8e"
+	"github.com/byte4ever/r8e/r8eotel"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-
-	"github.com/byte4ever/r8e"
-	"github.com/byte4ever/r8e/r8eotel"
 )
 
 // collectInt64 returns the value and "policy" attribute of the first data point
@@ -266,6 +266,29 @@ func TestRegisterReportsAttemptTimeouts(t *testing.T) {
 	assert.Equal(t, "svc", policyAttr)
 }
 
+// The cooling_down counter reports CoolingDown, not the Throttled field next
+// to it.
+func TestRegisterReportsCoolingDown(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	source := fixedSnapshot{{Name: "svc", CoolingDown: 17, Throttled: 19}}
+
+	registration, err := r8eotel.Register(meter, source)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, registration.Unregister()) }()
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	got, policyAttr := collectInt64(t, rm, "r8e.policy.cooling_down")
+	assert.Equal(t, int64(17), got)
+	assert.Equal(t, "svc", policyAttr)
+}
+
 // TestRegisterEmitsAllInstruments guards every instrument name: a typo or a
 // dropped instrument would make the corresponding metric disappear.
 func TestRegisterEmitsAllInstruments(t *testing.T) {
@@ -311,7 +334,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.time_budget_exceeded", "r8e.policy.attempt_timeouts",
 		"r8e.policy.coalesce_leaders",
 		"r8e.policy.coalesce_followers", "r8e.policy.concurrency_rejected",
-		"r8e.policy.throttled", "r8e.policy.slo_shed",
+		"r8e.policy.throttled", "r8e.policy.cooling_down", "r8e.policy.slo_shed",
 		"r8e.policy.rate_adaptations",
 		"r8e.policy.slow_call_rate_exceeded",
 		"r8e.policy.cache_hits", "r8e.policy.cache_misses",

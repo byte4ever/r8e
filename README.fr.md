@@ -368,6 +368,60 @@ r8e.WithCircuitBreaker(
 
 **Compter les résultats neutres et périmés.** `CircuitNeutralOutcomes` compte les résultats que le classifier a jugés neutres, et `CircuitStaleOutcomes` ceux que le breaker a ignorés parce qu'ils étaient périmés. Les hooks `OnCircuitNeutral` et `OnCircuitStaleOutcome` se déclenchent sur les mêmes événements, hors du verrou du breaker. Un résultat périmé compte une seule fois, comme périmé, même s'il est neutre. Une hausse des résultats neutres peut cacher un downstream que les appelants abandonnent sans cesse. Un résultat périmé vient d'un appel encore en cours quand le breaker s'est ouvert ou est passé en half-open : chaque ouverture en ajoute à peu près autant qu'il y avait d'appels en vol, quel que soit le recovery timeout.
 
+### Cooldown
+
+Après un 429 avec un `Retry-After` d'une heure, chaque appel qui part encore,
+sur cette route ou sur une autre sous le même quota, reçoit son propre 429. Un
+cooldown refuse ces appels en local jusqu'à la deadline donnée par le serveur.
+
+```go
+quota := r8e.NewCooldown(r8e.CooldownIf(isQuotaError), r8e.MaxCooldown(30*time.Minute))
+
+search := r8e.NewPolicy[Result]("search", r8e.WithSharedCooldown(quota), r8e.WithRetry(3, strategy))
+export := r8e.NewPolicy[File]("export", r8e.WithSharedCooldown(quota))
+
+// Ou, pour une seule politique :
+p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
+```
+
+- Toute tentative en échec dont l'erreur porte un `RetryAfterProvider` (un
+  `StatusError` httpx sur un 429/503, `r8e.RetryAfterError(err, d)`, …) arme le
+  cooldown jusqu'à maintenant plus son délai. `CooldownIf(fn)` restreint le
+  déclencheur, par exemple aux seuls 429 ; `fn` tourne sur chaque goroutine
+  appelante et doit donc supporter l'accès concurrent. `MaxCooldown(d)` plafonne
+  un délai (une heure par défaut ; avec un plafond non positif, `NewCooldown` et
+  `NewPolicy` paniquent avec `ErrCooldownNonPositiveMax`).
+- Un délai plus tardif ne fait que repousser la deadline, jamais la rapprocher,
+  et un succès ne désarme pas le cooldown.
+- Tant qu'il est armé, un appel échoue tout de suite avec `ErrCoolingDown` et
+  aucune tentative ne part. `IsLocalRejection` le reconnaît.
+- Deux points de contrôle tiennent le breaker à l'écart des refus. Le cooldown
+  se place à l'entrée de la chaîne, après le coalescing et avant le timeout et
+  le breaker : un appel refusé n'atteint jamais le breaker. Dans `WithRetry`,
+  aucun retry ne part tant que le cooldown est armé, quel que soit l'appel qui
+  l'a armé : la boucle le vérifie avant le backoff, puis de nouveau avant la
+  tentative suivante. Elle renvoie alors la dernière erreur telle quelle, jamais
+  enveloppée dans `ErrRetriesExhausted` (comme `HonorRetryAfter`), et le breaker
+  compte une seule fois la vraie erreur du serveur.
+- Hooks : `OnCoolingDown()` pour un appel refusé (compté dans la métrique
+  `CoolingDown`, `r8e.policy.cooling_down` dans r8eotel) et
+  `OnCooldownArmed(d)` quand un délai l'arme ou le prolonge. Santé : un
+  cooldown armé rend la politique dégradée (`cooling_down`), jamais critique,
+  pour qu'un 429 sur une dépendance partagée ne sorte pas toutes les instances
+  de la rotation d'un coup.
+- `WithSharedCooldown` et `WithCooldown` ne se combinent pas
+  (`ErrSharedCooldownConflict`) : comme un bulkhead partagé, un cooldown partagé
+  exclut celui de la politique. `r8econf.GetPolicy` renvoie cette erreur, au
+  lieu de paniquer, pour un `cooldown` de config à côté d'un `WithSharedCooldown`
+  en code. Chaque politique qui partage le cooldown rapporte ses propres refus.
+- `WithCooldown` lit l'horloge de la politique (`WithClock`) ; `CooldownClock`
+  fixe l'horloge d'un cooldown construit avec `NewCooldown`.
+- Config : `cooldown` (le plafond, par exemple `"1h"`) active `WithCooldown` ;
+  un rechargement change le plafond du cooldown propre à la politique. Un
+  cooldown partagé se pose en code uniquement ; changez son plafond avec
+  `Cooldown.SetMaxCooldown`, qui renvoie `ErrCooldownNonPositiveMax` pour un
+  plafond non positif.
+
 ### Rate Limiter
 
 Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton. Pour un débit positif, le bucket contient une seconde de jetons, et au moins un jeton. Un débit sous 1 req/s marche donc : `WithRateLimit(0.125)` laisse passer un appel toutes les 8 secondes, soit environ 450 par heure. Un débit nul ou négatif ne laisse passer aucun appel.
@@ -627,16 +681,17 @@ Requête
   → Fallback          (le plus externe — attrape l'erreur finale)
     → Cache           (read-through — un hit frais court-circuite la chaîne)
       → Coalesce      (fusionne les appels concurrents dupliqués)
-        → Timeout         (deadline globale — annulation dure)
-          → Budget temps   (budget total coopératif pour retry + hedge)
-            → Gouverneur SLO (délestage pour préserver l'error budget du SLO)
-              → Throttle adaptatif  (délestage proportionnel avant le déclenchement du breaker)
-                → Circuit Breaker  (échec rapide si ouvert)
-                  → Rate Limiter   (contrôle du débit)
-                    → Bulkhead     (limite la concurrence — fixe, ou adaptative)
-                      → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
-                        → Hedge     (le plus interne — lance des appels redondants)
-                          → fn()    (votre fonction)
+        → Cooldown      (refuse les appels jusqu'à la deadline Retry-After d'un serveur)
+          → Timeout         (deadline globale — annulation dure)
+            → Budget temps   (budget total coopératif pour retry + hedge)
+              → Gouverneur SLO (délestage pour préserver l'error budget du SLO)
+                → Throttle adaptatif  (délestage proportionnel avant le déclenchement du breaker)
+                  → Circuit Breaker  (échec rapide si ouvert)
+                    → Rate Limiter   (contrôle du débit)
+                      → Bulkhead     (limite la concurrence — fixe, ou adaptative)
+                        → Retry       (réessaie les erreurs transitoires, encadré par le retry budget)
+                          → Hedge     (le plus interne — lance des appels redondants)
+                            → fn()    (votre fonction)
 ```
 
 Le retry budget n'est pas une étape séparée : il vit à l'intérieur de Retry et
@@ -1363,7 +1418,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (37) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnAttemptTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Hooks disponibles sur `Hooks` (39) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnAttemptTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`, `OnCoolingDown`, `OnCooldownArmed`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 

@@ -117,7 +117,10 @@ func (s *Store) Reload(path string) error {
 // [r8e.Registry] for readiness reporting.
 //
 // Additional options augment or override the config-loaded settings; they are
-// applied last so they take precedence. It returns an error if the stored
+// applied last so they take precedence. An option that excludes a config-loaded
+// pattern instead of overriding it, such as [r8e.WithSharedCooldown] next to a
+// cooldown cap set in the config, makes GetPolicy return the conflict
+// ([r8e.ValidateOptions]) rather than panic. It returns an error if the stored
 // configuration for name is invalid (which, since [Load] validates eagerly,
 // indicates the Store was modified after loading).
 func GetPolicy[T any](
@@ -141,6 +144,10 @@ func GetPolicy[T any](
 	}
 
 	allOpts = append(allOpts, opts...)
+
+	if err := r8e.ValidateOptions(allOpts...); err != nil {
+		return nil, fmt.Errorf("r8e: policy %q: %w", name, err)
+	}
 
 	return r8e.NewPolicy[T](name, allOpts...), nil
 }

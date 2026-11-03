@@ -1,5 +1,7 @@
 package r8e
 
+import "time"
+
 // Hooks holds optional callback functions for resilience pattern lifecycle
 // events. All fields are nil by default; callers set only the hooks they care
 // about. A nil *Hooks is itself valid and behaves as a no-op, so every exported
@@ -136,6 +138,15 @@ type Hooks struct {
 	// strategy kind ("fault", "latency", "outcome", or "behavior"). See
 	// [WithChaos].
 	OnChaosInjected func(kind string)
+
+	// OnCoolingDown fires when the cooldown refuses a call with
+	// [ErrCoolingDown] (see [WithCooldown]).
+	OnCoolingDown func()
+
+	// OnCooldownArmed fires when a Retry-After hint arms or extends the
+	// cooldown; d is how long it stays armed from now, capped by
+	// [MaxCooldown].
+	OnCooldownArmed func(d time.Duration)
 }
 
 // Each emit method guards both a nil receiver and a nil field, so a nil *Hooks
@@ -360,5 +371,17 @@ func (h *Hooks) emitConcurrencyBudgetExceeded() {
 func (h *Hooks) emitChaosInjected(kind string) {
 	if h != nil && h.OnChaosInjected != nil {
 		h.OnChaosInjected(kind)
+	}
+}
+
+func (h *Hooks) emitCoolingDown() {
+	if h != nil && h.OnCoolingDown != nil {
+		h.OnCoolingDown()
+	}
+}
+
+func (h *Hooks) emitCooldownArmed(d time.Duration) {
+	if h != nil && h.OnCooldownArmed != nil {
+		h.OnCooldownArmed(d)
 	}
 }

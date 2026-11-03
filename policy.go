@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,7 @@ type (
 		slo               *SLOGovernor
 		retryBudget       *RetryBudget
 		concurrencyBudget *ConcurrencyBudget
+		cooldown          *Cooldown
 		coalescer         *Coalescer[T]
 		registry          *Registry
 		metrics           *policyMetrics
@@ -72,6 +74,9 @@ type (
 		// bulkheadIsShared reports that bulkhead came from WithSharedBulkhead,
 		// so Reconfigure leaves its settings to Bulkhead.Reconfigure.
 		bulkheadIsShared bool
+		// sharedCooldown reports that cooldown came from WithSharedCooldown,
+		// so Reconfigure leaves its cap to Cooldown.SetMaxCooldown.
+		sharedCooldown bool
 	}
 
 	// retryRuntime is the hot-swappable retry configuration read per call.
@@ -87,6 +92,7 @@ type (
 	retryBudgets struct {
 		retry       *RetryBudget
 		concurrency *ConcurrencyBudget
+		cooldown    *Cooldown
 	}
 
 	// Option configures a [Policy] during [NewPolicy]. Construct options with
@@ -127,6 +133,8 @@ type (
 		fallbackFunc      *funcFallback
 		retryBudget       *RetryBudget
 		concurrencyBudget *ConcurrencyBudget
+		cooldownOpts      []CooldownOption
+		sharedCooldown    *Cooldown
 		coalesce          *coalesceDesc
 		cache             *cacheDesc
 		chaos             *chaosDesc
@@ -142,6 +150,9 @@ type (
 		// panicRecover, when true, adds the innermost recover middleware that
 		// catches panics and converts them to *PanicError (see WithRecover).
 		panicRecover bool
+		// cooldown reports that WithCooldown was given; cooldownOpts may be
+		// empty.
+		cooldown bool
 	}
 
 	// retryDesc holds deferred retry configuration.
@@ -384,6 +395,43 @@ func WithSharedRetryBudget(budget *RetryBudget) Option {
 	return optionFunc(func(s *policySetup) {
 		if budget != nil {
 			s.retryBudget = budget
+		}
+	})
+}
+
+// WithCooldown makes the policy refuse calls locally, with [ErrCoolingDown],
+// until the deadline of a server's Retry-After hint (see [Cooldown]). Any
+// failed attempt whose error carries a [RetryAfterProvider] arms it, capped by
+// [MaxCooldown] (default one hour); [CooldownIf] narrows the trigger. The
+// cooldown sits outside every guard, after coalescing, so a refused call never
+// reaches the circuit breaker. Inside [WithRetry], no retry leaves while the
+// cooldown is armed, whoever armed it: the loop checks it before the backoff
+// and again before the next attempt, and returns the last error as is, never
+// wrapped with [ErrRetriesExhausted], so the breaker counts the server's real
+// error. An armed cooldown makes the policy degraded, never critical. The
+// cooldown reads the policy's clock (see [WithClock]). Config: `cooldown`
+// (the cap).
+func WithCooldown(opts ...CooldownOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.cooldown = true
+		s.cooldownOpts = append(s.cooldownOpts, opts...)
+	})
+}
+
+// WithSharedCooldown attaches an existing [Cooldown], so one server's
+// Retry-After stops the calls of every policy sharing it, for example every
+// route under one quota. Each policy reports its own refusals and arms to its
+// own hooks, and shows the shared state in its health. Like
+// [WithSharedBulkhead], it excludes the policy's own: it cannot be combined
+// with [WithCooldown] ([NewPolicy] panics with [ErrSharedCooldownConflict],
+// and r8econf.GetPolicy returns that error for a config `cooldown`), and
+// [Policy.Reconfigure] does not change its cap: call [Cooldown.SetMaxCooldown],
+// which changes it for every policy at once. Code-only. A nil cooldown is
+// ignored.
+func WithSharedCooldown(cd *Cooldown) Option {
+	return optionFunc(func(s *policySetup) {
+		if cd != nil {
+			s.sharedCooldown = cd
 		}
 	})
 }
@@ -793,6 +841,9 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		)
 	}
 
+	cooldown, retryCooldown, cooldownEntries := cooldownEntriesFor[T](&setup, clock, &hooks)
+	entries = append(entries, cooldownEntries...)
+
 	if setup.retry != nil {
 		retryCell = new(atomic.Pointer[retryRuntime])
 		retryCell.Store(&retryRuntime{
@@ -805,6 +856,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 			newRetryEntry[T](retryCell, &hooks, clock, retryBudgets{
 				retry:       setup.retryBudget,
 				concurrency: setup.concurrencyBudget,
+				cooldown:    retryCooldown,
 			}),
 		)
 	}
@@ -909,6 +961,8 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		throttler:         throttler,
 		slo:               slo,
 		retryBudget:       setup.retryBudget,
+		cooldown:          cooldown,
+		sharedCooldown:    setup.sharedCooldown != nil,
 		concurrencyBudget: setup.concurrencyBudget,
 		coalescer:         coalescer,
 		metrics:           metrics,
@@ -932,6 +986,23 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 	return policy
 }
 
+// ValidateOptions reports the misconfiguration [NewPolicy] would panic with
+// for opts, or nil: everything checkSetupInvariants returns, such as a
+// conflict between patterns, an out-of-range [Burst], a non-positive
+// [MaxCooldown], a nil cache or key function, or a non-positive cache TTL. It lets code that combines options from
+// several sources, such as r8econf.GetPolicy, return the conflict as an error
+// instead of a panic. It cannot see a value whose type does not match the
+// policy's T (a [WithFallback], [WithFallbackFunc], [WithCache] or chaos value
+// of another type): NewPolicy still panics on those.
+func ValidateOptions(opts ...Option) error {
+	var setup policySetup
+	for _, opt := range opts {
+		opt.apply(&setup)
+	}
+
+	return checkSetupInvariants(&setup)
+}
+
 // validateSetup panics on a self-contradictory policy configuration — the same
 // misconfigurations [BuildOptions] rejects with an error for the config-driven
 // path. It runs once before any pattern is constructed.
@@ -942,11 +1013,14 @@ func validateSetup(setup *policySetup) {
 }
 
 // checkSetupInvariants returns the first misconfiguration in setup, or nil if
-// it is self-consistent: a cross-pattern conflict, or an out-of-range [Burst]. It is the single source of truth for
-// these rules: [validateSetup] panics with it (the options path) and
-// [BuildOptions] returns it (the config path), so an invariant added here is
-// enforced by both paths and the config path can never panic on one the options
-// path catches.
+// it is self-consistent: for example a cross-pattern conflict, a nil cache or
+// key function for [WithCache] or [WithCoalesce], a non-positive cache TTL, an
+// out-of-range [Burst] or a non-positive [MaxCooldown]. [validateSetup] panics
+// with it (the options path) and [BuildOptions] returns it (the config path),
+// so an invariant added here is enforced by both paths and the config path can
+// never panic on one the options path catches. The config path may meet a
+// value rule first in its own parser (parseCooldownCap for the cooldown cap);
+// both apply the same check.
 func checkSetupInvariants(setup *policySetup) error {
 	// A retry budget gates retries; without a retry pattern it has nothing to do.
 	if setup.retryBudget != nil && setup.retry == nil {
@@ -994,6 +1068,11 @@ func checkSetupInvariants(setup *policySetup) error {
 		}
 	}
 
+	// A policy takes its own cooldown or a shared one, never both.
+	if setup.sharedCooldown != nil && setup.cooldown {
+		return ErrSharedCooldownConflict
+	}
+
 	// A shared bulkhead drives the same slot as a policy's own bulkhead or
 	// adaptive limiter. Checked before the bulkhead/adaptive conflict, so any
 	// combination of WithSharedBulkhead with WithBulkhead and/or
@@ -1022,6 +1101,14 @@ func checkSetupInvariants(setup *policySetup) error {
 		}
 
 		if err := cfg.validate(); err != nil {
+			return err
+		}
+	}
+
+	if setup.cooldown {
+		// The cooldown options go through the same check as NewCooldown, before
+		// any pattern is built, on both paths.
+		if _, err := newCooldownConfig(setup.cooldownOpts); err != nil {
 			return err
 		}
 	}
@@ -1138,6 +1225,7 @@ func newRetryEntry[T any](
 					Clock:       clock,
 					Budget:      budgets.retry,
 					Concurrency: budgets.concurrency,
+					Cooldown:    budgets.cooldown,
 					Opts:        rt.opts,
 				})
 			}
@@ -1540,5 +1628,32 @@ func newFuncFallbackEntry[T any](desc funcFallback, hooks *Hooks) PatternEntry[T
 				return DoFallbackFunc[T](ctx, next, fn, hooks)
 			}
 		},
+	}
+}
+
+// cooldownEntriesFor returns the policy's cooldown, its own or the shared one
+// (nil when it has none), the cooldown the retry loop must arm (nil when the
+// entry arms it, or with no retry), and the entry refusing calls while it is
+// armed. This is the one place that decides who arms the cooldown: the retry
+// loop when the policy retries, the entry otherwise, so each hint arms it
+// once. An own cooldown always reads the policy's clock.
+func cooldownEntriesFor[T any](
+	setup *policySetup,
+	clock Clock,
+	hooks *Hooks,
+) (cooldown, retryCooldown *Cooldown, entries []PatternEntry[T]) {
+	cooldown = setup.sharedCooldown
+	if setup.cooldown {
+		opts := append(slices.Clone(setup.cooldownOpts), CooldownClock(clock))
+		cooldown = NewCooldown(opts...)
+	}
+
+	switch {
+	case cooldown == nil:
+		return nil, nil, nil
+	case setup.retry != nil:
+		return cooldown, cooldown, []PatternEntry[T]{newRefusingCooldownEntry[T](cooldown, hooks)}
+	default:
+		return cooldown, nil, []PatternEntry[T]{newArmingCooldownEntry[T](cooldown, hooks)}
 	}
 }

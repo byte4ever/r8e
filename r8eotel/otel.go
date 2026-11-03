@@ -17,10 +17,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/byte4ever/r8e"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-
-	"github.com/byte4ever/r8e"
 )
 
 type (
@@ -116,6 +116,8 @@ func Register(meter metric.Meter, reg MetricsSource) (metric.Registration, error
 		func(m *r8e.PolicyMetrics) int64 { return m.ConcurrencyRejected })
 	builder.counter("r8e.policy.throttled", "Calls shed locally by the adaptive throttler",
 		func(m *r8e.PolicyMetrics) int64 { return m.Throttled })
+	builder.counter("r8e.policy.cooling_down", "Calls refused locally while the cooldown is armed",
+		func(m *r8e.PolicyMetrics) int64 { return m.CoolingDown })
 	builder.counter("r8e.policy.slo_shed", "Calls shed locally by the SLO burn-rate governor",
 		func(m *r8e.PolicyMetrics) int64 { return m.SLOShed })
 	builder.counter("r8e.policy.rate_adaptations", "AIMD adjustments to the rate limiter's refill rate",

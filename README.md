@@ -365,6 +365,57 @@ r8e.WithCircuitBreaker(
 
 **Counting neutral and stale outcomes.** `CircuitNeutralOutcomes` counts the outcomes the classifier called neutral, and `CircuitStaleOutcomes` the outcomes the breaker ignored as stale. The hooks `OnCircuitNeutral` and `OnCircuitStaleOutcome` fire on the same events, outside the breaker's lock. A stale outcome counts once, as stale, even when it is neutral. A rise in neutral outcomes can hide a downstream that callers keep abandoning. A stale outcome comes from a call still running when the breaker opened or entered half-open, so each trip adds about as many as were in flight, whatever the recovery timeout.
 
+### Cooldown
+
+After a 429 with a one-hour `Retry-After`, every call that still goes out, on
+this route or on any other under the same quota, gets its own 429. A cooldown
+refuses those calls locally until the deadline the server gave.
+
+```go
+quota := r8e.NewCooldown(r8e.CooldownIf(isQuotaError), r8e.MaxCooldown(30*time.Minute))
+
+search := r8e.NewPolicy[Result]("search", r8e.WithSharedCooldown(quota), r8e.WithRetry(3, strategy))
+export := r8e.NewPolicy[File]("export", r8e.WithSharedCooldown(quota))
+
+// Or, for one policy:
+p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
+```
+
+- Any failed attempt whose error carries a `RetryAfterProvider` (an httpx
+  `StatusError` on a 429/503, `r8e.RetryAfterError(err, d)`, …) arms the cooldown
+  until now plus its hint. `CooldownIf(fn)` narrows the trigger, for example to
+  429 only; `fn` runs on every calling goroutine, so it must be safe for
+  concurrent use. `MaxCooldown(d)` caps one hint (default one hour; a
+  non-positive cap makes `NewCooldown` and `NewPolicy` panic with
+  `ErrCooldownNonPositiveMax`).
+- A later hint only extends the deadline, never shortens it, and a success does
+  not disarm it.
+- While it is armed, a call fails at once with `ErrCoolingDown` and no attempt
+  leaves. `IsLocalRejection` recognises it.
+- Two checkpoints keep the breaker clear of the refusals. The cooldown sits at
+  the entry of the chain, after coalescing and before the timeout and the
+  breaker, so a refused call never reaches the breaker. Inside `WithRetry`, no
+  retry leaves while the cooldown is armed, whoever armed it: the loop checks it
+  before the backoff and again before the next attempt. It then returns the last
+  error as is, never wrapped with `ErrRetriesExhausted` (as `HonorRetryAfter`
+  does), so the breaker counts the server's real error, once.
+- Hooks: `OnCoolingDown()` for a refused call (counted in the `CoolingDown`
+  metric, `r8e.policy.cooling_down` in r8eotel) and `OnCooldownArmed(d)` when a
+  hint arms or extends it. Health: an armed cooldown makes the policy degraded
+  (`cooling_down`), never critical, so a 429 on a shared dependency does not
+  take every instance out of rotation at once.
+- `WithSharedCooldown` and `WithCooldown` cannot be combined
+  (`ErrSharedCooldownConflict`): like a shared bulkhead, a shared cooldown
+  excludes the policy's own. `r8econf.GetPolicy` returns that error, rather than
+  panic, for a config `cooldown` next to a code `WithSharedCooldown`. Each
+  sharing policy reports its own refusals.
+- `WithCooldown` reads the policy's clock (`WithClock`); `CooldownClock` sets the
+  clock of a cooldown built with `NewCooldown`.
+- Config: `cooldown` (the cap, for example `"1h"`) enables `WithCooldown`; a
+  reload changes the cap of a policy's own cooldown. A shared cooldown is
+  code-only; change its cap with `Cooldown.SetMaxCooldown`, which returns
+  `ErrCooldownNonPositiveMax` for a non-positive cap.
+
 ### Rate Limiter
 
 Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token. For a positive rate, the bucket holds one second of tokens, and at least one token, so a rate below 1 req/s still works: `WithRateLimit(0.125)` admits one call every 8 seconds, about 450 per hour. A rate of zero or less admits no call.
@@ -620,16 +671,17 @@ Request
   → Fallback          (outermost — catches final error)
     → Cache           (read-through — fresh hit short-circuits the chain)
       → Coalesce      (collapse duplicate concurrent calls)
-        → Timeout         (global deadline — hard cancel)
-          → Time Budget    (total cooperative budget for retry + hedge)
-            → SLO Governor   (shed to protect the SLO error budget)
-              → Adaptive Throttle  (proportional load shed before the breaker trips)
-                → Circuit Breaker  (fast-fail if open)
-                  → Rate Limiter   (throttle throughput)
-                    → Bulkhead     (limit concurrency — fixed, or adaptive)
-                      → Retry       (retry transient failures, gated by the retry budget)
-                        → Hedge     (innermost — races redundant calls)
-                          → fn()    (your function)
+        → Cooldown      (refuse calls until a server's Retry-After deadline)
+          → Timeout         (global deadline — hard cancel)
+            → Time Budget    (total cooperative budget for retry + hedge)
+              → SLO Governor   (shed to protect the SLO error budget)
+                → Adaptive Throttle  (proportional load shed before the breaker trips)
+                  → Circuit Breaker  (fast-fail if open)
+                    → Rate Limiter   (throttle throughput)
+                      → Bulkhead     (limit concurrency — fixed, or adaptive)
+                        → Retry       (retry transient failures, gated by the retry budget)
+                          → Hedge     (innermost — races redundant calls)
+                            → fn()    (your function)
 ```
 
 The retry budget is not a separate stage: it lives inside Retry, throttling
@@ -1325,7 +1377,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Available hooks on `Hooks` (37): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnAttemptTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Available hooks on `Hooks` (39): `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnAttemptTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`, `OnCoolingDown`, `OnCooldownArmed`.
 
 StaleCache has its own hooks configured via `StaleCacheOption`: `OnStaleServed[K,V]` and `OnCacheRefreshed[K,V]` (see [Stale Cache](#stale-cache)).
 
