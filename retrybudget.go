@@ -100,9 +100,11 @@ func TokenRatio(r float64) RetryBudgetOption {
 // transitively, every ancestor), and a retry is permitted only when the child
 // AND every ancestor still allow it. Size the parent for the AGGREGATE retry
 // pressure of all its descendants — it caps the whole subtree, so a storm in one
-// child throttles its siblings too, unless that child is built with
-// [ShieldParent]: its failures then stop reaching the parent while it is
-// exhausted. A nil parent (the default) leaves the budget a root. The link is
+// child throttles its siblings too. A child built with [ShieldParent] stops
+// passing its failures to the parent while it is exhausted; its siblings keep
+// their retries only while the parent stays above half its capacity after that
+// child's drain (see [ShieldParent]). A nil parent (the default) leaves the
+// budget a root. The link is
 // set at construction and is immutable; passing Parent to
 // [RetryBudget.Reconfigure] has no effect. Works with both [WithRetryBudget] and
 // a [WithSharedRetryBudget] budget built via [NewRetryBudget].
@@ -112,16 +114,17 @@ func Parent(parent *RetryBudget) RetryBudgetOption {
 	}
 }
 
-// ShieldParent bounds how much a sick child budget drains its parent (see
-// [Parent]). Without it, every failure of the child is also debited from the
+// ShieldParent stops a child budget's failures from reaching its parent while
+// the child is exhausted (see [Parent]). Without it, every failure of the child is also debited from the
 // parent, so a dead route keeps draining the shared parent through its
 // first-attempt failures alone, even once its own retries are cut, and the
 // healthy sibling routes lose their retries. With it, a failure recorded while
 // the child is exhausted (at or below half its capacity) is not passed to the
 // parent; once successes bring the child back above that threshold, its
 // failures debit the parent again. A dead child, one that records no more
-// successes, then drains the parent by half of its own capacity rounded up:
-// 5 tokens for MaxTokens(10), its whole token for MaxTokens(1). No bound is
+// successes, then drains the parent by at most half of its own capacity
+// rounded up (5 tokens for MaxTokens(10), its whole token for MaxTokens(1)),
+// as long as its capacity is not changed while it drains. No bound is
 // promised for a flapping child: its successes are still credited to the
 // parent, and each one that lifts it back above the threshold lets the next
 // failure through. On a middle budget, the shield stops its whole subtree's
@@ -240,8 +243,8 @@ func (b *RetryBudget) recordSuccess() {
 // passes the failure to the parent, which does the same. Each level applies
 // its own shield (see ShieldParent) as the failure walks up: the walk stops at
 // the first budget that shields its parent and was already exhausted when the
-// failure arrived. It is a no-op on a nil budget. Like recordSuccess it holds one lock at a time as it
-// walks up the tree.
+// failure arrived. It is a no-op on a nil budget. Like recordSuccess it holds
+// one lock at a time as it walks up the tree.
 func (b *RetryBudget) recordFailure() {
 	if b == nil {
 		return

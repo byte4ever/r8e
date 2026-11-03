@@ -195,7 +195,7 @@ panics in `NewPolicy` (or `BuildOptions` returns `r8e.ErrRetryBudgetWithoutRetry
 for config-driven construction). A shared budget reports the same tokens/exhausted
 state under each sharing policy's name (aggregate gauge with max/avg, not sum).
 **Options**: `r8e.MaxTokens(n)` (default 10),
-`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree), `r8e.ShieldParent()` (on a child: while the child is exhausted its failures stop debiting the parent, so a dead route drains the parent by half its own capacity rounded up; siblings keep their retries only if the parent stays above half its own capacity after that drain, so size it for it; no bound for a flapping child, whose successes still credit the parent; construction-only, code-only).
+`r8e.TokenRatio(r)` (default 0.1), `r8e.Parent(*RetryBudget)` (nest in a tree), `r8e.ShieldParent()` (on a child: while the child is exhausted its failures stop debiting the parent, so a dead route drains the parent by at most half its own capacity rounded up (capacity unchanged meanwhile); siblings keep their retries only if the parent stays above half its own capacity after that drain, so size it for it; no bound for a flapping child, whose successes still credit the parent; construction-only, code-only).
 When exhausted it suppresses the retry and
 returns the **real downstream error** (not a sentinel); first attempts always
 proceed. Outcome-driven (no clock). Observability: `OnRetryBudgetExceeded` hook,

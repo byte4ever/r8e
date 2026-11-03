@@ -775,8 +775,9 @@ retries coupés, et les routes saines voisines perdent leurs retries.
 `ShieldParent()` sur l'enfant borne cette perte : tant que l'enfant est épuisé,
 ses échecs ne sont plus reportés sur le parent, et ils le sont de nouveau quand
 les succès le ramènent au-dessus de la moitié de sa capacité. Un enfant mort ne
-retire alors au parent que la moitié de sa propre capacité, arrondie au-dessus
-(5 jetons pour `MaxTokens(10)`). Les routes voisines gardent leurs retries tant
+retire alors au parent qu'au plus la moitié de sa propre capacité, arrondie
+au-dessus (5 jetons pour `MaxTokens(10)`), tant que sa capacité ne change pas
+pendant ce temps. Les routes voisines gardent leurs retries tant
 que le parent reste au-dessus de la moitié de sa capacité après cette perte :
 dimensionnez le parent en conséquence. Aucune borne n'est promise pour un enfant
 instable : ses succès sont toujours crédités au parent, et chaque succès qui le
