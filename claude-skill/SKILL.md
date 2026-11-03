@@ -160,7 +160,8 @@ Config-expressible via `respect_inbound_deadline` (requires `time_budget`, else
 (gRPC propagates automatically), the `httpx` package carries it on the wire as a
 relative, clock-skew-safe header: `httpx.InjectDeadline(req, clock)` (egress, pair
 with `PropagateDeadline`) and `httpx.ExtractDeadline(ctx, req)` (ingress, pair with
-`RespectInboundDeadline`).
+`RespectInboundDeadline`). On an httpx `Client`, `PropagateDeadline` also cuts a
+body read after `Do` (see the httpx section).
 
 ### Retry
 
@@ -842,8 +843,9 @@ client := httpx.NewClient("api", http.DefaultClient, classifier,
 )
 
 // Bound the call with a deadline on ctx, not r8e.WithTimeout: WithTimeout,
-// WithHedge and PerAttemptTimeout end the attempt's context when they return,
-// so the caller reads only the buffered start of the body after Do (the
+// WithHedge, PerAttemptTimeout and WithTimeBudget+PropagateDeadline end the
+// attempt's context when they return, so the caller reads only the buffered
+// start of the body after Do, then context.Canceled (the
 // StandardHTTPClient/AggressiveHTTPClient presets include WithTimeout).
 resp, err := client.Do(ctx, req)
 // Transient: body drained+closed for connection reuse during retries
@@ -863,8 +865,8 @@ hints, anything else is transient). The adapter adds nothing to the error: no
 `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}` itself; the
 policy may still wrap it (`ErrRetriesExhausted`), so match with
 `errors.Is`/`errors.As`, never `==`.
-Status >= 300: `body` = first `httpx.MaxClassifiedBody` (64 KiB) bytes and the
-caller still reads the whole body; below 300 (2xx, 101 upgrade): `body` is nil
+Status >= 300: `body` = first `httpx.MaxClassifiedBody` (64 KiB) bytes, put
+back so the caller reads the body from its first byte; below 300 (2xx, 101 upgrade): `body` is nil
 and the body is not read. During the call `resp.Body` is `http.NoBody`: `body`
 is classify's only view, and must not be modified (the caller reads the same
 bytes). The body stays open only on nil or on a permanent error carrying a
@@ -878,8 +880,9 @@ would get the same `*http.Response` and body stream) or with a static
 `WithFallback` (it drops the `StatusError` keeping a permanent body open, which
 leaks the connection); use `WithFallbackFunc` and close
 `StatusError.Response.Body`. The open body is read on the attempt's context:
-under `WithTimeout`, `WithHedge` or `PerAttemptTimeout` only its buffered start
-survives `Do`; bound the call with a deadline on the ctx passed to `Do` instead.
+under `WithTimeout`, `WithHedge`, `PerAttemptTimeout` or `WithTimeBudget` +
+`PropagateDeadline` only its buffered start survives `Do`, then
+`context.Canceled`; bound the call with a deadline on the ctx passed to `Do` instead.
 
 ## Presets
 

@@ -42,12 +42,13 @@ Use `r8e.WithFallbackFunc` and close the body of the `StatusError`'s `Response`,
 found with `errors.As`.
 
 A response's body is read on the attempt's context. `r8e.WithTimeout`,
-`r8e.WithHedge` and `r8e.PerAttemptTimeout` end that context when they return,
-whatever the outcome, so with any of them the caller reads only the bytes
-already buffered after `Do`, then gets `context.Canceled`. The
-`r8e.StandardHTTPClient` and `r8e.AggressiveHTTPClient` presets include
-`WithTimeout`. To read a whole body, bound the call with a deadline on the
-context passed to `Do`, as the examples below do.
+`r8e.WithHedge`, `r8e.PerAttemptTimeout` and `r8e.WithTimeBudget` with
+`r8e.PropagateDeadline` end that context when they return, whatever the
+outcome, so with any of them the caller reads only the bytes already buffered
+after `Do`, then gets `context.Canceled`. The `r8e.StandardHTTPClient` and
+`r8e.AggressiveHTTPClient` presets include `WithTimeout`. To read a whole body,
+bound the call with a deadline on the context passed to `Do`, as the
+`NewClient` example below does.
 
 ## Request flow
 
@@ -198,8 +199,8 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   (`r8e.ErrRetriesExhausted` once retries run out), so match it with
   `errors.Is` or `errors.As`, never `==`.
 - For a status of 300 or above, `body` holds the first
-  `httpx.MaxClassifiedBody` bytes (64 KiB), and the caller still reads the
-  whole body from the start.
+  `httpx.MaxClassifiedBody` bytes (64 KiB). The adapter puts them back, so the
+  caller reads the body from its first byte.
 - Below 300, `body` is `nil` and the body is not read, so a streamed success or
   an upgraded (101) connection stays as it is.
 - `body` is the classifier's only view of the body: during the call,
@@ -212,9 +213,9 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
 - The adapter leaves the body open in two cases: on `nil`, where `Do` returns
   `resp`, and on a permanent error that carries a `StatusError` for `resp`, as
   in the example, where `errors.As` finds it even when `WithRetry` makes `Do`
-  return a `nil` response. Under `WithTimeout`, `WithHedge` or
-  `PerAttemptTimeout`, only its buffered start can still be read after `Do`
-  (see above). Any other error drains and closes the body (a 101 is only
+  return a `nil` response. Under `WithTimeout`, `WithHedge`,
+  `PerAttemptTimeout` or `WithTimeBudget` with `PropagateDeadline`, only its
+  buffered start can still be read after `Do` (see above). Any other error drains and closes the body (a 101 is only
   closed), so the connection is reused. An option that drops the error drops
   the `StatusError` too: this is why a static `WithFallback` is excluded (see
   above).
@@ -252,7 +253,8 @@ policy := r8e.NewPolicy[T]("svc",
 
 Pair `InjectDeadline` with `r8e.PropagateDeadline()` on the caller and
 `ExtractDeadline` with `r8e.RespectInboundDeadline()` on the callee for a full
-cross-service chain. See
+cross-service chain. On an httpx `Client`, `PropagateDeadline` also cuts a body
+read after `Do` (see above). See
 [`examples/43-deadline-propagation-cross-service`](../examples/43-deadline-propagation-cross-service).
 
 ## Install

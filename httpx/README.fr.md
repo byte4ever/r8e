@@ -46,12 +46,13 @@ Utilisez plutôt `r8e.WithFallbackFunc`, et fermez le corps du `Response` du
 `StatusError`, que vous retrouvez avec `errors.As`.
 
 Le corps d'une réponse se lit sur le contexte de la tentative. `r8e.WithTimeout`,
-`r8e.WithHedge` et `r8e.PerAttemptTimeout` terminent ce contexte à leur retour,
-quel que soit le résultat. Avec l'une de ces options, l'appelant ne lit donc
-après `Do` que les octets déjà en tampon, puis reçoit `context.Canceled`. Les
-presets `r8e.StandardHTTPClient` et `r8e.AggressiveHTTPClient` incluent
-`WithTimeout`. Pour lire tout le corps, bornez l'appel avec une deadline sur le
-contexte passé à `Do`, comme le font les exemples ci-dessous.
+`r8e.WithHedge`, `r8e.PerAttemptTimeout` et `r8e.WithTimeBudget` avec
+`r8e.PropagateDeadline` terminent ce contexte à leur retour, quel que soit le
+résultat. Avec l'une de ces options, l'appelant ne lit donc après `Do` que les
+octets déjà en tampon, puis reçoit `context.Canceled`. Les presets
+`r8e.StandardHTTPClient` et `r8e.AggressiveHTTPClient` incluent `WithTimeout`.
+Pour lire tout le corps, bornez l'appel avec une deadline sur le contexte passé
+à `Do`, comme le fait l'exemple `NewClient` ci-dessous.
 
 ## Flux de requete
 
@@ -206,7 +207,8 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   (`r8e.ErrRetriesExhausted` une fois les tentatives épuisées) : comparez-la
   avec `errors.Is` ou `errors.As`, jamais avec `==`.
 - Pour un statut de 300 ou plus, `body` contient les `httpx.MaxClassifiedBody`
-  premiers octets (64 Kio), et l'appelant relit tout le corps depuis le début.
+  premiers octets (64 Kio). L'adapter les remet en place, et l'appelant lit le
+  corps depuis son premier octet.
 - En dessous de 300, `body` vaut `nil` et le corps n'est pas lu : un succès en
   streaming ou une connexion upgradée (101) reste telle quelle.
 - `body` est la seule vue du classifier sur le corps : pendant l'appel,
@@ -220,9 +222,9 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
 - L'adapter laisse le corps ouvert dans deux cas : sur `nil`, où `Do` renvoie
   `resp`, et sur une erreur permanente qui porte un `StatusError` pour `resp`,
   comme dans l'exemple, où `errors.As` le retrouve même quand `WithRetry` fait
-  renvoyer à `Do` une réponse `nil`. Avec `WithTimeout`, `WithHedge` ou
-  `PerAttemptTimeout`, seul son début déjà en tampon reste lisible après `Do`
-  (voir plus haut). Toute autre erreur vide puis ferme le corps (un 101
+  renvoyer à `Do` une réponse `nil`. Avec `WithTimeout`, `WithHedge`,
+  `PerAttemptTimeout` ou `WithTimeBudget` avec `PropagateDeadline`, seul son
+  début déjà en tampon reste lisible après `Do` (voir plus haut). Toute autre erreur vide puis ferme le corps (un 101
   est seulement fermé), pour réutiliser la connexion. Une option qui jette
   l'erreur jette aussi le `StatusError` : c'est pour cela qu'un `WithFallback`
   statique est exclu (voir plus haut).
@@ -261,7 +263,8 @@ policy := r8e.NewPolicy[T]("svc",
 
 Associez `InjectDeadline` à `r8e.PropagateDeadline()` côté appelant et
 `ExtractDeadline` à `r8e.RespectInboundDeadline()` côté appelé pour une chaîne
-cross-service complète. Voir
+cross-service complète. Sur un `Client` httpx, `PropagateDeadline` coupe aussi
+un corps lu après `Do` (voir plus haut). Voir
 [`examples/43-deadline-propagation-cross-service`](../examples/43-deadline-propagation-cross-service).
 
 ## Installation

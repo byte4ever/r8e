@@ -301,6 +301,7 @@ func serveBody(t *testing.T, status int, payload []byte) *httptest.Server {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
+		// The cut tests hang up mid-body, so this write fails on purpose there.
 		_, _ = w.Write(payload)
 	}))
 	t.Cleanup(srv.Close)
@@ -370,24 +371,44 @@ func TestResponseClassifierBodyOutlivesDo(t *testing.T) {
 	}
 }
 
-// Under WithTimeout the attempt's context ends when Do returns, so a body
-// larger than the transport's buffers breaks off with context.Canceled.
-func TestResponseClassifierBodyCutByWithTimeout(t *testing.T) {
+// Under an option that ends the attempt's context when it returns, a body
+// larger than the transport's buffers breaks off with context.Canceled after
+// Do. For a status of 300 or above, at least the classifier's bytes still read.
+func TestResponseClassifierBodyCutAfterDo(t *testing.T) {
 	t.Parallel()
 
-	srv := serveBody(t, http.StatusOK, bytes.Repeat([]byte("x"), 8<<20))
-	cl := httpx.NewResponseClient("", srv.Client(), keepBody, r8e.WithTimeout(time.Minute))
+	retry := r8e.WithRetry(2, r8e.ConstantBackoff(time.Millisecond))
+	options := map[string][]r8e.Option{
+		"WithTimeout":                           {r8e.WithTimeout(time.Minute)},
+		"WithTimeBudget with PropagateDeadline": {retry, r8e.WithTimeBudget(time.Minute, r8e.PropagateDeadline())},
+	}
+	statuses := map[string]int{"2xx": http.StatusOK, "permanent 403": http.StatusForbidden}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
-	require.NoError(t, err)
+	for optName, opts := range options {
+		for statusName, status := range statuses {
+			t.Run(optName+"/"+statusName, func(t *testing.T) {
+				t.Parallel()
 
-	resp, err := cl.Do(t.Context(), req)
-	require.NoError(t, err)
+				srv := serveBody(t, status, bytes.Repeat([]byte("x"), 8<<20))
+				cl := httpx.NewResponseClient("", srv.Client(), keepBody, opts...)
 
-	defer resp.Body.Close()
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+				require.NoError(t, err)
 
-	_, readErr := io.ReadAll(resp.Body)
-	require.ErrorIs(t, readErr, context.Canceled)
+				resp, err := cl.Do(t.Context(), req)
+				body := openBody(t, resp, err)
+
+				defer body.Close()
+
+				got, readErr := io.ReadAll(body)
+				require.ErrorIs(t, readErr, context.Canceled)
+
+				if status >= http.StatusMultipleChoices {
+					assert.GreaterOrEqual(t, len(got), httpx.MaxClassifiedBody, "the classifier's bytes")
+				}
+			})
+		}
+	}
 }
 
 // Under a retrying policy, Do returns a nil response on a permanent error, so

@@ -44,12 +44,13 @@ type (
 	// and that StatusError with it, so it is excluded (see [Client]).
 	//
 	// An open body is still read on the attempt's context. [r8e.WithTimeout],
-	// [r8e.WithHedge] and [r8e.PerAttemptTimeout] end that context when they
-	// return, whatever the outcome, and net/http then cuts the body: after Do,
-	// the caller reads only the bytes already buffered (for a status of 300 or
-	// above, at least the start handed to the classifier) and then gets
-	// [context.Canceled]. To read a whole body after Do, bound the call with a
-	// deadline on the context passed to Do instead (see [Client]).
+	// [r8e.WithHedge], [r8e.PerAttemptTimeout] and [r8e.WithTimeBudget] with
+	// [r8e.PropagateDeadline] end that context when they return, whatever the
+	// outcome, and net/http then cuts the body: after Do, the caller reads only
+	// the bytes already buffered (for a status of 300 or above, at least the
+	// start handed to the classifier) and then gets [context.Canceled]. To read
+	// a whole body after Do, bound the call with a deadline on the context
+	// passed to Do instead (see [Client]).
 	//
 	// The classifier runs inside the attempt. It may run on a goroutine other
 	// than the caller's, concurrently with itself (concurrent Do calls on one
@@ -82,9 +83,8 @@ const MaxClassifiedBody = 64 << 10
 // A nil error, or a permanent one that carries a [StatusError] for the
 // response, leaves the body open, to read from the start, within the limits
 // [ResponseClassifier] gives for options that end the attempt's context. Any
-// other error drains
-// and closes the body (a 1xx body is only closed), since a retry may follow
-// or the policy may drop the response. A failure reading the body is
+// other error drains and closes the body (a 1xx body is only closed), since
+// a retry may follow or the policy may drop the response. A failure reading the body is
 // transient, and classify is not called. As for any Client, do not pass
 // [r8e.WithCoalesce], [r8e.WithCache] or a static [r8e.WithFallback] (see
 // [Client]).
