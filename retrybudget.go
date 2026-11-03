@@ -47,9 +47,12 @@ type (
 	// AGGREGATE retry pressure of all its descendants — a retry storm in one leaf
 	// drains the shared parent and throttles its siblings too, stopping
 	// amplification from cascading up a call graph (gateway → service →
-	// downstream). A root budget (no parent) behaves exactly as before. The parent
-	// link is set once at construction and is immutable. Because the parent always
-	// exists before the child, the tree is acyclic by construction.
+	// downstream). The one exception is a child built with [ShieldParent]: while
+	// it is exhausted, its failures stop reaching its ancestors, so the parent no
+	// longer reflects that child's failures. A root budget (no parent) behaves
+	// exactly as before. The parent link is set once at construction and is
+	// immutable. Because the parent always exists before the child, the tree is
+	// acyclic by construction.
 	//
 	// Pattern: Retry Budget — adaptive token bucket gates retries against the
 	// live success/failure ratio; mutex-guarded so the (tokens, capacity, ratio)
@@ -97,8 +100,9 @@ func TokenRatio(r float64) RetryBudgetOption {
 // transitively, every ancestor), and a retry is permitted only when the child
 // AND every ancestor still allow it. Size the parent for the AGGREGATE retry
 // pressure of all its descendants — it caps the whole subtree, so a storm in one
-// child throttles its siblings too. A nil parent (the default) leaves the budget
-// a root. The link is set at construction and is immutable; passing Parent to
+// child throttles its siblings too, unless that child is built with
+// [ShieldParent]: its failures then stop reaching the parent while it is
+// exhausted. A nil parent (the default) leaves the budget a root. The link is set at construction and is immutable; passing Parent to
 // [RetryBudget.Reconfigure] has no effect. Works with both [WithRetryBudget] and
 // a [WithSharedRetryBudget] budget built via [NewRetryBudget].
 func Parent(parent *RetryBudget) RetryBudgetOption {
@@ -114,10 +118,16 @@ func Parent(parent *RetryBudget) RetryBudgetOption {
 // healthy sibling routes lose their retries. With it, a failure recorded while
 // the child is exhausted (at or below half its capacity) is not passed to the
 // parent; once successes bring the child back above that threshold, its
-// failures debit the parent again. A sick child then drains the parent by
-// about half of its own capacity. Successes are always credited to the
-// parent. It has no effect on a budget without a parent, and it is set at
-// construction only: Reconfigure ignores it.
+// failures debit the parent again. A dead child, one that records no more
+// successes, then drains the parent by about half of its own capacity.
+// Successes are always credited to the parent, so the bound also holds for a
+// flapping child as long as its [TokenRatio] does not exceed its parent's:
+// with a larger child ratio, each success lifts the child back above the
+// threshold for one failure that costs the parent more than the successes
+// returned to it. On a middle budget, the shield stops its whole subtree's
+// failures from reaching the ancestors above it. It has no effect on a budget
+// without a parent, and it is set at construction only: Reconfigure neither
+// adds nor removes it.
 func ShieldParent() RetryBudgetOption {
 	return func(cfg *retryBudgetConfig) {
 		cfg.shield = true
@@ -209,7 +219,8 @@ func (b *RetryBudget) Reconfigure(opts ...RetryBudgetOption) {
 }
 
 // recordSuccess returns ratio tokens to the bucket, capped at capacity, then
-// credits every ancestor so a parent budget tracks the aggregate of its subtree.
+// credits every ancestor, each by its own ratio. Successes are credited even
+// while a budget shields its parent (see ShieldParent).
 // It is a no-op on a nil budget so the retry path can call it unconditionally.
 // Each level locks only its own bucket and releases it before recursing, so the
 // walk takes one lock at a time (never two at once) and cannot deadlock.
@@ -236,7 +247,7 @@ func (b *RetryBudget) recordFailure() {
 	}
 
 	b.mu.Lock()
-	shielded := b.shield && b.tokens <= b.maxTokens/2
+	shielded := b.shield && b.exhaustedLocked()
 	b.tokens = max(b.tokens-1, 0)
 	b.mu.Unlock()
 
@@ -268,7 +279,15 @@ func (b *RetryBudget) allowRetryLocal() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	return b.tokens > b.maxTokens/2
+	return !b.exhaustedLocked()
+}
+
+// exhaustedLocked reports whether this bucket throttles retries: it holds at
+// most half its capacity. It is the one place the threshold is written, read
+// by the retry gate (allowRetryLocal) and by the shield (recordFailure). The
+// caller holds b.mu.
+func (b *RetryBudget) exhaustedLocked() bool {
+	return b.tokens <= b.maxTokens/2
 }
 
 // Tokens returns the current number of tokens in the bucket as a point-in-time
@@ -296,7 +315,9 @@ func (b *RetryBudget) Tokens() float64 {
 // surfaces its exhaustion only through the children's OnRetryBudgetExceeded hook
 // and RetryBudgetExceeded metric, which fire on the full-chain retry decision —
 // not through any health condition. Monitor such a parent by reading its own
-// Exhausted / Tokens directly.
+// Exhausted / Tokens directly. A child built with [ShieldParent] shows its
+// exhaustion on its own budget only: once exhausted, its failures no longer
+// reach the parent, so the parent's Tokens leave that child out.
 func (b *RetryBudget) Exhausted() bool {
 	if b == nil {
 		return false
