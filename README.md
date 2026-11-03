@@ -275,11 +275,29 @@ spread upward by up to 10%. A hint at or below `MaxDelay` is a floor: the retry
 never leaves before it. A hint above `MaxDelay` is cut to between `MaxDelay` and
 1.1 × `MaxDelay`, so that retry leaves before the time the server asked for; the
 spread only keeps capped clients from retrying at the same instant. Against a hard
-quota, exclude such hints with `RetryIf`, or raise `MaxDelay`. Attach a fixed hint to any error with
+quota, use `HonorRetryAfter` (below), or raise `MaxDelay`. Attach a fixed hint to any error with
 `r8e.RetryAfterError(err, d)`, or implement the interface yourself; the
 [`httpx`](httpx) adapter does it automatically from an HTTP `429`/`503`
 `Retry-After` header (delay-seconds or HTTP-date). See
 [`examples/23-retry-after`](examples/23-retry-after).
+
+**Never retry early (`HonorRetryAfter`).** Capping a hint means retrying before
+the time the server asked for, and against a quota that retry gets another 429.
+`HonorRetryAfter()` (config `honor_retry_after` in the `retry` block) stops the
+retry instead when the raw hint, before jitter, exceeds `MaxDelay`. `Do` then
+returns the last error as is, so the caller still reads the full hint through its
+`RetryAfterProvider`; the failure still counts against a retry budget. A hint at
+or below `MaxDelay` is waited as usual, and without `MaxDelay` every hint is
+waited, so the option has no effect.
+
+```go
+policy := r8e.NewPolicy[*http.Response]("quota-api",
+    r8e.WithRetry(3, r8e.ExponentialBackoff(200*time.Millisecond),
+        r8e.MaxDelay(10*time.Second),
+        r8e.HonorRetryAfter(), // a 1h Retry-After ends the call, it is not cut to 10s
+    ),
+)
+```
 
 ### Circuit Breaker
 

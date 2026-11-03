@@ -278,11 +278,29 @@ vers le haut, de 10 % au plus. Un indice inférieur ou égal à `MaxDelay` est u
 plancher : le retry ne part jamais avant. Un indice supérieur à `MaxDelay` est
 ramené entre `MaxDelay` et 1,1 × `MaxDelay` : ce retry part donc avant l'heure
 demandée par le serveur, et l'étalement évite seulement que les clients plafonnés
-repartent tous au même instant. Face à un quota strict, excluez ces indices avec
-`RetryIf`, ou augmentez `MaxDelay`. Attachez un indice fixe à n'importe quelle erreur avec
+repartent tous au même instant. Face à un quota strict, utilisez `HonorRetryAfter`
+(ci-dessous), ou augmentez `MaxDelay`. Attachez un indice fixe à n'importe quelle erreur avec
 `r8e.RetryAfterError(err, d)`, ou implémentez l'interface vous-même ; l'adaptateur
 [`httpx`](httpx) le fait automatiquement depuis un en-tête HTTP `429`/`503`
 `Retry-After` (secondes ou HTTP-date). Voir [`examples/23-retry-after`](examples/23-retry-after).
+
+**Ne jamais relancer trop tôt (`HonorRetryAfter`).** Plafonner un indice, c'est
+relancer avant l'heure demandée par le serveur, et face à un quota ce retry prend
+un autre 429. `HonorRetryAfter()` (champ `honor_retry_after` du bloc `retry`)
+arrête alors le retry quand l'indice brut, avant jitter, dépasse `MaxDelay`. `Do`
+renvoie la dernière erreur telle quelle : l'appelant lit toujours l'indice complet
+par son `RetryAfterProvider`, et l'échec compte quand même dans un retry budget.
+Un indice inférieur ou égal à `MaxDelay` est attendu normalement. Sans `MaxDelay`,
+tout indice est attendu et l'option n'a aucun effet.
+
+```go
+policy := r8e.NewPolicy[*http.Response]("quota-api",
+    r8e.WithRetry(3, r8e.ExponentialBackoff(200*time.Millisecond),
+        r8e.MaxDelay(10*time.Second),
+        r8e.HonorRetryAfter(), // un Retry-After d'1 h termine l'appel, il n'est pas ramené à 10 s
+    ),
+)
+```
 
 ### Circuit Breaker
 

@@ -13,12 +13,13 @@ type (
 		retryIf           func(error) bool
 		maxDelay          time.Duration
 		perAttemptTimeout time.Duration
+		honorRetryAfter   bool
 	}
 
 	// RetryOption configures retry behavior.
 	//
 	// Pattern: Functional Options — composable optional settings (MaxDelay,
-	// PerAttemptTimeout, RetryIf) applied to the private config, keeping the
+	// HonorRetryAfter, PerAttemptTimeout, RetryIf) applied to the private config, keeping the
 	// retry call signature stable as options are added.
 	RetryOption func(*retryConfig)
 
@@ -40,6 +41,21 @@ type (
 func MaxDelay(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.maxDelay = d
+	}
+}
+
+// HonorRetryAfter makes the retry stop, rather than retry early, when a
+// server's Retry-After hint exceeds [MaxDelay]. Without it, the hint is capped
+// by MaxDelay and the retry leaves before the time the server asked for. With
+// it, the retry returns the last error as is, so the caller still reads the
+// full hint through its [RetryAfterProvider]; the failure still counts
+// against a retry budget. This holds on every attempt, the last one included:
+// an over-cap hint is never wrapped with [ErrRetriesExhausted]. The raw hint is
+// compared, before any jitter. Without MaxDelay (or with a non-positive one)
+// every hint is waited, so HonorRetryAfter has no effect.
+func HonorRetryAfter() RetryOption {
+	return func(cfg *retryConfig) {
+		cfg.honorRetryAfter = true
 	}
 }
 
@@ -154,6 +170,14 @@ func DoRetry[T any](
 		// attempt is charged too — it is a real downstream failure and a
 		// storm contributor — even though no retry follows it.
 		params.Budget.recordFailure()
+
+		// A server hint past MaxDelay would be capped and retried early: with
+		// HonorRetryAfter, stop and hand the caller the error that carries it.
+		// The check runs before the last-attempt exit, so the error comes back
+		// as is on every attempt, never wrapped with ErrRetriesExhausted.
+		if cfg.honorRetryAfter && hintExceedsMaxDelay(err, cfg.maxDelay) {
+			return zero, err
+		}
 
 		// If this is the last attempt, don't sleep or emit hook.
 		if attempt == maxAttempts-1 {
@@ -283,6 +307,19 @@ func attemptDeadlineFired(parent, attemptCtx context.Context) bool {
 	err := parent.Err()
 
 	return err == nil || errors.Is(err, context.DeadlineExceeded)
+}
+
+// hintExceedsMaxDelay reports whether err carries a Retry-After hint, before
+// jitter, longer than maxDelay. A non-positive maxDelay sets no cap, so no hint
+// exceeds it.
+func hintExceedsMaxDelay(err error, maxDelay time.Duration) bool {
+	if maxDelay <= 0 {
+		return false
+	}
+
+	after, ok := retryAfterFromError(err)
+
+	return ok && after > maxDelay
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the
