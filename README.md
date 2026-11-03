@@ -950,6 +950,27 @@ Detaching also strips the caller's deadline — which is why coalescing **requir
 a `WithTimeout` to bound the shared work; without it a leader whose `fn` never
 returns would park a goroutine and wedge its key.
 
+**Stopping detached calls on shutdown (`WithBaseContext`).** Nothing outside the
+policy stops a detached call: the shared call above and the refresh-ahead reload
+run until `fn` returns or `WithTimeout` cuts them. `WithBaseContext(ctx)` ties
+them to a context the owner of the policy controls. Cancel `ctx` when the
+client shuts down and both stop: their context ends with `ctx`'s cause. They
+keep the caller's values and still ignore the caller's own cancellation. Calls
+on the caller's path are not affected. Code-only, and `Reconfigure` does not
+change it. There is no `Policy.Close`: a policy is often shared, and closing it
+would cut other callers' calls.
+
+```go
+base, stop := context.WithCancelCause(context.Background())
+defer stop(errors.New("client closed"))
+
+policy := r8e.NewPolicy[User]("users",
+    r8e.WithBaseContext(base),
+    r8e.WithCoalesce(userKey),
+    r8e.WithTimeout(2*time.Second),
+)
+```
+
 Observability: the `OnCoalesceLeader` / `OnCoalesceFollower` hooks, the
 `CoalesceLeaders` / `CoalesceFollowers` counters (their ratio is the dedup rate),
 and the `CoalesceInFlight` gauge. Coalescing is a healthy optimisation, so it

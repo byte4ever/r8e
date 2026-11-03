@@ -46,6 +46,9 @@ type (
 	// concurrent calls into one shared execution, broadcast to all waiters via a
 	// completion channel.
 	Coalescer[T any] struct {
+		// detach builds the shared call's context (see WithBaseContext); nil
+		// for a standalone Coalescer. Set before first use, then read-only.
+		detach   detacher
 		hooks    *Hooks
 		inFlight map[string]*coalesceCall[T]
 		mu       sync.Mutex
@@ -136,7 +139,11 @@ func (c *Coalescer[T]) execute(
 
 	// Detach cancellation and deadline so no single caller can abort the group's
 	// work; context values (trace spans, etc.) are preserved from the leader.
-	call.val, call.err = next(context.WithoutCancel(parent))
+	// The policy's base context, when set, still ends it.
+	detached, stop := c.detach.run(parent)
+	defer stop()
+
+	call.val, call.err = next(detached)
 }
 
 // await blocks until the shared call completes or ctx is done, whichever comes

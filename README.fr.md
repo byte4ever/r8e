@@ -968,6 +968,29 @@ l'appelant — c'est pourquoi le coalescing **exige** un `WithTimeout` pour born
 le travail partagé ; sans lui, un leader dont le `fn` ne retourne jamais
 parquerait une goroutine et figerait sa clé.
 
+**Arrêter les appels détachés à l'arrêt du client (`WithBaseContext`).** Rien en
+dehors de la politique n'arrête un appel détaché : l'appel partagé ci-dessus et
+le rechargement en avance (refresh-ahead) tournent jusqu'au retour de `fn` ou
+jusqu'à la coupure par `WithTimeout`. `WithBaseContext(ctx)` les rattache à un
+contexte que contrôle le propriétaire de la politique. Annulez `ctx` à l'arrêt
+du client et les deux s'arrêtent : leur contexte se termine avec la cause de
+`ctx`. Ils gardent les valeurs du contexte de l'appelant et ignorent toujours
+l'annulation propre à l'appelant. Les appels faits sur le chemin de l'appelant
+ne sont pas touchés. L'option se pose en code uniquement, et `Reconfigure` ne la
+change pas. Il n'y a pas de `Policy.Close` : une politique est souvent partagée,
+et la fermer couperait les appels des autres appelants.
+
+```go
+base, stop := context.WithCancelCause(context.Background())
+defer stop(errors.New("client closed"))
+
+policy := r8e.NewPolicy[User]("users",
+    r8e.WithBaseContext(base),
+    r8e.WithCoalesce(userKey),
+    r8e.WithTimeout(2*time.Second),
+)
+```
+
 Observabilité : les hooks `OnCoalesceLeader` / `OnCoalesceFollower`, les
 compteurs `CoalesceLeaders` / `CoalesceFollowers` (leur ratio est le taux de
 déduplication) et la jauge `CoalesceInFlight`. Le coalescing est une optimisation

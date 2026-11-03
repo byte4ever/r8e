@@ -72,6 +72,9 @@ type (
 		hooks      *Hooks
 		clock      Clock
 		refreshing map[string]struct{}
+		// detach builds the background reload's context (see
+		// WithBaseContext); nil for a standalone cache.
+		detach     detacher
 		freshTTL   time.Duration
 		staleTTL   time.Duration
 		negTTL     time.Duration
@@ -109,6 +112,7 @@ type (
 	// corresponding behaviour); clock and hooks default to [RealClock] and the
 	// no-op zero [Hooks] in [NewReadThroughCache].
 	cacheOptions struct {
+		detach     detacher
 		clock      Clock
 		hooks      *Hooks
 		staleTTL   time.Duration
@@ -244,6 +248,14 @@ func cacheHandOff() CacheOption {
 	}
 }
 
+// cacheDetach ties the background reloads to the policy's base context (see
+// [WithBaseContext]). Only a [Policy] sets it.
+func cacheDetach(d detacher) CacheOption {
+	return func(o *cacheOptions) {
+		o.detach = d
+	}
+}
+
 // NegativeCache enables negative caching: when an execution fails and no stale
 // value is available to serve, the error is cached for negTTL so subsequent
 // calls for the same key fast-fail with the recorded error instead of
@@ -305,6 +317,7 @@ func NewReadThroughCache[T any](
 		negTTL:     cfg.negTTL,
 		refreshTTL: cfg.refreshTTL,
 		handOff:    cfg.handOff,
+		detach:     cfg.detach,
 	}
 }
 
@@ -542,7 +555,8 @@ func (rc *ReadThroughCache[T]) endRefresh(key string) {
 // success. It executes next under a context detached from the triggering caller
 // (cancellation and deadline stripped, values preserved) so the caller leaving
 // cannot abort the shared refresh — the inner [WithTimeout] the [Policy] requires
-// bounds it instead. A failed reload is best-effort: the current entry is left
+// bounds it instead, and the policy's base context ends it (see
+// [WithBaseContext]). A failed reload is best-effort: the current entry is left
 // untouched (its store time unchanged, so the next in-window read retries) and
 // no error is surfaced. A successful reload stores the value (firing
 // OnCacheStored) and fires OnCacheRefreshed.
@@ -560,7 +574,10 @@ func (rc *ReadThroughCache[T]) refresh(
 ) {
 	defer rc.endRefresh(key)
 
-	result, err := next(context.WithoutCancel(parent))
+	detached, stop := rc.detach.run(parent)
+	defer stop()
+
+	result, err := next(detached)
 	if err != nil {
 		return // keep the current entry; a later read retries the refresh
 	}
