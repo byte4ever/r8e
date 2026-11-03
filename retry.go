@@ -12,6 +12,7 @@ type (
 		retryIf           func(error) bool
 		maxDelay          time.Duration
 		perAttemptTimeout time.Duration
+		honorRetryAfter   bool
 	}
 
 	// RetryOption configures retry behavior.
@@ -39,6 +40,19 @@ type (
 func MaxDelay(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.maxDelay = d
+	}
+}
+
+// HonorRetryAfter makes the retry stop, rather than retry early, when a
+// server's Retry-After hint exceeds [MaxDelay]. Without it, the hint is capped
+// by MaxDelay and the retry leaves before the time the server asked for. With
+// it, the retry returns the last error as is, so the caller still reads the
+// full hint through its [RetryAfterProvider]; the failure still counts
+// against a retry budget. The raw hint is compared, before any jitter. Without
+// MaxDelay every hint is waited, so HonorRetryAfter has no effect.
+func HonorRetryAfter() RetryOption {
+	return func(cfg *retryConfig) {
+		cfg.honorRetryAfter = true
 	}
 }
 
@@ -138,6 +152,12 @@ func DoRetry[T any](
 			break
 		}
 
+		// A server hint past MaxDelay would be capped and retried early: with
+		// HonorRetryAfter, stop and hand the caller the error that carries it.
+		if hintExceedsMaxDelay(&cfg, err) {
+			return zero, err //nolint:wrapcheck // caller's error returned as-is
+		}
+
 		// If the budget is exhausted, stop retrying and return the real
 		// downstream error; the suppression is observable via the
 		// OnRetryBudgetExceeded hook and metrics, not the error value.
@@ -221,6 +241,18 @@ func runRetryAttempt[T any](
 	}
 
 	return fn(ctx)
+}
+
+// hintExceedsMaxDelay reports whether cfg honors Retry-After hints and err
+// carries one, before jitter, longer than a set MaxDelay.
+func hintExceedsMaxDelay(cfg *retryConfig, err error) bool {
+	if !cfg.honorRetryAfter || cfg.maxDelay <= 0 {
+		return false
+	}
+
+	after, ok := retryAfterFromError(err)
+
+	return ok && after > cfg.maxDelay
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the

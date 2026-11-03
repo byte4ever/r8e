@@ -279,3 +279,141 @@ func FuzzJitteredRetryAfter(f *testing.F) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// HonorRetryAfter
+// ---------------------------------------------------------------------------
+
+// The acceptance case of HonorRetryAfter: a hint past MaxDelay stops the retry
+// after the first attempt, and the caller still reads the full hint.
+func TestDoRetryHonorRetryAfterStopsOnHintPastMaxDelay(t *testing.T) {
+	t.Parallel()
+
+	clk := newImmediateTestClock()
+	calls := 0
+
+	_, err := DoRetry[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			calls++
+
+			return "", RetryAfterError(errors.New("429"), time.Hour)
+		},
+		RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(10 * time.Millisecond),
+			Hooks:       &Hooks{},
+			Clock:       clk,
+			Opts:        []RetryOption{MaxDelay(10 * time.Second), HonorRetryAfter()},
+		},
+	)
+
+	assert.Equal(t, 1, calls)
+	assert.Empty(t, clk.getDurations(), "no backoff was slept")
+	require.NotErrorIs(t, err, ErrRetriesExhausted, "the last error is returned as is")
+
+	after, ok := retryAfterFromError(err)
+	require.True(t, ok)
+	assert.Equal(t, time.Hour, after)
+}
+
+// HonorRetryAfter compares the raw hint with MaxDelay: a hint at or below the
+// cap is waited as usual, and without MaxDelay every hint is waited.
+func TestDoRetryHonorRetryAfterWaitsHintsWithinCap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		hint     time.Duration
+		maxDelay time.Duration
+	}{
+		{name: "hint below the cap", hint: 2 * time.Second, maxDelay: 10 * time.Second},
+		{name: "hint equal to the cap", hint: 10 * time.Second, maxDelay: 10 * time.Second},
+		{name: "no cap", hint: time.Hour, maxDelay: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			clk := newImmediateTestClock()
+			calls := 0
+
+			_, err := DoRetry[string](
+				context.Background(),
+				func(_ context.Context) (string, error) {
+					calls++
+
+					return "", RetryAfterError(errors.New("429"), tt.hint)
+				},
+				RetryParams{
+					MaxAttempts: 2,
+					Strategy:    ConstantBackoff(10 * time.Millisecond),
+					Hooks:       &Hooks{},
+					Clock:       clk,
+					Opts:        []RetryOption{MaxDelay(tt.maxDelay), HonorRetryAfter()},
+				},
+			)
+
+			require.ErrorIs(t, err, ErrRetriesExhausted)
+			assert.Equal(t, 2, calls)
+			require.Len(t, clk.getDurations(), 1)
+			assert.GreaterOrEqual(t, clk.getDurations()[0], tt.hint)
+		})
+	}
+}
+
+// Without HonorRetryAfter, a hint past MaxDelay is still capped and retried:
+// the default does not change.
+func TestDoRetryWithoutHonorRetryAfterCapsTheHint(t *testing.T) {
+	t.Parallel()
+
+	clk := newImmediateTestClock()
+	calls := 0
+
+	_, err := DoRetry[string](
+		context.Background(),
+		func(_ context.Context) (string, error) {
+			calls++
+
+			return "", RetryAfterError(errors.New("429"), time.Hour)
+		},
+		RetryParams{
+			MaxAttempts: 2,
+			Strategy:    ConstantBackoff(10 * time.Millisecond),
+			Hooks:       &Hooks{},
+			Clock:       clk,
+			Opts:        []RetryOption{MaxDelay(10 * time.Second)},
+		},
+	)
+
+	require.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Equal(t, 2, calls)
+}
+
+func TestBuildOptionsHonorRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	honor := true
+	cfg := PolicyConfig{Retry: &RetryConfig{
+		Backoff:         strPtr("constant"),
+		BaseDelay:       strPtr("10ms"),
+		MaxDelay:        strPtr("10s"),
+		MaxAttempts:     intPtr(3),
+		HonorRetryAfter: &honor,
+	}}
+
+	opts, err := BuildOptions(&cfg)
+	require.NoError(t, err)
+
+	calls := 0
+	policy := NewPolicy[string]("", opts...)
+	_, err = policy.Do(context.Background(), func(context.Context) (string, error) {
+		calls++
+
+		return "", RetryAfterError(errors.New("429"), time.Hour)
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, calls)
+}
