@@ -417,8 +417,8 @@ policy, so aggregate them with max, not sum. It keeps the clock given to
 operation under one sharing policy must not call, directly or indirectly, any
 policy on the same bulkhead, itself included (fine below capacity; once outer
 calls hold every slot the inner call gets what any caller of a full bulkhead
-gets, see `Bulkhead.Acquire`, and the bulkhead stays full while those calls
-last, forever with a CoDel-only queue and no ctx deadline). Unlike the shared
+gets, see `Bulkhead.Acquire`; the bulkhead stays full while those calls last,
+and the callers of every sharing policy are refused or wait). Unlike the shared
 retry/concurrency budgets (last option wins, any policy's `Reconfigure` retunes
 them for all), combining it with `WithBulkhead` or `WithAdaptiveConcurrency`
 panics with `r8e.ErrSharedBulkheadConflict`, and a policy `Reconfigure` carrying

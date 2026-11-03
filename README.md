@@ -483,10 +483,9 @@ policy itself included: the inner call needs a second slot while the outer call
 holds the first. Below capacity the inner call still gets a slot, so the fault
 shows only under load. Once such outer calls hold every slot, the inner call
 gets what any caller of a full bulkhead gets (see `Bulkhead.Acquire`): it fails,
-or it waits for a slot that only the outer call can free. The bulkhead then
-stays full for as long as those calls last, forever with a CoDel-only queue and
-contexts without a deadline, and the callers of every sharing policy are
-refused or wait in turn.
+or it waits for a slot that only an outer call can free. The bulkhead stays full
+while those calls last, and the callers of every sharing policy are refused or
+wait.
 
 Unlike the shared retry and concurrency budgets, where the last option wins and
 any sharing policy's `Reconfigure` retunes the budget for all of them, a shared
