@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -525,11 +526,18 @@ func TestCooldownCapPathsAgree(t *testing.T) {
 	}
 }
 
-// recovered runs fn and returns the error it panics with, or nil.
+// recovered runs fn and returns what it panics with as an error (a value that
+// is not an error is wrapped), or nil when fn does not panic.
 func recovered(fn func()) (err error) {
 	defer func() {
-		if r := recover(); r != nil {
-			err, _ = r.(error)
+		r := recover()
+		if r == nil {
+			return
+		}
+
+		var ok bool
+		if err, ok = r.(error); !ok {
+			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
 
