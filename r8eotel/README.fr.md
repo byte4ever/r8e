@@ -38,7 +38,8 @@ defer registration.Unregister()
 
 Tous les instruments `r8e.policy.*` sont émis : compteurs (`retries`,
 `circuit_opens`, `timeouts`, `rate_limited`, `chaos_injected`, `cache_refreshes`,
-`circuit_ramps`, `circuit_neutral_outcomes`, `circuit_stale_outcomes`, …) et
+`circuit_ramps`, `circuit_neutral_outcomes`, `circuit_stale_outcomes`,
+`attempt_timeouts`, `cooling_down`, …) et
 gauges (`circuit_state`, `latency_p50/p95/p99`,
 `adaptive_timeout`, `adaptive_hedge_delay`, `ramp_recovery_fraction`, …). Les
 instruments sont **observables** (pull-based), lus dans le callback de collecte

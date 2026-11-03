@@ -36,7 +36,8 @@ defer registration.Unregister()
 
 All `r8e.policy.*` instruments are emitted: counters (`retries`, `circuit_opens`,
 `timeouts`, `rate_limited`, `chaos_injected`, `cache_refreshes`, `circuit_ramps`,
-`circuit_neutral_outcomes`, `circuit_stale_outcomes`, …) and gauges
+`circuit_neutral_outcomes`, `circuit_stale_outcomes`, `attempt_timeouts`,
+`cooling_down`, …) and gauges
 (`circuit_state`, `latency_p50/p95/p99`, `adaptive_timeout`,
 `adaptive_hedge_delay`, `ramp_recovery_fraction`, …). The instruments are
 **observable** (pull-based), read on the OTel collection callback from the
