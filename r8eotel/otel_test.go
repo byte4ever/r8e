@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/byte4ever/r8e"
+	"github.com/byte4ever/r8e/r8eotel"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-
-	"github.com/byte4ever/r8e"
-	"github.com/byte4ever/r8e/r8eotel"
 )
 
 // collectInt64 returns the value and "policy" attribute of the first data point

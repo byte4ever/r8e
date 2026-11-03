@@ -17,10 +17,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/byte4ever/r8e"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-
-	"github.com/byte4ever/r8e"
 )
 
 type (
