@@ -980,12 +980,13 @@ keep the caller's values and still ignore the caller's own cancellation.
 
 Once `ctx` has ended, the policy stops every detached call for every holder of
 the policy, including calls started after the end. A call with a coalescing key
-fails at once with `context.Canceled`, and a refresh-ahead reload stops without
-any error surfacing (the entry keeps its value until it expires). A call with
-no coalescing key still runs on its caller's context. No failure is cached
-negatively once `ctx` has ended, so the shutdown never reaches a later call
-through the cache, nor another policy sharing it. Set `ctx` only on a policy
-whose holders all stop with its owner. Code-only, and `Reconfigure` does not
+that misses the cache fails at once with `context.Canceled`; a cache hit, a
+stale value (`StaleIfError`) or `WithFallback` still answers it. A refresh-ahead
+reload stops without any error surfacing (the entry keeps its value until it
+expires). A call with no coalescing key still runs on its caller's context.
+This policy stores no negative entry once `ctx` has ended; a policy or cache
+that wraps it still caches the `context.Canceled` it returns. Set `ctx` only on
+a policy whose holders all stop with its owner. Code-only, and `Reconfigure` does not
 change it.
 
 ```go

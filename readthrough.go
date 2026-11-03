@@ -72,8 +72,9 @@ type (
 		hooks      *Hooks
 		clock      Clock
 		refreshing map[string]struct{}
-		// detach builds the background reload's context (see
-		// WithBaseContext); nil for a standalone cache.
+		// detach holds the base context of the background reload, from
+		// which derive makes its context (see WithBaseContext); nil for a
+		// standalone cache.
 		detach     detacher
 		freshTTL   time.Duration
 		staleTTL   time.Duration
@@ -330,8 +331,8 @@ func NewReadThroughCache[T any](
 // next before returning. Otherwise it executes next and: on success caches and
 // returns the result; on error serves a stale value if one is available (see
 // [StaleIfError]), else caches the error if negative caching is enabled (see
-// [NegativeCache]) and ctx is neither done nor past its deadline, and returns
-// it.
+// [NegativeCache]) and ctx is neither done nor past its deadline, nor the
+// policy's base context (see [WithBaseContext]) ended, and returns it.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func (rc *ReadThroughCache[T]) Do(

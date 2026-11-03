@@ -46,8 +46,9 @@ type (
 	// concurrent calls into one shared execution, broadcast to all waiters via a
 	// completion channel.
 	Coalescer[T any] struct {
-		// detach builds the shared call's context (see WithBaseContext); nil
-		// for a standalone Coalescer. Set before first use, then read-only.
+		// detach holds the base context of the shared call, from which
+		// derive makes its context (see WithBaseContext); nil for a
+		// standalone Coalescer. Set before first use, then read-only.
 		detach   detacher
 		hooks    *Hooks
 		inFlight map[string]*coalesceCall[T]

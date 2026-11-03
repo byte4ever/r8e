@@ -17,14 +17,15 @@ type detacher func() context.Context
 // context and still ignore the caller's own cancellation.
 //
 // Once ctx has ended, the policy stops every detached call, for every holder
-// of the policy, including the calls started after the end: a call with a
-// coalescing key fails at once with [context.Canceled] (the cause is on the
-// context fn would get), and a refresh-ahead reload stops with no error
-// surfacing, the entry keeping its value until it expires. A call with no
-// coalescing key still runs on its caller's context. No failure is cached
-// negatively once ctx has ended, so the end of ctx never reaches a later call
-// through the cache, nor another policy sharing it. Set ctx only on a policy
-// whose holders all stop with its owner.
+// of the policy, including the calls started after the end. A call with a
+// coalescing key that misses the cache fails at once with [context.Canceled]
+// (the cause is on the context fn would get); a cache hit, a stale value
+// ([StaleIfError]) or [WithFallback] still answers it. A refresh-ahead reload
+// stops with no error surfacing, the entry keeping its value until it expires.
+// A call with no coalescing key still runs on its caller's context. This
+// policy stores no negative entry once ctx has ended; a policy or cache that
+// wraps it still caches the [context.Canceled] it returns. Set ctx only on a
+// policy whose holders all stop with its owner.
 //
 // A nil ctx is ignored. Code-only: it has no config key and Reconfigure does
 // not change it.

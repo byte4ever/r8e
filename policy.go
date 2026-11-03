@@ -99,9 +99,9 @@ type (
 		clock    Clock
 		hooks    Hooks
 		registry *Registry
-		// detach builds the context of the calls the policy runs detached
-		// from their caller (see WithBaseContext); nil leaves them bounded by
-		// WithTimeout only.
+		// detach holds the base context of the calls the policy runs
+		// detached from their caller, from which derive makes their context
+		// (see WithBaseContext); nil leaves them bounded by WithTimeout only.
 		detach detacher
 
 		timeout           *time.Duration

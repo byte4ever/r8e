@@ -378,3 +378,45 @@ func TestWithBaseContextEndedCachesNoFailure(t *testing.T) {
 		})
 	}
 }
+
+// A genuine failure is cached negatively while the base context is live, and
+// no longer once it has ended.
+func TestWithBaseContextNegativeCache(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		endBase   bool
+		wantCalls int64
+	}{
+		"live base: the second call hits the negative entry": {endBase: false, wantCalls: 1},
+		"ended base: nothing is cached negatively":           {endBase: true, wantCalls: 2},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			base, cancelBase := context.WithCancelCause(t.Context())
+			defer cancelBase(nil)
+
+			if tt.endBase {
+				cancelBase(errShutdown)
+			}
+
+			p := NewPolicy[string]("",
+				WithBaseContext(base),
+				WithCache(newMemCache[CacheEntry[string]](), cacheKeyOf, time.Hour, NegativeCache(time.Hour)),
+				WithTimeout(time.Hour),
+			)
+
+			var calls atomic.Int64
+
+			for range 2 {
+				_, err := p.Do(withKeys(t.Context(), "k", ""), errFn(errDownstream, &calls))
+				require.ErrorIs(t, err, errDownstream)
+			}
+
+			assert.Equal(t, tt.wantCalls, calls.Load())
+		})
+	}
+}
