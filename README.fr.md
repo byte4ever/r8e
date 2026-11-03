@@ -998,10 +998,18 @@ jusqu'à la coupure par `WithTimeout`. `WithBaseContext(ctx)` les rattache à un
 contexte que contrôle le propriétaire de la politique. Annulez `ctx` à l'arrêt
 du client et les deux s'arrêtent : leur contexte se termine avec la cause de
 `ctx`. Ils gardent les valeurs du contexte de l'appelant et ignorent toujours
-l'annulation propre à l'appelant. Les appels faits sur le chemin de l'appelant
-ne sont pas touchés. L'option se pose en code uniquement, et `Reconfigure` ne la
-change pas. Il n'y a pas de `Policy.Close` : une politique est souvent partagée,
-et la fermer couperait les appels des autres appelants.
+l'annulation propre à l'appelant.
+
+Une fois `ctx` terminé, la politique arrête tous ses appels détachés, pour tous
+ceux qui la partagent, y compris les appels lancés après. Un appel avec une clé
+de coalescing échoue tout de suite avec `context.Canceled`. Un rechargement en
+avance s'arrête sans remonter d'erreur, et l'entrée garde sa valeur jusqu'à son
+expiration. Un appel sans clé de coalescing tourne toujours sur le contexte de
+son appelant. Aucun échec n'entre dans le cache négatif une fois `ctx` terminé :
+l'arrêt du client n'atteint donc jamais un appel suivant par le cache, ni une
+autre politique qui partage ce cache. Ne posez `ctx` que sur une politique dont
+tous les utilisateurs s'arrêtent avec son propriétaire. L'option se pose en code
+uniquement, et `Reconfigure` ne la change pas.
 
 ```go
 base, stop := context.WithCancelCause(context.Background())

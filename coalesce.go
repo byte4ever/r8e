@@ -140,7 +140,7 @@ func (c *Coalescer[T]) execute(
 	// Detach cancellation and deadline so no single caller can abort the group's
 	// work; context values (trace spans, etc.) are preserved from the leader.
 	// The policy's base context, when set, still ends it.
-	detached, stop := c.detach.run(parent)
+	detached, stop := c.detach.derive(parent)
 	defer stop()
 
 	call.val, call.err = next(detached)

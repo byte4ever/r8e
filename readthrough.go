@@ -396,8 +396,10 @@ func (rc *ReadThroughCache[T]) Do(
 		// downstream built from it (a gRPC status, a %v wrap). The state of
 		// ctx decides, not the error, and a deadline set by an enclosing
 		// policy counts too: caching it would fail callers of this key that
-		// carry no such deadline.
-		if rc.negTTL > 0 && !contextEnded(ctx) {
+		// carry no such deadline. The same holds once the policy's base
+		// context has ended (see WithBaseContext): a coalesced call it stopped
+		// fails a caller whose own context is still live.
+		if rc.negTTL > 0 && !contextEnded(ctx) && !rc.detach.ended() {
 			rc.storeNegative(key, err)
 		}
 
@@ -574,7 +576,7 @@ func (rc *ReadThroughCache[T]) refresh(
 ) {
 	defer rc.endRefresh(key)
 
-	detached, stop := rc.detach.run(parent)
+	detached, stop := rc.detach.derive(parent)
 	defer stop()
 
 	result, err := next(detached)

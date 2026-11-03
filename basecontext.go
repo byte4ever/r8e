@@ -2,9 +2,10 @@ package r8e
 
 import "context"
 
-// detacher builds the context a call detached from its caller runs under (see
-// detachedContext). The zero value detaches with no base context.
-type detacher func(parent context.Context) (ctx context.Context, stop func())
+// detacher returns the base context of the calls a policy runs detached from
+// their caller (see WithBaseContext). It is a func, not a stored
+// context.Context, so no struct holds a context. The zero value has no base.
+type detacher func() context.Context
 
 // WithBaseContext ties the calls a policy runs detached from their caller to
 // ctx: the shared call of [WithCoalesce] and the background reload of
@@ -15,33 +16,46 @@ type detacher func(parent context.Context) (ctx context.Context, stop func())
 // can stop them when it shuts down. They keep the values of the caller's
 // context and still ignore the caller's own cancellation.
 //
-// The base context only stops detached calls; a call on the caller's path is
-// not affected. A nil ctx is ignored. Code-only: it has no config key and
-// Reconfigure does not change it. A policy has no close method of its own,
-// because it is often shared and closing it would cut other callers' calls.
+// Once ctx has ended, the policy stops every detached call, for every holder
+// of the policy, including the calls started after the end: a call with a
+// coalescing key fails at once with [context.Canceled] (the cause is on the
+// context fn would get), and a refresh-ahead reload stops with no error
+// surfacing, the entry keeping its value until it expires. A call with no
+// coalescing key still runs on its caller's context. No failure is cached
+// negatively once ctx has ended, so the end of ctx never reaches a later call
+// through the cache, nor another policy sharing it. Set ctx only on a policy
+// whose holders all stop with its owner.
+//
+// A nil ctx is ignored. Code-only: it has no config key and Reconfigure does
+// not change it.
 func WithBaseContext(ctx context.Context) Option {
 	return optionFunc(func(s *policySetup) {
 		if ctx != nil {
-			s.detach = detachFrom(ctx)
+			s.detach = func() context.Context { return ctx }
 		}
 	})
 }
 
-// detachFrom returns the detacher whose calls also end when base ends.
-func detachFrom(base context.Context) detacher {
-	return func(parent context.Context) (context.Context, func()) {
-		return detachedContext(parent, base)
+// base returns the base context, or nil when there is none.
+func (d detacher) base() context.Context {
+	if d == nil {
+		return nil
 	}
+
+	return d()
 }
 
-// run detaches parent: with the base context d was built from, or with none
-// when d is nil.
-func (d detacher) run(parent context.Context) (ctx context.Context, stop func()) {
-	if d == nil {
-		return detachedContext(parent, nil)
-	}
+// derive returns the context a call detached from parent runs under, and the
+// stop func to call once the call returns (see detachedContext).
+func (d detacher) derive(parent context.Context) (ctx context.Context, stop func()) {
+	return detachedContext(parent, d.base())
+}
 
-	return d(parent)
+// ended reports whether the base context has ended. It is false with no base.
+func (d detacher) ended() bool {
+	base := d.base()
+
+	return base != nil && base.Err() != nil
 }
 
 // detachedContext returns the context a detached call runs under: parent's

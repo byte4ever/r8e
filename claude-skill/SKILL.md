@@ -577,7 +577,11 @@ caller cancelling never aborts the group, and each caller still bails on its own
 detached calls (the coalesced call and the `RefreshAhead` reload) to a context
 the policy's owner controls: cancelling it stops them, with its cause, on client
 shutdown; caller values are kept and the caller's own cancellation is still
-ignored. Code-only, not changed by Reconfigure; there is no `Policy.Close`. Two `NewPolicy` panics: a **nil** keyFn
+ignored. Once it has ended, every coalesced call of the policy (every holder,
+including calls started later) fails at once with `context.Canceled`, reloads
+stop silently, calls with no coalescing key still run, and no failure is
+negatively cached. Set it only on a policy whose holders all stop with its
+owner. Code-only, not changed by Reconfigure. Two `NewPolicy` panics: a **nil** keyFn
 → `r8e.ErrCoalesceNilKeyFunc`; **no `WithTimeout`** → `r8e.ErrCoalesceWithoutTimeout`.
 Not a cache (only dedups time-overlapping calls). Usable standalone via
 `r8e.NewCoalescer[T](hooks)` + `c.Do(ctx, key, fn)` (bound `fn` yourself — no

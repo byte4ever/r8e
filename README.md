@@ -976,10 +976,17 @@ policy stops a detached call: the shared call above and the refresh-ahead reload
 run until `fn` returns or `WithTimeout` cuts them. `WithBaseContext(ctx)` ties
 them to a context the owner of the policy controls. Cancel `ctx` when the
 client shuts down and both stop: their context ends with `ctx`'s cause. They
-keep the caller's values and still ignore the caller's own cancellation. Calls
-on the caller's path are not affected. Code-only, and `Reconfigure` does not
-change it. There is no `Policy.Close`: a policy is often shared, and closing it
-would cut other callers' calls.
+keep the caller's values and still ignore the caller's own cancellation.
+
+Once `ctx` has ended, the policy stops every detached call for every holder of
+the policy, including calls started after the end. A call with a coalescing key
+fails at once with `context.Canceled`, and a refresh-ahead reload stops without
+any error surfacing (the entry keeps its value until it expires). A call with
+no coalescing key still runs on its caller's context. No failure is cached
+negatively once `ctx` has ended, so the shutdown never reaches a later call
+through the cache, nor another policy sharing it. Set `ctx` only on a policy
+whose holders all stop with its owner. Code-only, and `Reconfigure` does not
+change it.
 
 ```go
 base, stop := context.WithCancelCause(context.Background())
