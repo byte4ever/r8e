@@ -26,7 +26,7 @@ l'utilisateur.
 
 | Concept | Detail |
 |---|---|
-| `Client` | Enveloppe `http.Client` + `r8e.Policy` + `Classifier` |
+| `Client` | Enveloppe `http.Client` + `r8e.Policy` + un `Classifier` (`NewClient`) ou un `ResponseClassifier` (`NewResponseClient`) |
 | `NewClient` | Constructeur — passer un nom, un client HTTP, un classificateur et des options r8e |
 | `Client.Do` | Execute `*http.Request` a travers la politique de resilience |
 | `Classifier` | `func(statusCode int) ErrorClass` — associe les codes de statut aux classes d'erreur |
@@ -35,6 +35,10 @@ l'utilisateur.
 | `StatusError` | Type d'erreur portant le `*http.Response` original pour inspection (ajouté par `NewClient` ; un `ResponseClassifier` le renvoie lui-même) |
 
 ## Flux de requete
+
+Le diagramme montre un `Client` construit par `NewClient`. Avec
+`NewResponseClient`, le `ResponseClassifier` prend la place du `Classifier`, et
+son erreur revient telle quelle, sans `StatusError` ajouté.
 
 ```mermaid
 flowchart TD
@@ -178,7 +182,12 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   streaming ou une connexion upgradée (101) reste telle quelle.
 - `body` est la seule vue du classifier sur le corps : pendant l'appel,
   `resp.Body` vaut `http.NoBody`, et le classifier ne peut pas consommer le
-  corps que reçoit l'appelant.
+  corps que reçoit l'appelant. Ne modifiez pas `body` : l'appelant relit ces
+  mêmes octets.
+- Le classifier tourne dans la tentative : sur une autre goroutine que celle de
+  l'appelant, en parallèle de lui-même (appels `Do` concurrents, `WithHedge`),
+  et parfois après le retour de `Do` (une tentative coupée par `WithTimeout`).
+  Tout état qu'il partage doit supporter l'accès concurrent.
 - Quand l'erreur n'est pas permanente, un retry peut suivre : le corps est vidé
   puis fermé pour réutiliser la connexion. Une erreur permanente, ou `nil`,
   laisse le corps lisible.

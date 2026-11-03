@@ -251,8 +251,10 @@ func TestResponseClassifierHidesTheBody(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
+			body := newTrackedBody("payload")
+
 			hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-				return respond(status, io.NopCloser(strings.NewReader("payload"))), nil
+				return respond(status, body), nil
 			})}
 
 			var stolen int
@@ -272,6 +274,7 @@ func TestResponseClassifierHidesTheBody(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Zero(t, stolen, "resp.Body is empty during the call")
+			assert.False(t, body.closed.Load(), "the classifier's Close does not reach the body")
 			assert.Equal(t, "payload", string(got), "the caller reads the whole body")
 		})
 	}
@@ -313,10 +316,12 @@ func TestResponseClassifierStatusErrorKeepsRetryAfter(t *testing.T) {
 	})
 }
 
-// A 101 upgrade is not read: Do returns at once and the caller writes on the
-// upgraded connection.
-func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
-	t.Parallel()
+// newEchoUpgradeServer answers every request with a 101 upgrade, then echoes
+// one line back prefixed with "echo:". It gives up on a connection after 3s, so
+// a client that waits on the upgraded connection fails its test instead of
+// hanging it.
+func newEchoUpgradeServer(t *testing.T) *httptest.Server {
+	t.Helper()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		conn, rw, err := http.NewResponseController(w).Hijack()
@@ -326,8 +331,6 @@ func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
 
 		defer conn.Close()
 
-		// The server gives up after 3s, so a client that waits on the
-		// upgraded connection fails the test below instead of hanging it.
 		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
@@ -343,21 +346,24 @@ func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
+	return srv
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, http.NoBody)
+// upgradeRequest builds a request to url that asks for the echo protocol.
+func upgradeRequest(t *testing.T, ctx context.Context, url string) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "echo")
 
-	var sawNil atomic.Bool
+	return req
+}
 
-	cl := httpx.NewResponseClient("", srv.Client(), func(_ *http.Response, body []byte) error {
-		sawNil.Store(body == nil)
-
-		return nil
-	})
+// doWithin runs cl.Do and fails the test when Do has not returned within 2s.
+func doWithin(t *testing.T, cl *httpx.Client, req *http.Request) (*http.Response, error) {
+	t.Helper()
 
 	type result struct {
 		resp *http.Response
@@ -367,19 +373,39 @@ func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
 	done := make(chan result, 1)
 
 	go func() {
-		resp, err := cl.Do(ctx, req)
+		resp, err := cl.Do(req.Context(), req)
 		done <- result{resp: resp, err: err}
 	}()
 
-	var res result
-
 	select {
-	case res = <-done:
+	case res := <-done:
+		return res.resp, res.err
 	case <-time.After(2 * time.Second):
 		require.FailNow(t, "Do waits on the upgraded connection")
-	}
 
-	resp, err := res.resp, res.err
+		return nil, nil
+	}
+}
+
+// A 101 upgrade is not read: Do returns at once and the caller writes on the
+// upgraded connection.
+func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
+	t.Parallel()
+
+	srv := newEchoUpgradeServer(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	var sawNil atomic.Bool
+
+	cl := httpx.NewResponseClient("", srv.Client(), func(_ *http.Response, body []byte) error {
+		sawNil.Store(body == nil)
+
+		return nil
+	})
+
+	resp, err := doWithin(t, cl, upgradeRequest(t, ctx, srv.URL))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
 
@@ -396,6 +422,56 @@ func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
 
 	assert.Equal(t, "echo:ping\n", got)
 	assert.True(t, sawNil.Load(), "the classifier gets no body for a 1xx")
+}
+
+// A 101 whose outcome may be retried is closed, not drained: draining an
+// upgraded connection would wait on the peer. Both constructors return at
+// once.
+func TestRetriableUpgradeIsNotDrained(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		client func(hc *http.Client) *httpx.Client
+		check  func(t *testing.T, err error)
+	}{
+		"ResponseClassifier": {
+			client: func(hc *http.Client) *httpx.Client {
+				return httpx.NewResponseClient("", hc, func(*http.Response, []byte) error { return errTokenExpired })
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				require.ErrorIs(t, err, errTokenExpired)
+			},
+		},
+		"Classifier": {
+			client: func(hc *http.Client) *httpx.Client {
+				return httpx.NewClient("", hc, func(int) httpx.ErrorClass { return httpx.Transient })
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+
+				var statusErr *httpx.StatusError
+
+				require.ErrorAs(t, err, &statusErr)
+				assert.Equal(t, http.StatusSwitchingProtocols, statusErr.StatusCode)
+				assert.False(t, r8e.IsPermanent(err))
+			},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newEchoUpgradeServer(t)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+
+			_, err := doWithin(t, tt.client(srv.Client()), upgradeRequest(t, ctx, srv.URL))
+			tt.check(t, err)
+		})
+	}
 }
 
 // errReader fails every read.

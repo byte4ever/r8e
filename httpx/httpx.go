@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -33,8 +34,8 @@ type (
 
 	// Client wraps an http.Client with an r8e resilience
 	// policy and a classification of each response: by
-	// status code ([NewClient]) or by the whole response
-	// ([NewResponseClient]).
+	// status code ([NewClient]) or by status, headers and
+	// the start of the body ([NewResponseClient]).
 	//
 	// Pattern: Adapter — bridges net/http and r8e's
 	// resilience policy by translating HTTP responses
@@ -138,8 +139,10 @@ func NewClient(
 // built by NewClient, when the Classifier returns
 // Transient or Permanent, the response is wrapped in a
 // StatusError accessible via errors.As. For a Client
-// built by NewResponseClient, the error is the
-// ResponseClassifier's own, with no StatusError added.
+// built by NewResponseClient, an error the
+// ResponseClassifier returns comes back as is, with no
+// StatusError added; a body that cannot be read yields a
+// transient error wrapping the read failure.
 //
 // Each attempt rewinds the request body via req.GetBody, so a retried
 // request with a body (POST/PUT) replays correctly. Requests built with
@@ -150,15 +153,14 @@ func (c *Client) Do(
 	ctx context.Context,
 	req *http.Request,
 ) (*http.Response, error) {
-	//nolint:wrapcheck // policy returns caller's error as-is
-	return c.policy.Do(
+	resp, err := c.policy.Do(
 		ctx,
 		func(ctx context.Context) (*http.Response, error) {
 			attempt := req.Clone(ctx)
 			if req.GetBody != nil {
 				body, gbErr := req.GetBody()
 				if gbErr != nil {
-					return nil, gbErr
+					return nil, fmt.Errorf("httpx: rewind request body: %w", gbErr)
 				}
 
 				attempt.Body = body
@@ -166,11 +168,11 @@ func (c *Client) Do(
 
 			resp, err := c.httpClient.Do(attempt)
 			if err != nil {
-				return nil, err
+				return nil, err //nolint:wrapcheck // *url.Error names method and URL
 			}
 
 			if c.respClassifier != nil {
-				return resp, classifyResponse(resp, c.respClassifier)
+				return resp, classifyResponse(resp, c.respClassifier) //nolint:nilnil // resp and error, as http.Client.Do
 			}
 
 			switch c.classifier(resp.StatusCode) {
@@ -181,14 +183,14 @@ func (c *Client) Do(
 				// TCP connection can be reused on retry.
 				releaseBody(resp)
 
-				return resp, r8e.Transient(
+				return resp, r8e.Transient( //nolint:nilnil // resp and error, as http.Client.Do
 					&StatusError{
 						Response:   resp,
 						StatusCode: resp.StatusCode,
 					},
 				)
 			case Permanent:
-				return resp, r8e.Permanent(
+				return resp, r8e.Permanent( //nolint:nilnil // resp and error, as http.Client.Do
 					&StatusError{
 						Response:   resp,
 						StatusCode: resp.StatusCode,
@@ -202,4 +204,6 @@ func (c *Client) Do(
 			}
 		},
 	)
+
+	return resp, err //nolint:nilnil,wrapcheck // the policy's resp and error, as is
 }

@@ -28,11 +28,20 @@ type (
 	// bytes of the body. Below 300, body is nil and the body is not read, so
 	// a streamed success or an upgraded (101) connection stays as it is.
 	// body is the classifier's only view of the body: during the call,
-	// resp.Body is [http.NoBody], and the caller gets the real body back, to
-	// read from the start.
+	// resp.Body is [http.NoBody]. The classifier must not modify body, since
+	// the caller reads the same bytes back. When the classifier returns nil
+	// or a permanent error, the caller gets the real body back, to read from
+	// the start; any other error drains and closes it, as a retry may follow.
+	//
+	// The classifier runs inside the attempt. It may run on a goroutine other
+	// than the caller's, concurrently with itself (concurrent Do calls on one
+	// Client, the attempts of [r8e.WithHedge]), and after Do has returned (an
+	// attempt cut by [r8e.WithTimeout], a losing hedge). Any state it shares
+	// must be safe for concurrent use.
 	//
 	// Pattern: Strategy — the caller injects the classification logic, which
-	// sees the whole response, without modifying the adapter.
+	// sees the status, the headers and the start of the body, without
+	// modifying the adapter.
 	ResponseClassifier func(resp *http.Response, body []byte) error
 
 	// readCloser pairs a reader with the closer of the body it reads from.
@@ -53,7 +62,8 @@ const MaxClassifiedBody = 64 << 10
 // failure from a final one.
 //
 // When classify's error is not [r8e.Permanent], a retry may follow, so the
-// body is drained and closed to let the connection be reused. A permanent
+// body is drained and closed to let the connection be reused (a 1xx body is
+// only closed). A permanent
 // error, or a nil one, leaves the body readable from the start. A failure
 // reading the body is transient, and classify is not called.
 func NewResponseClient(
@@ -83,7 +93,7 @@ func classifyResponse(resp *http.Response, classify ResponseClassifier) error {
 	if readErr != nil {
 		releaseBody(resp)
 
-		return fmt.Errorf("read response body: %w", readErr)
+		return fmt.Errorf("httpx: read response body: %w", readErr)
 	}
 
 	resp.Body = readCloser{

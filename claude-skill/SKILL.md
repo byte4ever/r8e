@@ -851,17 +851,20 @@ resp, err := client.Do(ctx, req)
 ```
 
 When the status alone is ambiguous (same 403/404 for a retriable and a final
-case), use `httpx.NewResponseClient(name, hc, rc, opts...)` with
-`rc func(resp *http.Response, body []byte) error`: nil = success; the returned
+case), use `httpx.NewResponseClient(name, hc, classify, opts...)` with
+`classify func(resp *http.Response, body []byte) error`: nil = success; the returned
 error is classified as usual (`r8e.Permanent` stops, `r8e.RetryAfterError`
 hints, anything else is transient). The error comes back as is: no
-`StatusError`, no `Retry-After` header read, unless `rc` returns
+`StatusError`, no `Retry-After` header read, unless `classify` returns
 `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}` itself.
 Status >= 300: `body` = first `httpx.MaxClassifiedBody` (64 KiB) bytes and the
 caller still reads the whole body; below 300 (2xx, 101 upgrade): `body` is nil
 and the body is not read. During the call `resp.Body` is `http.NoBody`: `body`
-is rc's only view. A non-permanent error drains and closes the body; a body
-read failure is transient and skips `rc`.
+is classify's only view, and must not be modified (the caller reads the same
+bytes). A non-permanent error drains and closes the body; a body read failure
+is transient and skips `classify`. `classify` runs inside the attempt: maybe on
+another goroutine, concurrently with itself (hedge, concurrent `Do`), and after
+`Do` returned (`WithTimeout` cut) — keep it stateless or synchronised.
 
 ## Presets
 

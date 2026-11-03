@@ -23,7 +23,7 @@ and a user-provided HTTP status code classifier.
 
 | Concept | Detail |
 |---|---|
-| `Client` | Wraps `http.Client` + `r8e.Policy` + `Classifier` |
+| `Client` | Wraps `http.Client` + `r8e.Policy` + a `Classifier` (`NewClient`) or a `ResponseClassifier` (`NewResponseClient`) |
 | `NewClient` | Constructor — pass a name, HTTP client, classifier, and r8e options |
 | `Client.Do` | Executes `*http.Request` through the resilience policy |
 | `Classifier` | `func(statusCode int) ErrorClass` — maps status codes to error classes |
@@ -32,6 +32,10 @@ and a user-provided HTTP status code classifier.
 | `StatusError` | Error type carrying the original `*http.Response` for inspection (added by `NewClient`; a `ResponseClassifier` returns it itself) |
 
 ## Request flow
+
+The diagram shows a `Client` built by `NewClient`. With `NewResponseClient`, the
+`ResponseClassifier` takes the `Classifier`'s place, and its error comes back as
+is, with no `StatusError` added.
 
 ```mermaid
 flowchart TD
@@ -173,7 +177,11 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   an upgraded (101) connection stays as it is.
 - `body` is the classifier's only view of the body: during the call,
   `resp.Body` is `http.NoBody`, so the classifier cannot consume the body the
-  caller gets.
+  caller gets. Do not modify `body`: the caller reads the same bytes back.
+- The classifier runs inside the attempt: on another goroutine than the
+  caller's, concurrently with itself (concurrent `Do` calls, `WithHedge`), and
+  possibly after `Do` has returned (an attempt cut by `WithTimeout`). Any state
+  it shares must be safe for concurrent use.
 - When the error is not permanent, a retry may follow: the body is drained and
   closed so the connection is reused. A permanent error, or `nil`, leaves the
   body readable.
