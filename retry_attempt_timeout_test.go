@@ -505,7 +505,7 @@ func TestPerAttemptTimeoutWrapsACutAttemptRetryIfRejects(t *testing.T) {
 }
 
 // stateCtx is a context whose deadline and error are set by the test, so that
-// attemptDeadlineFired can be driven into the states where the attempt
+// policyDeadlineCut can be driven into the states where the attempt
 // context has not reported an end yet.
 type stateCtx struct {
 	context.Context
@@ -520,7 +520,7 @@ func (c stateCtx) Err() error { return c.err }
 
 // When the attempt context has not reported its end yet, the clock decides:
 // an attempt past its deadline is cut unless the parent was cancelled.
-func TestAttemptDeadlineFiredOnTheClock(t *testing.T) {
+func TestPolicyDeadlineCutOnTheClock(t *testing.T) {
 	t.Parallel()
 
 	past := time.Now().Add(-time.Second)
@@ -541,20 +541,20 @@ func TestAttemptDeadlineFiredOnTheClock(t *testing.T) {
 
 			attempt := stateCtx{Context: context.Background(), deadline: past}
 
-			assert.Equal(t, tt.want, attemptDeadlineFired(tt.parent, attempt))
+			assert.Equal(t, tt.want, policyDeadlineCut(tt.parent, attempt))
 		})
 	}
 }
 
 // An attempt that returns exactly on its deadline, before its context reports
 // it, is cut.
-func TestAttemptDeadlineFiredOnTheDeadline(t *testing.T) {
+func TestPolicyDeadlineCutOnTheDeadline(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
 		parent := stateCtx{Context: context.Background()}
 		attempt := stateCtx{Context: context.Background(), deadline: time.Now()}
 
-		assert.True(t, attemptDeadlineFired(parent, attempt))
+		assert.True(t, policyDeadlineCut(parent, attempt))
 	})
 }

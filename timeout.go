@@ -169,7 +169,8 @@ func DoTimeout[T any](
 }
 
 // policyDeadlineCut reports whether the deadline r8e set on derived (see
-// withPolicyTimeout) cut the call running under it. The deadline must bind
+// withPolicyTimeout) cut the call running under it: the timeout of DoTimeout,
+// or the per-attempt deadline of PerAttemptTimeout. The deadline must bind
 // (see deadlineBinds): one that does not bind leaves derived with parent's
 // deadline. The decision is then the first end derived records: its own
 // deadline means a cut, a parent cancelled before it means none, whatever
