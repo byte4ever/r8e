@@ -2,12 +2,21 @@ package r8e
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// aboveMaxBurst returns MaxBurst+1, computed at run time: on a 32-bit platform
+// it wraps to a negative int, out of range all the same.
+func aboveMaxBurst() int {
+	maxBurst := MaxBurst
+
+	return maxBurst + 1
+}
 
 // admitted drains the bucket without moving the clock and returns how many
 // calls it admitted.
@@ -75,6 +84,7 @@ func TestRateLimiterBurstSurvivesRateChanges(t *testing.T) {
 		rl := NewRateLimiter(100, clk, &Hooks{}, Burst(3))
 
 		rl.Reconfigure(1000)
+		clk.advance(time.Hour)
 		assert.Equal(t, 3, admitted(t, rl), "a higher rate keeps the bucket")
 
 		rl.Reconfigure(0.5)
@@ -188,13 +198,17 @@ func TestBurstOutOfRangePanics(t *testing.T) {
 	maxBurst := MaxBurst
 
 	for _, n := range []int{0, -1, maxBurst + 1} {
-		assert.PanicsWithValue(t, ErrRateLimitBurstOutOfRange, func() {
-			NewRateLimiter(10, RealClock{}, &Hooks{}, Burst(n))
-		}, "Burst(%d) on NewRateLimiter", n)
+		t.Run(fmt.Sprintf("Burst(%d)", n), func(t *testing.T) {
+			t.Parallel()
 
-		assert.PanicsWithValue(t, ErrRateLimitBurstOutOfRange, func() {
-			NewPolicy[string]("", WithRateLimit(10, Burst(n)))
-		}, "Burst(%d) on NewPolicy", n)
+			assert.PanicsWithValue(t, ErrRateLimitBurstOutOfRange, func() {
+				NewRateLimiter(10, RealClock{}, &Hooks{}, Burst(n))
+			}, "on NewRateLimiter")
+
+			assert.PanicsWithValue(t, ErrRateLimitBurstOutOfRange, func() {
+				NewPolicy[string]("", WithRateLimit(10, Burst(n)))
+			}, "on NewPolicy")
+		})
 	}
 
 	assert.NotPanics(t, func() {
@@ -209,11 +223,33 @@ func TestBurstOutOfRangePanics(t *testing.T) {
 func TestBuildOptionsRateLimitBurst(t *testing.T) {
 	t.Parallel()
 
-	opts, err := BuildOptions(&PolicyConfig{RateLimit: f64Ptr(100), RateLimitBurst: intPtr(2)})
-	require.NoError(t, err)
+	tests := []struct {
+		name string
+		cfg  PolicyConfig
+	}{
+		{name: "burst", cfg: PolicyConfig{RateLimit: f64Ptr(100), RateLimitBurst: intPtr(2)}},
+		{
+			name: "burst with aimd",
+			cfg: PolicyConfig{
+				RateLimit:      f64Ptr(100),
+				RateLimitBurst: intPtr(2),
+				AIMD:           &AIMDConfig{},
+			},
+		},
+	}
 
-	policy := NewPolicy[string]("", opts...)
-	assert.Equal(t, 2, admitted(t, policy.rateLimiter))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts, err := BuildOptions(&tt.cfg)
+			require.NoError(t, err)
+
+			clk := newRateLimitClock(time.Now())
+			policy := NewPolicy[string]("", append(opts, WithClock(clk))...)
+			assert.Equal(t, 2, admitted(t, policy.rateLimiter))
+		})
+	}
 }
 
 func TestBuildOptionsRateLimitBurstRejected(t *testing.T) {
@@ -239,6 +275,11 @@ func TestBuildOptionsRateLimitBurstRejected(t *testing.T) {
 			cfg:     PolicyConfig{RateLimit: f64Ptr(100), RateLimitBurst: intPtr(-3)},
 			wantErr: ErrRateLimitBurstOutOfRange,
 		},
+		{
+			name:    "above MaxBurst",
+			cfg:     PolicyConfig{RateLimit: f64Ptr(100), RateLimitBurst: intPtr(aboveMaxBurst())},
+			wantErr: ErrRateLimitBurstOutOfRange,
+		},
 	}
 
 	for _, tt := range tests {
@@ -256,17 +297,16 @@ func TestBuildOptionsRateLimitBurstRejected(t *testing.T) {
 func TestPolicyReconfigureRateLimitBurst(t *testing.T) {
 	t.Parallel()
 
-	policy := NewPolicy[string]("", WithRateLimit(100, Burst(5)))
+	clk := newRateLimitClock(time.Now())
+	policy := NewPolicy[string]("", WithRateLimit(100, Burst(5)), WithClock(clk))
 	rl := policy.rateLimiter
 
 	require.NoError(t, policy.Reconfigure(PolicyConfig{RateLimitBurst: intPtr(2)}))
 	assert.Equal(t, 2, admitted(t, rl))
 
 	require.NoError(t, policy.Reconfigure(PolicyConfig{RateLimit: f64Ptr(1000)}))
-	rl.rateMu.Lock()
-	burst := rl.burst
-	rl.rateMu.Unlock()
-	assert.Equal(t, int64(2), burst, "a reload without the field keeps the burst")
+	clk.advance(time.Hour)
+	assert.Equal(t, 2, admitted(t, rl), "a reload without the field keeps the burst")
 }
 
 // A reload that carries a rate and a burst applies both at once: a full bucket
@@ -275,7 +315,8 @@ func TestPolicyReconfigureRateLimitBurst(t *testing.T) {
 func TestPolicyReconfigureRateAndBurstTogether(t *testing.T) {
 	t.Parallel()
 
-	policy := NewPolicy[string]("", WithRateLimit(100, Burst(100)))
+	clk := newRateLimitClock(time.Now())
+	policy := NewPolicy[string]("", WithRateLimit(100, Burst(100)), WithClock(clk))
 
 	require.NoError(t, policy.Reconfigure(PolicyConfig{
 		RateLimit:      f64Ptr(0.5),
@@ -290,14 +331,32 @@ func TestPolicyReconfigureRateAndBurstTogether(t *testing.T) {
 func TestPolicyReconfigureRateLimitBurstRejected(t *testing.T) {
 	t.Parallel()
 
-	t.Run("out of range", func(t *testing.T) {
+	for _, burst := range []int{0, aboveMaxBurst()} {
+		t.Run(fmt.Sprintf("out of range %d", burst), func(t *testing.T) {
+			t.Parallel()
+
+			clk := newRateLimitClock(time.Now())
+			policy := NewPolicy[string]("", WithRateLimit(100, Burst(5)), WithClock(clk))
+
+			err := policy.Reconfigure(PolicyConfig{RateLimit: f64Ptr(1), RateLimitBurst: intPtr(burst)})
+			require.ErrorIs(t, err, ErrRateLimitBurstOutOfRange)
+			assert.InDelta(t, 100.0, policy.rateLimiter.CurrentRate(), 1e-9)
+			assert.Equal(t, 5, admitted(t, policy.rateLimiter))
+		})
+	}
+
+	// A valid burst next to a field that fails is not applied either.
+	t.Run("valid burst, invalid aimd", func(t *testing.T) {
 		t.Parallel()
 
-		policy := NewPolicy[string]("", WithRateLimit(100, Burst(5)))
+		clk := newRateLimitClock(time.Now())
+		policy := NewPolicy[string]("", WithRateLimit(100, Burst(5)), WithClock(clk))
 
-		err := policy.Reconfigure(PolicyConfig{RateLimit: f64Ptr(1), RateLimitBurst: intPtr(0)})
-		require.ErrorIs(t, err, ErrRateLimitBurstOutOfRange)
-		assert.InDelta(t, 100.0, policy.rateLimiter.CurrentRate(), 1e-9)
+		err := policy.Reconfigure(PolicyConfig{
+			RateLimitBurst: intPtr(2),
+			AIMD:           &AIMDConfig{Backoff: f64Ptr(0.9)},
+		})
+		require.ErrorIs(t, err, ErrAIMDWithoutRateLimit)
 		assert.Equal(t, 5, admitted(t, policy.rateLimiter))
 	})
 
@@ -308,6 +367,7 @@ func TestPolicyReconfigureRateLimitBurstRejected(t *testing.T) {
 
 		err := policy.Reconfigure(PolicyConfig{RateLimitBurst: intPtr(2)})
 		require.ErrorIs(t, err, ErrPatternAbsent)
+		assert.ErrorContains(t, err, "rate_limit")
 	})
 
 	// A reload retunes a burst, it cannot add one: a rolled-back file would
@@ -315,10 +375,12 @@ func TestPolicyReconfigureRateLimitBurstRejected(t *testing.T) {
 	t.Run("rate limiter built without Burst", func(t *testing.T) {
 		t.Parallel()
 
-		policy := NewPolicy[string]("", WithRateLimit(100))
+		clk := newRateLimitClock(time.Now())
+		policy := NewPolicy[string]("", WithRateLimit(100), WithClock(clk))
 
 		err := policy.Reconfigure(PolicyConfig{RateLimit: f64Ptr(5), RateLimitBurst: intPtr(2)})
 		require.ErrorIs(t, err, ErrPatternAbsent)
+		assert.ErrorContains(t, err, "rate_limit_burst")
 		assert.InDelta(t, 100.0, policy.rateLimiter.CurrentRate(), 1e-9)
 		assert.Equal(t, 100, admitted(t, policy.rateLimiter))
 	})
