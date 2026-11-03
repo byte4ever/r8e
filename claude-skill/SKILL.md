@@ -573,7 +573,17 @@ the chain while each caller keeps its own fallback.
 The shared call runs under a **detached context** (`context.WithoutCancel`): one
 caller cancelling never aborts the group, and each caller still bails on its own
 `ctx.Done()`. Detaching strips the deadline, so **`WithCoalesce` requires
-`WithTimeout`** to bound the shared call. Two `NewPolicy` panics: a **nil** keyFn
+`WithTimeout`** to bound the shared call. `r8e.WithBaseContext(ctx)` ties the
+detached calls (the coalesced call and the `RefreshAhead` reload) to a context
+the policy's owner controls: cancelling it stops them, with its cause, on client
+shutdown; caller values are kept and the caller's own cancellation is still
+ignored. Once it has ended, every coalesced call of the policy that misses the
+cache (every holder, including calls started later) fails at once with
+`context.Canceled` (a cache hit, StaleIfError or WithFallback still answers),
+reloads stop silently, calls with no coalescing key still run, and this policy
+stores no negative entry; a policy or cache wrapping it still caches the
+`context.Canceled` it returns. Set it only on a policy whose holders all stop
+with its owner. Code-only, not changed by Reconfigure. Two `NewPolicy` panics: a **nil** keyFn
 → `r8e.ErrCoalesceNilKeyFunc`; **no `WithTimeout`** → `r8e.ErrCoalesceWithoutTimeout`.
 Not a cache (only dedups time-overlapping calls). Usable standalone via
 `r8e.NewCoalescer[T](hooks)` + `c.Do(ctx, key, fn)` (bound `fn` yourself — no
