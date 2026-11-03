@@ -1242,43 +1242,51 @@ func TestApplyHardDeadlineKeepsARetryRefusalWhenTheCallerEndsAfter(t *testing.T)
 func TestBudgetDeadlineCtxSettleDecidesFromTheParent(t *testing.T) {
 	t.Parallel()
 
+	now := time.Now()
+	own := now.Add(-2 * time.Hour) // earlier than every parent below: it binds
+
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	live, cancelLive := context.WithDeadline(
-		context.Background(), time.Now().Add(time.Hour),
-	)
+	live, cancelLive := context.WithDeadline(context.Background(), now.Add(time.Hour))
 	t.Cleanup(cancelLive)
 
-	expired, cancelExpired := context.WithDeadline(
-		context.Background(), time.Now().Add(-time.Hour),
-	)
+	expired, cancelExpired := context.WithDeadline(context.Background(), now.Add(-time.Hour))
 	t.Cleanup(cancelExpired)
 
 	tests := []struct {
 		parent      context.Context
 		wantErr     error
+		deadline    time.Time
+		at          time.Time
 		name        string
 		ownDeadline bool
 		wantCut     bool
 	}{
 		{
-			name: "parent live", parent: context.Background(), ownDeadline: true,
-			wantErr: context.DeadlineExceeded, wantCut: true,
+			name: "parent live", parent: context.Background(), deadline: own, at: now,
+			ownDeadline: true, wantErr: context.DeadlineExceeded, wantCut: true,
 		},
 		{
-			name: "parent cancelled", parent: cancelled, ownDeadline: true,
-			wantErr: context.Canceled,
+			name: "parent live, own deadline not due", parent: context.Background(),
+			deadline: own, at: own.Add(-time.Nanosecond), ownDeadline: true,
 		},
 		{
-			name: "parent past its later deadline", parent: expired, ownDeadline: true,
-			wantErr: context.DeadlineExceeded, wantCut: true,
+			name: "parent cancelled", parent: cancelled, deadline: own, at: now,
+			ownDeadline: true, wantErr: context.Canceled,
+		},
+		{
+			name: "parent past its later deadline", parent: expired, deadline: own, at: now,
+			ownDeadline: true, wantErr: context.DeadlineExceeded, wantCut: true,
 		},
 		{
 			name: "parent past the deadline it set", parent: expired,
-			wantErr: context.DeadlineExceeded,
+			deadline: now.Add(-time.Hour), at: now, wantErr: context.DeadlineExceeded,
 		},
-		{name: "parent live, with the deadline it set", parent: live},
+		{
+			name: "parent live, with the deadline it set", parent: live,
+			deadline: now.Add(time.Hour), at: now,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1288,10 +1296,11 @@ func TestBudgetDeadlineCtxSettleDecidesFromTheParent(t *testing.T) {
 			c := &budgetDeadlineCtx{
 				parent:      tt.parent,
 				done:        make(chan struct{}),
+				deadline:    tt.deadline,
 				ownDeadline: tt.ownDeadline,
 			}
 
-			c.settle()
+			c.settle(tt.at)
 
 			if tt.wantErr == nil {
 				require.NoError(t, c.Err(), "nothing has ended yet")
