@@ -1017,6 +1017,39 @@ l'appelant — c'est pourquoi le coalescing **exige** un `WithTimeout` pour born
 le travail partagé ; sans lui, un leader dont le `fn` ne retourne jamais
 parquerait une goroutine et figerait sa clé.
 
+**Arrêter les appels détachés à l'arrêt du client (`WithBaseContext`).** Rien en
+dehors de la politique n'arrête un appel détaché : l'appel partagé ci-dessus et
+le rechargement en avance (refresh-ahead) tournent jusqu'au retour de `fn` ou
+jusqu'à la coupure par `WithTimeout`. `WithBaseContext(ctx)` les rattache à un
+contexte que contrôle le propriétaire de la politique. Annulez `ctx` à l'arrêt
+du client et les deux s'arrêtent : leur contexte se termine avec la cause de
+`ctx`. Ils gardent les valeurs du contexte de l'appelant et ignorent toujours
+l'annulation propre à l'appelant.
+
+Une fois `ctx` terminé, la politique arrête tous ses appels détachés, pour tous
+ceux qui la partagent, y compris les appels lancés après. Un appel avec une clé
+de coalescing qui rate le cache échoue tout de suite avec `context.Canceled`. Un
+hit du cache, une valeur périmée (`StaleIfError`) ou `WithFallback` lui
+répondent quand même. Un rechargement en avance s'arrête sans remonter
+d'erreur, et l'entrée garde sa valeur jusqu'à son expiration. Un appel sans clé
+de coalescing tourne toujours sur le contexte de son appelant. Une fois `ctx`
+terminé, cette politique n'écrit plus d'entrée négative. En revanche, une
+politique ou un cache qui l'enveloppe met quand même en cache le
+`context.Canceled` qu'elle renvoie. Ne posez `ctx` que sur une politique dont
+tous les utilisateurs s'arrêtent avec son propriétaire. L'option se pose en code
+uniquement, et `Reconfigure` ne la change pas.
+
+```go
+base, stop := context.WithCancelCause(context.Background())
+defer stop(errors.New("client closed"))
+
+policy := r8e.NewPolicy[User]("users",
+    r8e.WithBaseContext(base),
+    r8e.WithCoalesce(userKey),
+    r8e.WithTimeout(2*time.Second),
+)
+```
+
 Observabilité : les hooks `OnCoalesceLeader` / `OnCoalesceFollower`, les
 compteurs `CoalesceLeaders` / `CoalesceFollowers` (leur ratio est le taux de
 déduplication) et la jauge `CoalesceInFlight`. Le coalescing est une optimisation

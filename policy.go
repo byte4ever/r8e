@@ -102,6 +102,10 @@ type (
 		clock    Clock
 		hooks    Hooks
 		registry *Registry
+		// detach holds the base context of the calls the policy runs
+		// detached from their caller, from which derive makes their context
+		// (see WithBaseContext); nil leaves them bounded by WithTimeout only.
+		detach detacher
 
 		timeout           *time.Duration
 		timeoutAdaptive   *adaptiveTimeoutConfig
@@ -1355,6 +1359,10 @@ func cacheAndCoalesceEntries[T any](
 			extra = append(extra, cacheHandOff())
 		}
 
+		if setup.detach != nil {
+			extra = append(extra, cacheDetach(setup.detach))
+		}
+
 		entry, readThrough = newCacheEntry[T](setup.cache, clock, hooks, extra...)
 		entries = append(entries, entry)
 	}
@@ -1364,6 +1372,7 @@ func cacheAndCoalesceEntries[T any](
 	}
 
 	coalescer := NewCoalescer[T](hooks)
+	coalescer.detach = setup.detach
 	entries = append(entries, newCoalesceEntry[T](coalescer, setup.coalesce.keyFn, readThrough))
 
 	return entries, coalescer
