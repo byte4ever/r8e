@@ -167,6 +167,8 @@ r8e.WithRetry(maxAttempts int, strategy BackoffStrategy, opts ...RetryOption)
 
 **Options**: `r8e.MaxDelay(d)`, `r8e.PerAttemptTimeout(d)`, `r8e.RetryIf(func(error) bool)`.
 
+An attempt cut by `PerAttemptTimeout` while the caller's ctx is alive carries `r8e.ErrAttemptTimeout` around its own error (`context.DeadlineExceeded` stays in the chain), fires `OnAttemptTimeout(attempt)` and counts in the `AttemptTimeouts` metric. It does not when the caller's deadline, `WithTimeout` or a time budget ends the attempt first: keep `PerAttemptTimeout` strictly shorter than those.
+
 Returns `r8e.ErrRetriesExhausted` wrapping the last error.
 
 **Retry-After**: if a failed attempt's error implements `r8e.RetryAfterProvider`
@@ -656,6 +658,7 @@ r8e.WithHooks(&r8e.Hooks{
     OnBulkheadTimeout:  func() {},  // queued caller gave up after max-wait
     OnCoDelShed:        func() {},  // controlled-delay queue shed a stale caller under overload
     OnTimeout:          func() {},
+    OnAttemptTimeout:   func(attempt int) {}, // retry attempt cut by PerAttemptTimeout
     OnHedgeTriggered:   func() {},
     OnHedgeWon:         func() {},
     OnFallbackUsed:     func(err error) {},

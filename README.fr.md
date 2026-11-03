@@ -268,6 +268,8 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
+**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative alors que le contexte de l'appelant est encore vivant, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline, et `errors.Is(err, context.DeadlineExceeded)` reste vrai. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée.
+
 **Retry-After :** si l'erreur d'une tentative échouée implémente
 `r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
 ce délai à la place du backoff calculé : l'attente exacte demandée par le serveur

@@ -62,6 +62,8 @@ type (
 		RetryBudgetExceeded int64 `json:"retry_budget_exceeded"`
 		// TimeBudgetExceeded counts retries stopped early by the time budget.
 		TimeBudgetExceeded int64 `json:"time_budget_exceeded"`
+		// AttemptTimeouts counts retry attempts cut by [PerAttemptTimeout].
+		AttemptTimeouts int64 `json:"attempt_timeouts"`
 		// CoalesceLeaders counts calls that ran a shared execution; together with
 		// CoalesceFollowers it gives the deduplication ratio
 		// followers/(leaders+followers).
@@ -241,6 +243,7 @@ type (
 		rateAdaptations      atomic.Int64
 		slowCallRateExceeded atomic.Int64
 		timeBudgetExceeded   atomic.Int64
+		attemptTimeouts      atomic.Int64
 		cacheHits            atomic.Int64
 		cacheMisses          atomic.Int64
 		cacheStores          atomic.Int64
@@ -307,6 +310,13 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 		OnBulkheadTimeout:  countingHook(&m.bulkheadTimeouts, user.OnBulkheadTimeout),
 		OnCoDelShed:        countingHook(&m.codelShed, user.OnCoDelShed),
 		OnTimeout:          countingHook(&m.timeouts, user.OnTimeout),
+		OnAttemptTimeout: func(attempt int) {
+			m.attemptTimeouts.Add(1)
+
+			if user.OnAttemptTimeout != nil {
+				user.OnAttemptTimeout(attempt)
+			}
+		},
 		OnHedgeTriggered:   countingHook(&m.hedgesTriggered, user.OnHedgeTriggered),
 		OnHedgeWon:         countingHook(&m.hedgesWon, user.OnHedgeWon),
 		OnFallbackUsed: func(err error) {
@@ -386,6 +396,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		RateAdaptations:           p.metrics.rateAdaptations.Load(),
 		SlowCallRateExceeded:      p.metrics.slowCallRateExceeded.Load(),
 		TimeBudgetExceeded:        p.metrics.timeBudgetExceeded.Load(),
+		AttemptTimeouts:           p.metrics.attemptTimeouts.Load(),
 		CacheHits:                 p.metrics.cacheHits.Load(),
 		CacheMisses:               p.metrics.cacheMisses.Load(),
 		CacheStores:               p.metrics.cacheStores.Load(),

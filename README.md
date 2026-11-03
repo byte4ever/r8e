@@ -266,6 +266,8 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
+**Attempts cut by `PerAttemptTimeout`.** When that deadline cuts an attempt while the caller's context is still alive, the attempt's error is wrapped with `ErrAttemptTimeout`, so `errors.Is(err, r8e.ErrAttemptTimeout)` tells r8e's cut apart from the expiry of your own deadline, while `errors.Is(err, context.DeadlineExceeded)` stays true. `OnAttemptTimeout(attempt int)` fires for each cut attempt (1-indexed) and the `AttemptTimeouts` metric counts them. The deadline binds only when it is earlier than the caller's and than any enclosing `WithTimeout` or time budget; an attempt ended by one of those carries no `ErrAttemptTimeout`. An attempt whose function returns its own error on the deadline, before the context reports it, still counts as cut.
+
 **Retry-After:** if a failed attempt's error implements `r8e.RetryAfterProvider`
 (`RetryAfter() (time.Duration, bool)`), retry honors that delay in place of the computed backoff — the precise wait a
 server asked for beats anything you'd guess. The hint is capped by `MaxDelay`, then

@@ -42,7 +42,13 @@ func MaxDelay(d time.Duration) RetryOption {
 	}
 }
 
-// PerAttemptTimeout sets a timeout for each individual retry attempt.
+// PerAttemptTimeout sets a timeout for each individual retry attempt. When that
+// deadline cuts an attempt while the caller's context is still alive, the
+// attempt's error is wrapped with [ErrAttemptTimeout] (keeping
+// context.DeadlineExceeded in the chain) and [Hooks.OnAttemptTimeout] fires.
+// The deadline binds only when it is earlier than the caller's and than any
+// enclosing r8e deadline; otherwise the attempt ends on that other deadline and
+// carries no ErrAttemptTimeout.
 func PerAttemptTimeout(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.perAttemptTimeout = d
@@ -106,7 +112,10 @@ func DoRetry[T any](
 			permit = params.Concurrency
 		}
 
-		result, err := runRetryAttempt(ctx, fn, cfg, permit)
+		result, cut, err := runRetryAttempt(ctx, fn, cfg, permit)
+		if cut {
+			params.Hooks.emitAttemptTimeout(attempt + 1)
+		}
 
 		// On success: credit the retry budget and return immediately.
 		if err == nil {
@@ -208,19 +217,55 @@ func runRetryAttempt[T any](
 	fn func(context.Context) (T, error),
 	cfg retryConfig,
 	permit *ConcurrencyBudget,
-) (T, error) {
+) (result T, cut bool, err error) {
 	if permit != nil {
 		defer permit.release()
 	}
 
-	if cfg.perAttemptTimeout > 0 {
-		attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
-		defer attemptCancel()
+	if cfg.perAttemptTimeout <= 0 {
+		result, err = fn(ctx)
 
-		return fn(attemptCtx)
+		return result, false, err
 	}
 
-	return fn(ctx)
+	attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
+	defer attemptCancel()
+
+	result, err = fn(attemptCtx)
+	if err != nil && attemptDeadlineFired(ctx, attemptCtx) {
+		return result, true, fmt.Errorf("%w: %w", ErrAttemptTimeout, err)
+	}
+
+	return result, false, err
+}
+
+// attemptDeadlineFired reports whether the deadline [PerAttemptTimeout] set on
+// attemptCtx is what ended the attempt: the deadline bound (it is earlier than
+// any deadline of parent), its instant has passed, and parent is still alive
+// with no deadline of its own reached. The clock is read directly, so an
+// attempt whose function returns on the deadline before attemptCtx reports it
+// is still attributed to the attempt timeout.
+func attemptDeadlineFired(parent, attemptCtx context.Context) bool {
+	deadline, ok := attemptCtx.Value(policyDeadlineKey{}).(time.Time)
+	if !ok {
+		return false
+	}
+
+	if parentDeadline, inherited := parent.Value(policyDeadlineKey{}).(time.Time); inherited &&
+		parentDeadline.Equal(deadline) {
+		// The attempt deadline did not bind: the recorded instant is the
+		// parent's own r8e deadline.
+		return false
+	}
+
+	now := time.Now()
+	if now.Before(deadline) || parent.Err() != nil {
+		return false
+	}
+
+	callerDeadline, hasDeadline := parent.Deadline()
+
+	return !hasDeadline || now.Before(callerDeadline)
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the
