@@ -47,7 +47,13 @@ first or on the same instant, `Do` returns the caller's context error and
 `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the
 caller's context ends, without
 waiting for the function, which keeps running until it returns: it must
-synchronise whatever it shares with the caller.
+synchronise whatever it shares with the caller. The decision is taken when the
+timeout fires (same rule as `WithTimeBudget(..., PropagateDeadline())`): a
+caller that cancelled first keeps the call; a later cancel or caller deadline
+does not take it back; a downstream returning its own error on the propagated
+deadline still gets `ErrTimeout` + one `OnTimeout`; a failed call the caller
+ended returns the caller's ctx error (an error returned before the caller's ctx
+reports its end stays fn's); a success seen before the timeout stays a success.
 
 **Adaptive timeout (percentile-driven):** `r8e.AdaptiveTimeout(opts...)` (a
 `TimeoutOption`) sizes each call's deadline from a sliding window of recent
