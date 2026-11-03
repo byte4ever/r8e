@@ -50,10 +50,10 @@ type Hooks struct {
 	// OnCoDelShed fires when the bulkhead's controlled-delay discipline sheds a
 	// queued caller because the wait queue was overloaded and the caller had waited
 	// past the slough timeout (see [BulkheadCoDel]), returning [ErrCoDelShed].
-	OnCoDelShed      func()
-	OnTimeout        func()
+	OnCoDelShed func()
+	OnTimeout   func()
 	// OnAttemptTimeout fires when the deadline set by [PerAttemptTimeout] cuts
-	// a retry attempt while the caller's context is still alive; attempt is
+	// a failed retry attempt (decided when the deadline fires); attempt is
 	// 1-indexed, like OnRetry's. The attempt's error is then wrapped with
 	// [ErrAttemptTimeout].
 	OnAttemptTimeout func(attempt int)

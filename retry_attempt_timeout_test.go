@@ -14,8 +14,8 @@ import (
 
 // attemptRecorder collects the attempts OnAttemptTimeout reports.
 type attemptRecorder struct {
-	mu       sync.Mutex
 	attempts []int
+	mu       sync.Mutex
 }
 
 func (r *attemptRecorder) hooks() *Hooks {
@@ -53,7 +53,8 @@ func TestPerAttemptTimeoutWrapsErrAttemptTimeout(t *testing.T) {
 		require.ErrorIs(t, err, ErrRetriesExhausted)
 		require.ErrorIs(t, err, ErrAttemptTimeout)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
-		assert.EqualError(t, err, "retries exhausted: attempt timeout: context deadline exceeded")
+		assert.ErrorContains(t, err, "attempt timeout")
+		assert.ErrorContains(t, err, "deadline exceeded")
 		assert.Equal(t, "attempt_timeout", ErrorCode(err))
 		assert.Equal(t, []int{1, 2, 3}, rec.got())
 	})
@@ -105,13 +106,14 @@ func TestPerAttemptTimeoutLeavesOtherDeadlinesAlone(t *testing.T) {
 			defer cancel()
 
 			_, err := DoRetry[string](ctx, blockUntilDone, RetryParams{
-				MaxAttempts: 3,
+				MaxAttempts: 1,
 				Strategy:    ConstantBackoff(time.Millisecond),
 				Hooks:       rec.hooks(),
 				Clock:       RealClock{},
 				Opts:        []RetryOption{PerAttemptTimeout(10 * time.Millisecond)},
 			})
 
+			require.ErrorIs(t, err, ErrRetriesExhausted, "the attempt's own error is returned")
 			require.ErrorIs(t, err, context.DeadlineExceeded)
 			require.NotErrorIs(t, err, ErrAttemptTimeout)
 			assert.Empty(t, rec.got())
@@ -128,13 +130,14 @@ func TestPerAttemptTimeoutLeavesOtherDeadlinesAlone(t *testing.T) {
 			time.AfterFunc(5*time.Millisecond, cancel)
 
 			_, err := DoRetry[string](ctx, blockUntilDone, RetryParams{
-				MaxAttempts: 3,
+				MaxAttempts: 1,
 				Strategy:    ConstantBackoff(time.Millisecond),
 				Hooks:       rec.hooks(),
 				Clock:       RealClock{},
 				Opts:        []RetryOption{PerAttemptTimeout(10 * time.Millisecond)},
 			})
 
+			require.ErrorIs(t, err, ErrRetriesExhausted, "the attempt's own error is returned")
 			require.ErrorIs(t, err, context.Canceled)
 			require.NotErrorIs(t, err, ErrAttemptTimeout)
 			assert.Empty(t, rec.got())
@@ -160,6 +163,229 @@ func TestPerAttemptTimeoutLeavesOtherDeadlinesAlone(t *testing.T) {
 			require.NotErrorIs(t, err, ErrAttemptTimeout)
 			assert.Empty(t, rec.got())
 		})
+	})
+
+	t.Run("time budget first", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			var rec attemptRecorder
+
+			policy := NewPolicy[string]("",
+				WithTimeBudget(5*time.Millisecond, PropagateDeadline()),
+				WithRetry(1, ConstantBackoff(time.Millisecond),
+					PerAttemptTimeout(10*time.Millisecond)),
+				WithHooks(rec.hooks()),
+			)
+
+			_, err := policy.Do(t.Context(), blockUntilDone)
+
+			require.ErrorIs(t, err, ErrTimeBudgetExceeded)
+			require.NotErrorIs(t, err, ErrAttemptTimeout)
+			assert.Empty(t, rec.got())
+			assert.Equal(t, int64(0), policy.Metrics().AttemptTimeouts)
+		})
+	})
+}
+
+// An attempt that fails with its own error before its deadline is not cut:
+// the error comes back unwrapped and no hook fires, with or without a caller
+// deadline, and through a policy the metric stays at zero.
+func TestPerAttemptTimeoutLeavesAnEarlyFailureAlone(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+	failFast := func(context.Context) (string, error) { return "", errBoom }
+
+	tests := map[string]time.Duration{
+		"no caller deadline":      0,
+		"shorter caller deadline": 5 * time.Millisecond,
+	}
+
+	for name, callerTimeout := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var rec attemptRecorder
+
+				ctx := t.Context()
+
+				if callerTimeout > 0 {
+					var cancel context.CancelFunc
+
+					ctx, cancel = context.WithTimeout(ctx, callerTimeout)
+					defer cancel()
+				}
+
+				_, err := DoRetry[string](ctx, failFast, RetryParams{
+					MaxAttempts: 1,
+					Strategy:    ConstantBackoff(0),
+					Hooks:       rec.hooks(),
+					Clock:       RealClock{},
+					Opts:        []RetryOption{PerAttemptTimeout(10 * time.Millisecond)},
+				})
+
+				require.ErrorIs(t, err, errBoom)
+				require.NotErrorIs(t, err, ErrAttemptTimeout)
+				assert.Empty(t, rec.got())
+			})
+		})
+	}
+
+	t.Run("through a policy", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			policy := NewPolicy[string]("",
+				WithRetry(2, ConstantBackoff(time.Millisecond),
+					PerAttemptTimeout(10*time.Millisecond)),
+			)
+
+			_, err := policy.Do(t.Context(), failFast)
+
+			require.ErrorIs(t, err, errBoom)
+			require.NotErrorIs(t, err, ErrAttemptTimeout)
+			assert.Equal(t, int64(0), policy.Metrics().AttemptTimeouts)
+		})
+	})
+}
+
+// The cut is decided when the attempt deadline fires. What happens to the
+// caller while the cut attempt is still returning does not take it back: a
+// later caller deadline, a cancellation, or a time budget that expires.
+func TestPerAttemptTimeoutDecidesAtTheCut(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+
+	// unwindSlowly stops on its context, then needs 10ms to return.
+	unwindSlowly := func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		time.Sleep(10 * time.Millisecond)
+
+		return "", errBoom
+	}
+
+	// ignoreContext returns its own error at 30ms, whatever its context does.
+	ignoreContext := func(context.Context) (string, error) {
+		time.Sleep(30 * time.Millisecond)
+
+		return "", errBoom
+	}
+
+	tests := map[string]struct {
+		caller func(context.Context) (context.Context, context.CancelFunc)
+		fn     func(context.Context) (string, error)
+	}{
+		"later caller deadline passes during the unwind": {
+			caller: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(ctx, 15*time.Millisecond)
+			},
+			fn: unwindSlowly,
+		},
+		"caller cancels during the unwind": {
+			caller: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(ctx)
+				time.AfterFunc(12*time.Millisecond, cancel)
+
+				return ctx, cancel
+			},
+			fn: unwindSlowly,
+		},
+		"fn ignores its context past a later caller deadline": {
+			caller: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(ctx, 20*time.Millisecond)
+			},
+			fn: ignoreContext,
+		},
+		"detached parent that keeps an r8e deadline value": {
+			caller: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				withValue, cancel := withPolicyTimeout(ctx, 10*time.Millisecond)
+
+				return context.WithoutCancel(withValue), cancel
+			},
+			fn: blockUntilDone,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var rec attemptRecorder
+
+				ctx, cancel := tt.caller(t.Context())
+				defer cancel()
+
+				_, err := DoRetry[string](ctx, tt.fn, RetryParams{
+					MaxAttempts: 1,
+					Strategy:    ConstantBackoff(0),
+					Hooks:       rec.hooks(),
+					Clock:       RealClock{},
+					Opts:        []RetryOption{PerAttemptTimeout(10 * time.Millisecond)},
+				})
+
+				require.ErrorIs(t, err, ErrAttemptTimeout)
+				assert.Equal(t, []int{1}, rec.got())
+			})
+		})
+	}
+
+	t.Run("time budget expires during the unwind", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			var rec attemptRecorder
+
+			policy := NewPolicy[string]("",
+				WithTimeBudget(15*time.Millisecond, PropagateDeadline()),
+				WithRetry(1, ConstantBackoff(time.Millisecond),
+					PerAttemptTimeout(10*time.Millisecond)),
+				WithHooks(rec.hooks()),
+			)
+
+			_, err := policy.Do(t.Context(), unwindSlowly)
+
+			require.ErrorIs(t, err, ErrAttemptTimeout)
+			require.ErrorIs(t, err, errBoom)
+			assert.Equal(t, []int{1}, rec.got())
+			assert.Equal(t, int64(1), policy.Metrics().AttemptTimeouts)
+		})
+	})
+}
+
+// A cut attempt that returns a Permanent error is wrapped too, still stops
+// the retry, and reports the attempt_timeout code.
+func TestPerAttemptTimeoutWrapsALatePermanentError(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var rec attemptRecorder
+
+		calls := 0
+
+		_, err := DoRetry[string](t.Context(), func(context.Context) (string, error) {
+			calls++
+
+			time.Sleep(20 * time.Millisecond)
+
+			return "", Permanent(ErrCircuitOpen)
+		}, RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(0),
+			Hooks:       rec.hooks(),
+			Clock:       RealClock{},
+			Opts:        []RetryOption{PerAttemptTimeout(10 * time.Millisecond)},
+		})
+
+		assert.Equal(t, 1, calls, "Permanent still stops the retry")
+		require.ErrorIs(t, err, ErrAttemptTimeout)
+		require.ErrorIs(t, err, ErrCircuitOpen)
+		assert.True(t, IsPermanent(err))
+		assert.Equal(t, "attempt_timeout", ErrorCode(err))
+		assert.Equal(t, []int{1}, rec.got())
 	})
 }
 

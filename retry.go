@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -43,12 +44,22 @@ func MaxDelay(d time.Duration) RetryOption {
 }
 
 // PerAttemptTimeout sets a timeout for each individual retry attempt. When that
-// deadline cuts an attempt while the caller's context is still alive, the
-// attempt's error is wrapped with [ErrAttemptTimeout] (keeping
-// context.DeadlineExceeded in the chain) and [Hooks.OnAttemptTimeout] fires.
-// The deadline binds only when it is earlier than the caller's and than any
-// enclosing r8e deadline; otherwise the attempt ends on that other deadline and
-// carries no ErrAttemptTimeout.
+// deadline cuts a failed attempt, the attempt's error is wrapped with
+// [ErrAttemptTimeout] and [Hooks.OnAttemptTimeout] fires. The deadline binds
+// only when it is earlier than the caller's and than any enclosing r8e
+// deadline; otherwise the attempt ends on that other deadline and carries no
+// ErrAttemptTimeout.
+//
+// The cut is decided when the deadline fires, as for [WithTimeout] and a time
+// budget: a caller that cancels later, or whose later deadline passes, while
+// the cut attempt is still returning does not take it back. A caller that
+// cancels before the deadline keeps the attempt. An attempt that returns its
+// own error on the deadline, before its context reports it, counts as cut.
+//
+// The wrap keeps the attempt's own error in the chain, so
+// errors.Is(err, context.DeadlineExceeded) holds only when that error carries
+// the context's. A cut attempt marked [Permanent], or rejected by [RetryIf],
+// is wrapped too and still stops the retry.
 func PerAttemptTimeout(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.perAttemptTimeout = d
@@ -129,12 +140,12 @@ func DoRetry[T any](
 		// If error is Permanent: stop immediately. A non-retryable failure
 		// leaves the budget untouched — it cannot drive a retry storm.
 		if IsPermanent(err) {
-			return zero, err //nolint:wrapcheck // caller's error returned as-is
+			return zero, err //nolint:wrapcheck // caller's error, wrapped with ErrAttemptTimeout when cut
 		}
 
 		// If retryIf predicate is set and returns false: stop (non-retryable).
 		if cfg.retryIf != nil && !cfg.retryIf(err) {
-			return zero, err //nolint:wrapcheck // caller's error returned as-is
+			return zero, err //nolint:wrapcheck // caller's error, wrapped with ErrAttemptTimeout when cut
 		}
 
 		// Retryable failure: charge it against the retry budget. The terminal
@@ -209,7 +220,10 @@ func DoRetry[T any](
 // runRetryAttempt executes one attempt of fn, optionally under a per-attempt
 // timeout, and releases the concurrency-budget permit (when permit is non-nil)
 // as the attempt returns. The release is deferred so it runs even if fn panics,
-// keeping the permit accounting balanced without a WithRecover boundary.
+// keeping the permit accounting balanced without a WithRecover boundary. When
+// the per-attempt deadline cut a failed attempt (see attemptDeadlineFired), cut
+// is true and err is fn's error wrapped with ErrAttemptTimeout; otherwise err is
+// fn's error unchanged.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func runRetryAttempt[T any](
@@ -240,32 +254,33 @@ func runRetryAttempt[T any](
 }
 
 // attemptDeadlineFired reports whether the deadline [PerAttemptTimeout] set on
-// attemptCtx is what ended the attempt: the deadline bound (it is earlier than
-// any deadline of parent), its instant has passed, and parent is still alive
-// with no deadline of its own reached. The clock is read directly, so an
-// attempt whose function returns on the deadline before attemptCtx reports it
-// is still attributed to the attempt timeout.
+// attemptCtx cut the attempt. The deadline must bind (see deadlineBinds): one
+// that does not bind leaves attemptCtx with parent's deadline. The decision is
+// then the first end attemptCtx records, as DoTimeout and the time budget
+// decide when their deadline fires: its own deadline means a cut, and a
+// parent cancelled before it means none, whatever happens to parent while the
+// attempt is still returning. A binding deadline comes strictly before any
+// deadline of parent, so DeadlineExceeded as the first end is the attempt's
+// own. When attemptCtx has not reported an end yet, the clock decides: an
+// attempt that returns on or after its deadline, before the context's timer
+// ran, is cut unless parent was cancelled.
 func attemptDeadlineFired(parent, attemptCtx context.Context) bool {
-	deadline, ok := attemptCtx.Value(policyDeadlineKey{}).(time.Time)
-	if !ok {
+	deadline, ok := attemptCtx.Deadline()
+	if !ok || !deadlineBinds(parent, deadline) {
 		return false
 	}
 
-	if parentDeadline, inherited := parent.Value(policyDeadlineKey{}).(time.Time); inherited &&
-		parentDeadline.Equal(deadline) {
-		// The attempt deadline did not bind: the recorded instant is the
-		// parent's own r8e deadline.
+	if err := attemptCtx.Err(); err != nil {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
+
+	if time.Now().Before(deadline) {
 		return false
 	}
 
-	now := time.Now()
-	if now.Before(deadline) || parent.Err() != nil {
-		return false
-	}
+	err := parent.Err()
 
-	callerDeadline, hasDeadline := parent.Deadline()
-
-	return !hasDeadline || now.Before(callerDeadline)
+	return err == nil || errors.Is(err, context.DeadlineExceeded)
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the

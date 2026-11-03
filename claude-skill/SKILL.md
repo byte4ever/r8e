@@ -167,7 +167,7 @@ r8e.WithRetry(maxAttempts int, strategy BackoffStrategy, opts ...RetryOption)
 
 **Options**: `r8e.MaxDelay(d)`, `r8e.PerAttemptTimeout(d)`, `r8e.RetryIf(func(error) bool)`.
 
-An attempt cut by `PerAttemptTimeout` while the caller's ctx is alive carries `r8e.ErrAttemptTimeout` around its own error (`context.DeadlineExceeded` stays in the chain), fires `OnAttemptTimeout(attempt)` and counts in the `AttemptTimeouts` metric. It does not when the caller's deadline, `WithTimeout` or a time budget ends the attempt first: keep `PerAttemptTimeout` strictly shorter than those.
+A failed attempt cut by `PerAttemptTimeout` carries `r8e.ErrAttemptTimeout` around its own error (`context.DeadlineExceeded` is in the chain only when that error is the context's), fires `OnAttemptTimeout(attempt)` and counts in the `AttemptTimeouts` metric. The cut is decided when the deadline fires: a caller that cancels while the attempt is still returning does not take it back. It does not apply when the caller's deadline or cancellation, `WithTimeout` or a time budget ends the attempt first: keep `PerAttemptTimeout` strictly shorter than those. A cut `Permanent` error is wrapped too and still stops the retry.
 
 Returns `r8e.ErrRetriesExhausted` wrapping the last error.
 
@@ -633,7 +633,7 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`, `r8e.ErrChaosInjected`.
+`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrAttemptTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`, `r8e.ErrChaosInjected`.
 
 **Sentinel codes**: `r8e.ErrorCode(err)` returns the short, stable code of the sentinel `err` carries (`"circuit_open"`, `"timeout"`, `"retries_exhausted"`, …), wrapped or not, and `""` for none. The envelopes `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` and `ErrConcurrencyBudgetExceeded` yield to the cause they wrap (a retried panic reports `"panic_recovered"`, a retried timeout `"timeout"`); an error with only envelopes reports the outermost. Use it for log fields and metric labels; `r8eotel` builds `r8e.rejection_reason` from it. It reaches a sentinel through `Unwrap` only: an error type of your own that matches a sentinel through its `Is` method carries no code, so wrap the sentinel with `%w`.
 
@@ -693,7 +693,7 @@ m := policy.Metrics()              // r8e.PolicyMetrics for one policy
 all := r8e.DefaultRegistry().Snapshot() // []r8e.PolicyMetrics, one per policy
 ```
 
-`PolicyMetrics` has counters (`Retries`, `Timeouts`, `CircuitOpens`,
+`PolicyMetrics` has counters (`Retries`, `Timeouts`, `AttemptTimeouts`, `CircuitOpens`,
 `CircuitCloses`, `CircuitHalfOpens`, `CircuitRamps`, `CircuitNeutralOutcomes`,
 `CircuitStaleOutcomes`, `RateLimited`, `BulkheadRejected`,
 `BulkheadTimeouts`, `CoDelShed`, `HedgesTriggered`, `HedgesWon`, `FallbacksUsed`,

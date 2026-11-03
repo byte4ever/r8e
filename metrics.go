@@ -317,8 +317,8 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 				user.OnAttemptTimeout(attempt)
 			}
 		},
-		OnHedgeTriggered:   countingHook(&m.hedgesTriggered, user.OnHedgeTriggered),
-		OnHedgeWon:         countingHook(&m.hedgesWon, user.OnHedgeWon),
+		OnHedgeTriggered: countingHook(&m.hedgesTriggered, user.OnHedgeTriggered),
+		OnHedgeWon:       countingHook(&m.hedgesWon, user.OnHedgeWon),
 		OnFallbackUsed: func(err error) {
 			m.fallbacksUsed.Add(1)
 
