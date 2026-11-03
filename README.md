@@ -450,6 +450,8 @@ p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
   code-only; change its cap with `Cooldown.SetMaxCooldown`, which returns
   `ErrCooldownNonPositiveMax` for a non-positive cap.
 
+See [`examples/54-cooldown`](examples/54-cooldown).
+
 ### Rate Limiter
 
 Token-bucket rate limiter. Default mode rejects with `r8e.ErrRateLimited`; blocking mode waits for a token. For a positive rate, the bucket holds one second of tokens, and at least one token, so a rate below 1 req/s still works: `WithRateLimit(0.125)` admits one call every 8 seconds, about 450 per hour. A rate of zero or less admits no call.
@@ -1846,6 +1848,7 @@ go run ./examples/50-shield-parent/
 go run ./examples/51-base-context/
 go run ./examples/52-response-classifier/
 go run ./examples/53-shared-bulkhead/
+go run ./examples/54-cooldown/
 ```
 
 ## License

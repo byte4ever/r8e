@@ -456,6 +456,8 @@ p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
   `Cooldown.SetMaxCooldown`, qui renvoie `ErrCooldownNonPositiveMax` pour un
   plafond non positif.
 
+Voir [`examples/54-cooldown`](examples/54-cooldown).
+
 ### Rate Limiter
 
 Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton. Pour un débit positif, le bucket contient une seconde de jetons, et au moins un jeton. Un débit sous 1 req/s marche donc : `WithRateLimit(0.125)` laisse passer un appel toutes les 8 secondes, soit environ 450 par heure. Un débit nul ou négatif ne laisse passer aucun appel.
@@ -1896,6 +1898,7 @@ go run ./examples/50-shield-parent/
 go run ./examples/51-base-context/
 go run ./examples/52-response-classifier/
 go run ./examples/53-shared-bulkhead/
+go run ./examples/54-cooldown/
 ```
 
 ## Licence

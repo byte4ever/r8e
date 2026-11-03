@@ -425,7 +425,7 @@ Hooks `OnCoolingDown()` (metric `CoolingDown`) and `OnCooldownArmed(d)`; health
 bulkhead, a shared cooldown excludes the own one); `r8econf.GetPolicy` returns
 that error instead, and `r8e.ValidateOptions(opts...)` reports the conflicts
 and range errors `NewPolicy` would panic on (not a value whose type does not
-match `T`).
+match `T`). Example: `examples/54-cooldown`.
 
 ### Rate Limiter
 
@@ -1060,7 +1060,7 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/53-shared-bulkhead`.
+Examples: `examples/01-quickstart` through `examples/54-cooldown`.
 
 ## Conventions: every feature ships with a documented example (mandatory)
 
