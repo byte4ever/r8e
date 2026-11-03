@@ -12,7 +12,9 @@ and a user-provided HTTP status code classifier.
 - Lets you define which HTTP status codes are **transient** (retriable) or
   **permanent** (non-retriable) via a `Classifier` function.
 - Returns both the `*http.Response` and the error on failure, just like
-  `http.Client.Do` — the caller stays in full control of the response.
+  `http.Client.Do` — the caller stays in full control of the response. Under
+  `WithRetry` the response comes back inside the error, as
+  `StatusError.Response` (see Error handling).
 - Drains and closes the response body automatically on transient errors so TCP
   connections are reused during retries.
 - Replays the request body on each retry via `req.GetBody`, so a retried
@@ -23,14 +25,37 @@ and a user-provided HTTP status code classifier.
 
 | Concept | Detail |
 |---|---|
-| `Client` | Wraps `http.Client` + `r8e.Policy` + `Classifier` |
+| `Client` | Wraps `http.Client` + `r8e.Policy` + a `Classifier` (`NewClient`) or a `ResponseClassifier` (`NewResponseClient`) |
 | `NewClient` | Constructor — pass a name, HTTP client, classifier, and r8e options |
 | `Client.Do` | Executes `*http.Request` through the resilience policy |
 | `Classifier` | `func(statusCode int) ErrorClass` — maps status codes to error classes |
+| `NewResponseClient` / `ResponseClassifier` | `func(resp *http.Response, body []byte) error` — classifies from the status, headers and body |
 | `ErrorClass` | Enum: `Success`, `Transient`, `Permanent` |
-| `StatusError` | Error type carrying the original `*http.Response` for inspection |
+| `StatusError` | Error type carrying the original `*http.Response` for inspection (added by `NewClient`; a `ResponseClassifier` returns it itself) |
+
+Each caller must own the response it gets. Do not build a `Client` with
+`r8e.WithCoalesce` or `r8e.WithCache`: both hand one `*http.Response`, so one
+body stream, to every caller sharing it. Do not pass a static `r8e.WithFallback`
+either: it drops the error, and with it the `StatusError` that keeps a permanent
+response's body open, so the connection leaks until the caller's context ends.
+Use `r8e.WithFallbackFunc` and close the body of the `StatusError`'s `Response`,
+found with `errors.As`.
+
+A response's body is read on the attempt's context. `r8e.WithTimeout`,
+`r8e.WithHedge`, `r8e.PerAttemptTimeout` and `r8e.WithTimeBudget` with
+`r8e.PropagateDeadline` end that context when they return, whatever the
+outcome, so with any of them the caller reads only the bytes already buffered
+after `Do`, then gets `context.Canceled`. The `r8e.StandardHTTPClient` and
+`r8e.AggressiveHTTPClient` presets include `WithTimeout`. To read a whole body,
+bound the call with a deadline on the context passed to `Do`, as the
+`NewClient` example below does.
 
 ## Request flow
+
+The diagram shows a `Client` built by `NewClient`. With `NewResponseClient`, the
+`ResponseClassifier` takes the `Classifier`'s place, and the adapter adds no
+`StatusError` to its error. The policy may still wrap that error, so match it
+with `errors.Is` or `errors.As`.
 
 ```mermaid
 flowchart TD
@@ -81,13 +106,15 @@ func main() {
     client := httpx.NewClient("payment-api",
         http.DefaultClient,
         classifier,
-        r8e.WithTimeout(2*time.Second),
         r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
         r8e.WithCircuitBreaker(),
     )
 
-    // Use it like http.Client.Do.
-    ctx := context.Background()
+    // Use it like http.Client.Do. The deadline on ctx bounds the call and the
+    // body read; r8e.WithTimeout would cut the body when Do returns.
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+
     req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
         "https://api.example.com/pay", nil)
 
@@ -109,7 +136,8 @@ func main() {
 
 ## Error handling
 
-On error paths, the `*http.Response` is accessible via `errors.As`:
+With `NewClient`, on error paths, the `*http.Response` is accessible via `errors.As`
+(with `NewResponseClient`, only when the classifier returns a `StatusError`):
 
 ```go
 var statusErr *httpx.StatusError
@@ -123,9 +151,77 @@ if errors.As(err, &statusErr) {
 |---|---|---|---|
 | 2xx (Success) | non-nil | `nil` | n/a |
 | Transient (e.g. 503) | non-nil | `Transient` | extractable |
-| Permanent (e.g. 400) | non-nil | `Permanent` | extractable |
+| Permanent (e.g. 400) | non-nil (`nil` under `WithRetry`) | `Permanent` | extractable |
 | Retries exhausted | `nil` | `ErrRetriesExhausted` | extractable (last attempt) |
 | Transport error | `nil` | transport error | not present |
+
+Under a retrying policy, `Do` returns a `nil` response with any error, a
+permanent one included: reach the response through `StatusError.Response`.
+
+## Classifying from the body (`ResponseClassifier`)
+
+Some APIs answer the same status for opposite cases, and only the body tells
+them apart: a 403 for a token to renew or for a resource that moved, a 404 for
+an unknown object or for a route missing during a rollout. `NewResponseClient`
+takes a `ResponseClassifier` instead of a `Classifier`:
+
+```go
+classify := func(resp *http.Response, body []byte) error {
+    statusErr := &httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}
+
+    switch {
+    case resp.StatusCode < 300:
+        return nil
+    case resp.StatusCode == http.StatusForbidden && bytes.Contains(body, []byte("token_expired")):
+        return errTokenExpired // transient: retried
+    case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+        return statusErr // transient, and Retry-After is honored
+    default:
+        return r8e.Permanent(statusErr)
+    }
+}
+
+client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
+    r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
+)
+// Bound each call with a deadline on the ctx passed to Do, not WithTimeout,
+// to read the body after Do (see above).
+```
+
+- The classifier returns `nil` for a success, or the error the attempt fails
+  with. That error is classified as anywhere in r8e: `r8e.Permanent(err)` stops
+  the retry, `r8e.RetryAfterError(err, d)` carries a delay hint, and any other
+  error is transient.
+- The adapter adds nothing to that error: unlike `NewClient`, this path adds no
+  `StatusError` and reads no `Retry-After` header. Return
+  `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}`, as in the
+  example, to get both back. The policy may still wrap the error
+  (`r8e.ErrRetriesExhausted` once retries run out), so match it with
+  `errors.Is` or `errors.As`, never `==`.
+- For a status of 300 or above, `body` holds the first
+  `httpx.MaxClassifiedBody` bytes (64 KiB). The adapter puts them back, so the
+  caller reads the body from its first byte.
+- Below 300, `body` is `nil` and the body is not read, so a streamed success or
+  an upgraded (101) connection stays as it is.
+- `body` is the classifier's only view of the body: during the call,
+  `resp.Body` is `http.NoBody`, so the classifier cannot consume the body the
+  caller gets. Do not modify `body`: the caller reads the same bytes back.
+- The classifier runs inside the attempt: possibly on another goroutine than
+  the caller's, concurrently with itself (concurrent `Do` calls, `WithHedge`), and
+  possibly after `Do` has returned (an attempt cut by `WithTimeout`). Any state
+  it shares must be safe for concurrent use.
+- The adapter leaves the body open in two cases: on `nil`, where `Do` returns
+  `resp`, and on a permanent error that carries a `StatusError` for `resp`, as
+  in the example, where `errors.As` finds it even when `WithRetry` makes `Do`
+  return a `nil` response. Under `WithTimeout`, `WithHedge`,
+  `PerAttemptTimeout` or `WithTimeBudget` with `PropagateDeadline`, only its
+  buffered start can still be read after `Do` (see above). Any other error drains and closes the body (a 101 is only
+  closed), so the connection is reused. An option that drops the error drops
+  the `StatusError` too: this is why a static `WithFallback` is excluded (see
+  above).
+- A failure reading the body is transient, and the classifier is not called.
+
+`NewClient` and its `Classifier` are unchanged.
 
 ## Deadline propagation
 
@@ -157,7 +253,8 @@ policy := r8e.NewPolicy[T]("svc",
 
 Pair `InjectDeadline` with `r8e.PropagateDeadline()` on the caller and
 `ExtractDeadline` with `r8e.RespectInboundDeadline()` on the callee for a full
-cross-service chain. See
+cross-service chain. On an httpx `Client`, `PropagateDeadline` also cuts a body
+read after `Do` (see above). See
 [`examples/43-deadline-propagation-cross-service`](../examples/43-deadline-propagation-cross-service).
 
 ## Install

@@ -33,7 +33,8 @@ const (
 // millisecond budget header (egress). It is the outbound half of cross-service
 // deadline propagation: pair it with [r8e.PropagateDeadline] so a policy's time
 // budget becomes a real context deadline, then call InjectDeadline on the
-// outgoing request so a downstream service receives the remaining time.
+// outgoing request so a downstream service receives the remaining time. On a
+// [Client], PropagateDeadline also cuts a body read after Do (see [Client]).
 //
 // remaining is measured against clock (pass [r8e.RealClock] in production); a
 // spent or sub-millisecond budget is floored to 1ms so it still propagates as
