@@ -49,6 +49,28 @@ pre-dismiss.
 - [ ] With `WithHedge` under a budget: once the budget is spent, no hedge fires;
       the call waits for the primary and returns its result or the context's
       error. Is a hedge counted on to rescue a slow primary late in the budget?
+- [ ] Is `PerAttemptTimeout` strictly shorter than `WithTimeout` and the budget?
+      An attempt that `WithTimeout` or the budget ends first is not cut by it:
+      no `ErrAttemptTimeout`, no `OnAttemptTimeout`, and no next attempt.
+
+## Error shape at an r8e deadline (only where something matches on it)
+- [ ] Does a `RetryIf`, classifier, `FallbackFunc`, alert or caller match the
+      fn's OWN timeout error (a client or socket deadline error, a gRPC
+      `DeadlineExceeded` status) when the fn stops on the propagated
+      `WithTimeout` deadline? An error the fn returns once the binding timeout
+      has passed is `ErrTimeout`, with one `OnTimeout`; a failed call the caller
+      ended returns the caller's context error, not the fn's.
+- [ ] Does anything detect a `PerAttemptTimeout` cut with `errors.Is(err,
+      context.DeadlineExceeded)`? The cut carries `ErrAttemptTimeout`; it matches
+      `context.DeadlineExceeded` only when the attempt's own error does (a socket
+      deadline error does not), and the caller's deadline matches it too. The
+      test is `errors.Is(err, ErrAttemptTimeout)`.
+- [ ] Does anything expect `ErrTimeBudgetExceeded`, or read the downstream error
+      out of it (`errors.As` for a status)? With `WithTimeout` ≤ budget the
+      timeout cuts first (`ErrTimeout`, without the previous attempt's error);
+      with `PropagateDeadline` and a longer `WithTimeout`, the sentinel wraps the
+      cut attempt's error only when it was the last attempt allowed, otherwise
+      `context.DeadlineExceeded`. Earlier attempts' errors reach only `OnRetry`.
 
 ## Worst-case retry chain vs the budget
 - [ ] Compute `WithRetry(n)` × per-attempt deadline (+ backoff waits). Does the
@@ -65,6 +87,14 @@ pre-dismiss.
       full window) when a TOTAL cap is what the budget requires — or vice versa?
 - [ ] `WithTimeBudget` present but NO `WithRetry`/`WithHedge` consumer? →
       `NewPolicy` panics `ErrTimeBudgetWithoutConsumer`.
+- [ ] Is the budget cooperative (no `PropagateDeadline`) on a path that needs it
+      to cut on time? Its gate compares the next backoff alone with what is
+      left: an attempt can start with little of the budget left and run up to
+      `WithTimeout`. The budget cuts on time only with `PropagateDeadline` and a
+      `WithTimeout` LONGER than the budget.
+- [ ] `PropagateDeadline` with `WithTimeout` ≤ budget? The budget's deadline binds
+      only strictly before the timeout's, so `PropagateDeadline` changes nothing
+      and the timeout cuts with `ErrTimeout`.
 
 ## Adaptive deadlines (variable latency)
 - [ ] Is the latency distribution wide / variable / unknown? A static ceiling is
@@ -92,6 +122,9 @@ pre-dismiss.
       `ErrInboundDeadlineWithoutBudget`.
 - [ ] For HTTP, is `InjectDeadline`/`ExtractDeadline` wired so the relative-ms
       header (`X-R8e-Timeout-Ms`) actually crosses the wire?
+- [ ] On an httpx `Client` whose callers read the body after `Do`: `WithTimeout`,
+      `WithHedge`, `PerAttemptTimeout` and a `PropagateDeadline` budget cut the
+      body when `Do` returns. Note it and defer to review-r8e-policy-call.
 
 ## Required-companion timeouts (omitting the companion is a build error)
 - [ ] `WithCoalesce` present WITHOUT `WithTimeout`? → panic

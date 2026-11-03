@@ -49,6 +49,33 @@ doubt between two levels, the one with a concrete propagation path wins.
    size `WithTimeout` (and `PerAttemptTimeout`, the budget) strictly below the
    time the callers' deadline leaves when the call starts. Scope: requires the
    callers' deadline to be stated; when it is UNKNOWN, see NOTED #4.
+6. **Code keyed on an error shape the deadline does not produce.** The artifact
+   shows a `RetryIf`, classifier, `FallbackFunc` or alert that matches (a) the
+   fn's own client timeout error, while the fn stops on the propagated
+   `WithTimeout` deadline: it gets `ErrTimeout`; (b) `context.DeadlineExceeded`
+   to spot a `PerAttemptTimeout` cut: a socket deadline error under the cut does
+   not match, the caller's deadline does; (c) `ErrTimeBudgetExceeded` under a
+   `WithTimeout` ≤ budget: it gets `ErrTimeout`; (d) the downstream error inside
+   `ErrTimeBudgetExceeded`: it is there only when the cut attempt was the last
+   one allowed. Propagation: the branch never runs on the case it was written
+   for, or runs on the wrong one (the degraded value or the alert misses the
+   hang). Remediation: match `ErrTimeout`, `ErrAttemptTimeout` or
+   `ErrTimeBudgetExceeded` with `errors.Is`, and read earlier errors in
+   `OnRetry`. Scope: requires the matching code in view; otherwise nothing.
+7. **`PerAttemptTimeout` that `WithTimeout` or the budget ends first.**
+   `WithTimeout(300ms)` with `PerAttemptTimeout(300ms)` or longer. Propagation:
+   the per-attempt deadline never binds; a hung attempt runs into the whole-call
+   deadline, no second attempt runs, and nothing carries `ErrAttemptTimeout`.
+   The knob is inert. Remediation: `PerAttemptTimeout` strictly shorter, with
+   room for the next attempt.
+8. **Cooperative budget that cannot cut on time.** `WithTimeBudget(300ms)`
+   without `PropagateDeadline`, on a 300 ms SLA path, with `WithTimeout(2s)`.
+   Propagation: the gate compares the next backoff alone with what is left; an
+   attempt starts with 20 ms left and runs on until the 2 s `WithTimeout` ends
+   the call. Symptom: the SLA is blown by the last attempt. Remediation:
+   `PropagateDeadline` and a `WithTimeout` longer than the budget (the budget
+   then cuts on time), or a `WithTimeout` that fits the SLA. Scope: requires a
+   stated budget or SLA the overrun breaches.
 
 ## NOTED — observation for awareness, no action required
 
@@ -66,6 +93,12 @@ doubt between two levels, the one with a concrete propagation path wins.
    whose deadline ends a hang — flag "confirm `WithTimeout` ends strictly before
    the callers' deadline". (When a classifier makes caller cancellations
    neutral, the overload axis scores it.)
+5. `WithTimeBudget(d, PropagateDeadline())` with `WithTimeout` ≤ `d`:
+   `PropagateDeadline` changes nothing, the timeout cuts first. The call is
+   bounded; flag the inert option (IMPORTANT #6 when code expects
+   `ErrTimeBudgetExceeded`).
+6. An httpx `Client` with one of the deadlines that cut a body read after `Do`
+   — note it and defer to review-r8e-policy-call, which scores it.
 
 ## Anti-calibration (do NOT do this)
 

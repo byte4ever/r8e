@@ -30,6 +30,21 @@ doubt between two levels, the one with a concrete propagation path wins.
    low. Remediation: discriminate the shed sentinels
    (`errors.Is(err, ErrCircuitOpen/ErrRateLimited/…)`) from genuine errors and
    only degrade on the former.
+5. **Cache or coalesce on an httpx `Client`.** `httpx.NewClient("api", hc, cls,
+   r8e.WithCoalesce(keyFn), r8e.WithTimeout(…))` (or `WithCache`). Propagation:
+   the shared value is an `*http.Response`; every caller of the group gets the
+   same response and the same body stream; one drains it, the others read
+   nothing or interleave. Symptom: empty or corrupt bodies served as success.
+   Remediation: cache or coalesce the decoded value in an outer policy, never
+   the response.
+6. **Base context shorter-lived than the holders.** `WithBaseContext(reqCtx)` (a
+   request or per-job context) on a coalescing policy built once and shared.
+   Propagation: the first request ends, the base context ends; from then on
+   every coalesced call that misses the cache fails at once with
+   `context.Canceled`, for every holder, for the life of the process; a cache
+   wrapping the policy caches that error. Symptom: a permanent outage of the
+   uncached path after the first request. Remediation: the base context of the
+   policy's owner (the client, cancelled on its shutdown), or none.
 
 ## IMPORTANT — justified concern, may be accepted with explicit documented risk
 
@@ -65,6 +80,18 @@ doubt between two levels, the one with a concrete propagation path wins.
    axis's), or a func that also handles the caller's context error. Scope:
    requires such a func and a stated caller deadline; when the callers'
    deadline is UNKNOWN, NOTED "confirm".
+6. **`FallbackFunc` blind to the cooldown.** The policy has `WithCooldown` (or
+   `WithSharedCooldown`), and a `WithFallbackFunc` meant for shedding lists the
+   shed sentinels without `ErrCoolingDown`, or keys on `ErrRetriesExhausted`.
+   Propagation: while the cooldown is armed, `ErrCoolingDown` surfaces where the
+   degraded value was expected; a retry stopped by the cooldown or by
+   `HonorRetryAfter` returns the server's `429` as is, never
+   `ErrRetriesExhausted`. Remediation: add `ErrCoolingDown`, and handle the
+   server's hinted error (a `RetryAfterProvider`). Scope: requires such a func.
+7. **Base context of unknown lifetime.** `WithBaseContext(ctx)` where the artifact
+   does not show whether `ctx` outlives every holder of the policy. The finding
+   is "confirm the base context ends only when every holder stops" (BLOCKING #6
+   when shown shorter-lived).
 
 ## NOTED — observation for awareness, no action required
 
@@ -76,6 +103,10 @@ doubt between two levels, the one with a concrete propagation path wins.
    -timeouts, so NOTE it cross-axis.
 3. r8e never caches the fallback value (only genuine successes) — reliance
    confirmed correct; no demonstrated path to a poisoned cache.
+4. `WithCoalesce` or `RefreshAhead` with no `WithBaseContext`: the detached calls
+   outlive the client's shutdown, bounded by `WithTimeout`. Flag it; IMPORTANT
+   only when the context says shutdown must stop in-flight work and
+   `WithTimeout` is long enough to matter.
 
 ## Anti-calibration (do NOT do this)
 
@@ -86,6 +117,9 @@ doubt between two levels, the one with a concrete propagation path wins.
 - Recommending `IsLocalRejection` to discriminate shedding in a fallback: it
   misses `ErrCircuitOpen`, `ErrThrottled`, `ErrSLOShed` and every wrapped
   sentinel; a fallback uses `errors.Is`.
+- Recommending `WithBaseContext` on every coalescing policy: without a shutdown
+  to honor, the detached calls are already bounded by `WithTimeout` (NOTED #4 at
+  most).
 - Scoring a static `WithFallback` value because it also fires when the caller's
   own deadline ends the call: it fires on every error by design, and the value
   goes to a caller that has given up.

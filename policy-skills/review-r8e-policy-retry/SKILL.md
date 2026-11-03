@@ -5,7 +5,8 @@ description: >-
   WithRetry attempts/backoff/jitter/MaxDelay, PerAttemptTimeout, error
   classification (the r8e default treats UNCLASSIFIED errors as transient =
   retriable), retry budgets on shared dependencies, concurrency budgets capping
-  in-flight retries/hedges, and Retry-After honoring. Judges whether the retry
+  in-flight retries/hedges, and Retry-After honoring (MaxDelay cap and jitter,
+  HonorRetryAfter, a cooldown stopping retries). Judges whether the retry
   configuration amplifies load into a storm and whether permanent errors are
   retried hopelessly. REJECT by default.
 ---
@@ -67,11 +68,15 @@ synchronizes retry waves — prefer ExponentialJitterBackoff), jitter presence,
 the callers' deadline), error classification (the r8e default treats
 UNCLASSIFIED errors as TRANSIENT/retriable, so an unclassified retry burns 4xx /
 auth / validation errors that can never succeed), retry budgets on SHARED
-dependencies (`WithRetryBudget` / `WithSharedRetryBudget` / nested `Parent`) to
-prevent retry storms and metastable amplification, concurrency budgets
+dependencies (`WithRetryBudget` / `WithSharedRetryBudget` / nested `Parent`,
+and `ShieldParent` so a dead route does not starve its siblings) to prevent
+retry storms and metastable amplification, concurrency budgets
 (`WithConcurrencyBudget`) capping in-flight retries+hedges, Retry-After honoring
-(429/503 via `RetryAfterProvider` / httpx `StatusError`), `RetryIf` predicate
-correctness, and whether the worst-case attempt count fits the latency budget.
+(429/503 via `RetryAfterProvider` / httpx `StatusError`; the `MaxDelay` cap and
+upward jitter, `HonorRetryAfter`, a cooldown that stops retries while armed),
+`RetryIf` predicate correctness, and whether the worst-case attempt count fits
+the latency budget. Whether a cooldown is needed at all, as a guard, is the
+overload axis's.
 
 OUT OF SCOPE — do NOT score these; note at most once as NOTED "out of scope —
 defer to <axis>":
@@ -133,10 +138,26 @@ here; do not dismiss an observation as "probably not serious."
   replica amplifies retries fleet-wide.
 - Concurrency budget (`WithConcurrencyBudget`) capping in-flight retries+hedges.
 - Retry-After honoring (429/503): does the error implement `RetryAfterProvider`
-  (httpx `StatusError`), or is a fixed backoff ignoring the server's signal? Do
-  the hints fit under `MaxDelay` and the deadline (`MaxDelay` caps a hint, so a
-  capped one re-sends early)? Is a `429` marked `Permanent` while its
-  Retry-After is expected to be honored?
+  (httpx `StatusError`), or is a fixed backoff ignoring the server's signal? An
+  `httpx.NewResponseClient` classifier keeps the hint only if it returns a
+  `StatusError` (or a `RetryAfterError`). Do the hints fit under `MaxDelay` and
+  the deadline? The wait is the hint capped by `MaxDelay`, then +0–10%: a
+  capped one re-sends early, and a hinted wait can reach 1.1 × `MaxDelay`. Is
+  the early re-send stopped (`HonorRetryAfter`, which needs `MaxDelay`, or a
+  `RetryIf`)? Is a `429` marked `Permanent` while its Retry-After is expected to
+  be honored?
+- Cooldown (`WithCooldown` / `WithSharedCooldown`): no retry leaves while it is
+  armed, whoever armed it (another call, another sharing policy); the loop
+  returns the last error as is.
+- `RetryIf` and `PerAttemptTimeout`: a predicate that refuses
+  `context.DeadlineExceeded` (to spare the caller's deadline) also refuses r8e's
+  own per-attempt cut whenever the attempt's error matches it. The cut is
+  `ErrAttemptTimeout`.
+- Nested budgets (`Parent`): can one child route die on its own while its
+  siblings must keep retrying? Without `ShieldParent` its first-attempt failures
+  keep draining the parent; with it, a dead child drains at most half its own
+  capacity rounded up, and the siblings keep retrying only if the parent stays
+  above half its capacity after that drain. A flapping child is not bounded.
 - httpx adapter used so 429/503 carry Retry-After and 4xx classify Permanent?
 - Retry count vs latency budget: worst-case sum of attempts + backoff vs the
   call's deadline / SLA. A 5× ConstantBackoff(200ms) can blow a 500ms budget.
@@ -148,9 +169,10 @@ here; do not dismiss an observation as "probably not serious."
   they should fast-fail, or classified Permanent when they are transient).
 - Nested r8e policy inside the fn: what the retry returns decides what the outer
   breaker counts. Exhausted attempts wrap the nested rejection (`retries
-  exhausted: bulkhead full`); a `RetryIf` stop or an exhausted retry budget
-  passes it on bare, which `IsLocalRejection` reads as a local rejection. Note
-  it; the counting is the overload axis's.
+  exhausted: bulkhead full`); a `RetryIf` stop, an exhausted retry budget, a
+  `HonorRetryAfter` stop or an armed cooldown passes it on bare, which
+  `IsLocalRejection` reads as a local rejection. Note it; the counting is the
+  overload axis's.
 
 **Minimum threshold: 15 observations** for a non-trivial artifact. If fewer,
 explicitly justify triviality in writing.

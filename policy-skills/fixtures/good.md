@@ -13,8 +13,9 @@ dismissable in writing). The positive anchor for calibration.
   hedge.
 - **Error taxonomy**: classified at the call boundary — `4xx` other than `429`
   marked `r8e.Permanent`, `5xx`/timeouts left transient (the r8e default). A
-  `429` carries a `Retry-After` of at least 1 s (its error implements
-  `r8e.RetryAfterProvider`); no other response carries one.
+  `429` carries a `Retry-After` of 1 to 5 s (its error implements
+  `r8e.RetryAfterProvider`); no other response carries one. It comes from a
+  per-client rate limit: refused calls are not counted against any quota.
 - **Latency**: p50 ≈ 30 ms, p99 ≈ 80 ms. Budget for this call: 300 ms.
 - **Callers**: the call runs under the inbound HTTP request's context, which the
   client can cancel (page navigated away) and which carries a 1 s deadline set by

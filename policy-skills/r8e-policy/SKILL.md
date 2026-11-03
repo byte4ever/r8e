@@ -30,20 +30,21 @@ This skill release is calibrated for an **exact** r8e version. The canonical pin
 is [`../VERSIONS.json`](../VERSIONS.json); this section is kept in agreement with
 it (both are bumped together on each release — see `../MAINTENANCE.md`).
 
-- **r8e core**: `v0.12.1`
-- side packages: `otter v0.12.0`, `ristretto v0.12.0`, `r8eotel v0.12.0`
+- **r8e core**: `v0.13.0`
+- side packages: `otter v0.12.0`, `ristretto v0.12.0`, `r8eotel v0.13.0`
 
 Always propose r8e **at this pinned version** so the user's project and this skill
 agree. When you deliver a policy, include the matching install snippet:
 
 ```sh
-go get github.com/byte4ever/r8e@v0.12.1
+go get github.com/byte4ever/r8e@v0.13.0
 ```
 
 ```go
 // go.mod
-require github.com/byte4ever/r8e v0.12.1
-// + only if used: github.com/byte4ever/r8e/otter|ristretto|r8eotel v0.12.0
+require github.com/byte4ever/r8e v0.13.0
+// + only if used: github.com/byte4ever/r8e/otter|ristretto v0.12.0,
+//   github.com/byte4ever/r8e/r8eotel v0.13.0
 ```
 
 If the user is already on a different r8e version, say so explicitly: features
@@ -95,11 +96,11 @@ The six axes you must be able to answer for:
 
 | Axis | The question the policy cannot be written without |
 |---|---|
-| **call / Do** | Is the operation idempotent / a write? Safe to retry? Safe to duplicate (hedge)? Does the call honor `ctx`? Does it go through another r8e policy? |
+| **call / Do** | Is the operation idempotent / a write? Safe to retry? Safe to duplicate (hedge)? Does the call honor `ctx`? Does it go through another r8e policy? Through httpx, do the callers read the body after `Do`? |
 | **timeouts** | What is the downstream p50/p99? Is there a per-call budget or SLA? What deadline do the callers set, and how much of it is left when the call starts? |
-| **retry** | Which errors are permanent vs transient? Is the dependency shared across the fleet (amplification risk)? Does it emit `Retry-After`? |
-| **overload** | What is the downstream capacity (pool size, quota, RPS limit)? Is metastable collapse a risk? Which errors say nothing about its health (business `4xx`, caller cancellations), and what deadline do the callers set? |
-| **fallback / cache** | Is there a *safe* degraded value? Is stale data acceptable, and for how long? |
+| **retry** | Which errors are permanent vs transient? Is the dependency shared across the fleet (amplification risk)? Does it emit `Retry-After`, and how long are the hints? |
+| **overload** | What is the downstream capacity (pool size, quota, RPS limit, window)? Do several routes share it? Is metastable collapse a risk? Which errors say nothing about its health (business `4xx`, caller cancellations), and what deadline do the callers set? |
+| **fallback / cache** | Is there a *safe* degraded value? Is stale data acceptable, and for how long? Who owns the policy, and do its holders stop with it? |
 | **observability** | Which failure modes must be visible? Should this policy gate readiness? Does config need hot reload? Is the policy built once, or per job / tenant / request? |
 
 ### 2. Map traits → patterns
@@ -111,8 +112,10 @@ output — a parameter without a reason is a finding waiting to happen.
 Check the draft against `references/api-constraints.md` BEFORE presenting:
 required-companion options (e.g. `WithCoalesce`/refresh-ahead need `WithTimeout`;
 `WithTimeBudget`/budgets need a consumer), mutual exclusions
-(`WithBulkhead` vs `WithAdaptiveConcurrency`), and the fact that ordering is
-automatic (never hand-order options).
+(`WithBulkhead` vs `WithAdaptiveConcurrency`; `WithSharedBulkhead` vs both;
+`WithSharedCooldown` vs `WithCooldown`), and the fact that ordering is
+automatic (never hand-order options). `r8e.ValidateOptions(opts...)` reports the
+misconfigurations `NewPolicy` would panic on.
 
 ### 3. Draft the output
 
@@ -123,12 +126,13 @@ Produce, by default:
 - a **rationale table** (option → parameter → why → which service trait drove it);
 - the `r8econf` JSON `PolicyConfig` block **for the config-expressible subset
   only**, and an explicit note of which chosen patterns are code-only (Coalesce,
-  Cache, Chaos, classifiers, fallback funcs) and thus absent from JSON;
+  Cache, Chaos, classifiers, fallback funcs, shared bulkhead / cooldown, base
+  context, `ShieldParent`) and thus absent from JSON;
 - the residual unknowns you assumed, each flagged so the user can correct them;
 - the **pinned install snippet** (`go get …@<pinned>` + the `require` line) at the
   version from "Pinned r8e version" above, plus the side-package requires only for
   the adapters the policy actually uses (`otter`/`ristretto` for `WithCache`,
-  `r8eotel` for OTel).
+  `r8eotel` for OTel; `r8eotel` is `v0.13.0`, the cache adapters `v0.12.0`).
 
 ### 4. Review gate (mandatory — do not skip)
 
@@ -171,6 +175,14 @@ do not patch the parameter by hand without re-justifying it.
 - A `WithTimeout` (or `PerAttemptTimeout`, or a time budget) equal to or longer
   than the time the callers' deadline leaves: it arms no timer and never ends a
   call, so a hang is the caller's, not r8e's.
+- Reading an httpx response body after `Do` under `WithTimeout`, `WithHedge`,
+  `PerAttemptTimeout` or a `PropagateDeadline` budget: they cut the body when
+  `Do` returns. Bound that call with a deadline on the ctx passed to `Do`.
+- Calling, from the function of a policy on a shared bulkhead, any policy on the
+  same bulkhead: under load the outer calls hold every slot and the bulkhead
+  wedges for every sharing policy.
+- `WithBaseContext` with a context that ends before every holder of the policy
+  stops: from then on every coalesced miss fails with `context.Canceled`.
 - Building a named policy per job, tenant or request without
   `defer policy.Registry().Unregister(policy)` (or an empty name, or a registry
   dropped with it): the registry and its health endpoints grow without bound.

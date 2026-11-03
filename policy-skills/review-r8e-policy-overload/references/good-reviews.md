@@ -265,6 +265,14 @@ FINAL VERDICT: CONDITIONAL APPROVE
 19. Half-open probes: the client forwards `ctx` and `WithTimeout(300ms)` cancels
     it, so a probe reports within about 300 ms and cannot hold its slot. No
     `HalfOpenProbeLease` needed.
+20. Cooldown: absent. The `429` hints are short (1 to 5 s), come from a
+    per-client rate limit that counts no refused call, the retry does not
+    re-send hinted errors, and the breaker counts the `429`: a few calls per
+    replica go into the hint before the breaker opens for 10 s. NOTED #9
+    (`WithCooldown` is an option, no demonstrated harm).
+21. One policy, one pool: no other route shares the 32-connection pool, so a
+    shared bulkhead has nothing to cap together. No `WithHedge`, so the
+    bulkhead also caps calls still running after their timeout.
 
 ### Phase 2 — Adversarial scenarios
 - **Brownout.** Trigger: recommender p99 climbs above 150 ms on a majority.
@@ -306,7 +314,8 @@ bounded.
 - IMPORTANT: none in this axis's lane.
 - NOTED: #13 (`RampRecovery` could ease re-entry, but not required — recovery is
   10 s and capacity is known). #9/#12 (retry budget / throttle tuning are out of
-  lane — present and sufficient; defer any tuning to the retry axis).
+  lane — present and sufficient; defer any tuning to the retry axis). #20 (no
+  cooldown: short hints, nothing counted, the breaker counts the `429`).
 
 ### Phase 4 — Verdict
 Phases 1–2 produced no overload observation above NOTED, and every adversarial

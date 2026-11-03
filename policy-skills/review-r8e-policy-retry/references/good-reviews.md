@@ -187,7 +187,7 @@ FINAL VERDICT: CONDITIONAL APPROVE
 5. `PerAttemptTimeout`: not set, but `WithTimeout(300ms)` bounds the whole call
    (sizing is the timeouts axis; here it confirms the retry schedule fits).
 6. Service taxonomy: `4xx` other than `429` permanent, `5xx`/timeouts transient,
-   `429` carries a Retry-After of at least 1 s — the only error with a hint.
+   `429` carries a Retry-After of 1 to 5 s — the only error with a hint.
 7. Classification: `4xx` (not `429`) marked `r8e.Permanent` → permanent errors
    fast-fail, no wasted attempts. The default-transient trap does NOT fire, and
    the taxonomy does not contradict itself (the throttle is not `Permanent`).

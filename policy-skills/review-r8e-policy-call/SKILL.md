@@ -61,7 +61,8 @@ This reviewer judges ONLY the **wrapped call's nature and its compatibility with
 the patterns applied to it**: idempotency / side effects, retry-safety,
 hedge-safety (concurrent duplicate execution), `ctx` honoring and true
 cancellability (including the slots a hung call keeps holding), resource cleanup
-on every exit path, the real error taxonomy the call emits, and re-execution
+on every exit path (the httpx response-body contract included), the real error
+taxonomy the call emits, and re-execution
 hazards (partial-write inconsistency, shared captured state across hedge
 goroutines or with the caller once `Do` returned).
 
@@ -110,11 +111,20 @@ here; do not dismiss an observation as "probably not serious."
 - Orphaned side effect: a timeout/cancel that returns to the caller while the
   downstream write keeps running to completion.
 - Slots a hung call keeps: under `WithCircuitBreaker`, a call that ignores `ctx`
-  and hangs keeps its half-open probe slot (and its bulkhead slot) after
-  `WithTimeout` answered the caller; once such calls hold every probe slot, the
-  breaker stays half-open until restart.
+  and hangs keeps its half-open probe slot (and its bulkhead slot, except with
+  `WithHedge`, which frees it on the cut) after `WithTimeout` answered the
+  caller; once such calls hold every probe slot, the breaker stays half-open
+  until restart.
 - Resource cleanup on EVERY exit path (response body, connection, file, lock),
-  including the fallback / timeout / cancel / panic paths.
+  including the fallback / timeout / cancel / panic paths. On an httpx `Client`:
+  a static `WithFallback` drops the `StatusError` that keeps a permanent body
+  open (the connection leaks); under `WithRetry`, `Do` returns a nil response
+  with any error, so the permanent body is closed through `StatusError.Response`.
+- httpx body read after `Do`: the body is read on the attempt's context, which
+  `WithTimeout`, `WithHedge`, `PerAttemptTimeout` and a `PropagateDeadline`
+  budget end when they return (the `StandardHTTPClient` / `AggressiveHTTPClient`
+  presets carry `WithTimeout`). The caller then reads only the buffered start,
+  then `context.Canceled`.
 - Partial-failure consistency: a write retried after a partial application leaves
   inconsistent state.
 - Shared captured state: variables closed over by the fn that two hedge
@@ -122,7 +132,9 @@ here; do not dismiss an observation as "probably not serious."
 - State shared with the caller after `Do` returned: under `WithTimeout` (or
   `WithCoalesce`, `RefreshAhead`), `Do` returns when the deadline fires or the
   caller's `ctx` ends, while the fn keeps running on its own goroutine. Anything
-  the fn writes that the caller reads afterwards must be synchronised.
+  the fn writes that the caller reads afterwards must be synchronised. The same
+  holds for an `httpx.NewResponseClient` classifier: it runs inside the attempt,
+  concurrently with itself and maybe after `Do` returned.
 - Re-execution determinism: read-after-write / token-refresh / RNG inside the fn
   that misbehaves when run more than once.
 - Real error taxonomy: which errors the call actually returns, and whether
@@ -130,7 +142,10 @@ here; do not dismiss an observation as "probably not serious."
   depend on — enumerate the taxonomy here even though *acting* on it is theirs).
   Include any r8e sentinel the fn returns bare (a nested policy's error passed
   through, or its own refusals written as `ErrBulkheadFull` and the like):
-  `IsLocalRejection` reads it as the policy's own rejection.
+  `IsLocalRejection` reads it as the policy's own rejection. Note that the
+  caller does not always see the fn's own error: at a binding `WithTimeout` it
+  is `ErrTimeout`, once the caller's `ctx` ended it is the context's error, and a
+  `PerAttemptTimeout` cut wraps it in `ErrAttemptTimeout`.
 - Panic surface: can the fn panic, and is `WithRecover` present if so.
 - Blocking / unbounded work not bounded by `ctx` (infinite read, no deadline).
 - Nested guards: the call already has its own internal timeout/retry that fights
@@ -147,14 +162,15 @@ than 5 are findable, justify in writing that the call's failure modes are
 structurally bounded. Prioritise: retry of a write (double effect), hedge of a
 write (concurrent duplicate), ctx ignored (orphaned work after timeout, a hung
 probe holding the breaker half-open), partial-write retried (inconsistency),
-resource leaked on a non-happy path.
+resource leaked on a non-happy path, an httpx body cut after `Do`.
 
 ### Phase 3 — Scoring
 
 For each observation and scenario assign BLOCKING / IMPORTANT / NOTED. Scoring
 rests on a demonstrated failure mode, not aesthetic preference or a "best
 practice" invoked without a concrete case. A retried/hedged non-idempotent write,
-or a timeout that cannot cancel a committing write, is BLOCKING.
+a timeout that cannot cancel a committing write, or an httpx body visibly read
+after `Do` under an r8e deadline that cuts it, is BLOCKING.
 
 ### Phase 4 — Verdict
 

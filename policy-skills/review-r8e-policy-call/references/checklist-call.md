@@ -45,6 +45,9 @@ Per-category checks for the wrapped call. Each check is phrased so a "yes" to th
       sizing are the overload axis's.)
 - [ ] Same for a bulkhead: does a hung call keep its slot after `WithTimeout`
       returned, until every slot is held and every call gets `ErrBulkheadFull`?
+      (With `WithHedge` in the policy the slot is freed on the cut while the
+      call runs on: the bulkhead no longer caps those calls. Its sizing is the
+      overload axis's.)
 
 ## State shared with the caller (Do returned, the call runs on)
 - [ ] Under `WithTimeout` (or `WithCoalesce`, `RefreshAhead`), `Do` returns as
@@ -52,12 +55,29 @@ Per-category checks for the wrapped call. Each check is phrased so a "yes" to th
       on its own goroutine until it returns. Does the fn write to state the
       caller reads after `Do` returned (a captured result variable, a buffer, a
       request-scoped struct) without synchronisation?
+- [ ] An `httpx.NewResponseClient` classifier runs inside the attempt, maybe on
+      another goroutine, concurrently with itself (concurrent `Do`, hedge) and
+      after `Do` returned. Does it keep state, or modify the `body` slice the
+      caller reads back?
 
 ## Resource cleanup (every exit path)
 - [ ] Response body / connection / file / lock released on the success path?
 - [ ] On the ERROR path, the timeout path, the cancel path, the panic path?
 - [ ] Does a retry that drains+reuses a body conflict with a permanent path that
       hands the body to the caller (httpx contract)?
+- [ ] httpx `Client` with a static `WithFallback`? It drops the `StatusError` that
+      keeps a permanent response's body open: the connection leaks until the
+      caller's context ends. (`WithFallbackFunc` closing
+      `StatusError.Response.Body` is the safe form.)
+- [ ] httpx under `WithRetry`: `Do` returns a nil response with any error. Does
+      the caller close a permanent body only through `resp`, which is nil, rather
+      than through `errors.As(err, &se)` and `se.Response.Body`?
+- [ ] Do the callers read the response body after httpx `Do` while the policy has
+      `WithTimeout`, `WithHedge`, `PerAttemptTimeout` or a `PropagateDeadline`
+      budget (or a `StandardHTTPClient` / `AggressiveHTTPClient` preset, which
+      carry `WithTimeout`)? Those end the attempt's context when they return:
+      the caller reads the buffered start, then `context.Canceled`. The deadline
+      belongs on the ctx passed to `Do`.
 
 ## Error taxonomy (enumerate; acting on it is the retry/fallback axes)
 - [ ] What error types does the call actually return?
@@ -67,9 +87,15 @@ Per-category checks for the wrapped call. Each check is phrased so a "yes" to th
       downstream treats as authoritative?
 - [ ] Does the call return an r8e sentinel BARE: a nested r8e policy's error
       passed through as-is, or its own refusals written as `ErrRateLimited`,
-      `ErrBulkheadFull` and the like? `IsLocalRejection` then reads the
-      downstream's refusal as this policy's own guard turning the call away.
-      Enumerate it; what the breaker makes of it is the overload axis's.
+      `ErrBulkheadFull`, `ErrCoolingDown` and the like? `IsLocalRejection` then
+      reads the downstream's refusal as this policy's own guard turning the call
+      away. Enumerate it; what the breaker makes of it is the overload axis's.
+- [ ] Which error does the CALLER get at a deadline? At a binding `WithTimeout`,
+      an error the fn returns once the timeout has passed is `ErrTimeout`; a
+      failed call the caller ended returns the caller's context error, not the
+      fn's; a `PerAttemptTimeout` cut wraps the fn's error in
+      `ErrAttemptTimeout`. Enumerate it; acting on it is the timeouts, retry and
+      fallback axes'.
 
 ## Panic & determinism
 - [ ] Can the fn panic (nil deref, type assertion, map write race)? Is
@@ -86,3 +112,5 @@ Per-category checks for the wrapped call. Each check is phrased so a "yes" to th
 - Retry or hedge on a non-idempotent write with no server-side dedup.
 - A timeout/cancel that returns while the write commits downstream.
 - A response body / connection leaked on a non-happy path under load.
+- An httpx response body visibly read after `Do` under `WithTimeout`,
+  `WithHedge`, `PerAttemptTimeout` or a `PropagateDeadline` budget.

@@ -14,6 +14,9 @@ against `api-constraints.md` before presenting.
 | Non-idempotent write **with** an idempotency key the call sends | `WithRetry` OK (dedup downstream), `WithHedge` only if the key dedups concurrent dupes | the key collapses duplicates server-side |
 | Call ignores `ctx` | fix the call first; `WithTimeout` cannot cancel it (only stops *waiting*); under a breaker, add `HalfOpenProbeLease` as a safety net (§4) | a "timeout" that can't cancel leaks work, and a hung probe keeps its half-open slot |
 | Call goes through another r8e policy (nested) | the function wraps or replaces the nested policy's errors before returning them | a bare nested rejection reads as this policy's own (`IsLocalRejection`): the breaker would never count the downstream's saturation |
+| httpx `Client` whose callers read the body after `Do` | bound the call with a deadline on the ctx passed to `Do`, not `WithTimeout` / `WithHedge` / `PerAttemptTimeout` / `PropagateDeadline` (nor a preset that has `WithTimeout`) | those end the attempt's ctx when they return: the caller reads the buffered start, then `context.Canceled` |
+| httpx `Client` (any) | no `WithCoalesce`, no `WithCache`, no static `WithFallback`; under `WithRetry` close a permanent body through `StatusError.Response` | one `*http.Response` per caller; a static fallback drops the `StatusError` and leaks the connection |
+| Same HTTP status for a retriable and a final case (403/404) | `httpx.NewResponseClient(name, hc, classify)`; `classify` stateless, returns a `StatusError` to keep `Retry-After` and the body | the status alone misclassifies; the adapter adds no `StatusError` itself |
 
 ## 2. Latency profile → deadlines
 
@@ -21,8 +24,10 @@ against `api-constraints.md` before presenting.
 |---|---|---|
 | Known p99 | `WithTimeout` ≈ p99 × 2–4 headroom (hard ceiling) | tight enough to protect, loose enough not to false-trip |
 | Callers set a deadline (request ctx) | keep `WithTimeout`, `PerAttemptTimeout` and a budget **strictly shorter** than the time it leaves when the call starts | an r8e deadline equal or later arms no timer: the caller's context error ends the call, no `OnTimeout`, and the hang is the caller's |
+| Hung attempts must be cut so retry can try again | `PerAttemptTimeout(d)` strictly shorter than `WithTimeout` and the budget; detect the cut with `errors.Is(err, ErrAttemptTimeout)` | a cut attempt matches `context.DeadlineExceeded` only when its own error does |
 | Variable / unknown p99 | `WithTimeout(ceiling)` + `AdaptiveTimeout(…)` | adaptive tightens below the ceiling from live successes |
 | Per-request budget / SLA across retries+hedge | `WithTimeBudget(d)` (needs a retry/hedge consumer) | caps the *sum*, tighter than per-attempt |
+| The budget must cut on time | `WithTimeBudget(d, PropagateDeadline())` with `WithTimeout` **longer** than `d` | cooperative, the last attempt runs past `d`; with `WithTimeout` ≤ `d` the timeout cuts instead (`ErrTimeout`) |
 | Cross-service deadline already on inbound ctx | `WithTimeBudget(d, RespectInboundDeadline())` | never run past the caller's deadline; a budget tightened to it is the caller's (its error, no `OnTimeBudgetExceeded`) |
 | This call fans out to further callees | `WithTimeBudget(d, PropagateDeadline())` (+ `httpx.InjectDeadline` for HTTP) | downstream stops when our budget is spent |
 | Heavy right tail, idempotent | `WithHedge(delay)` near p95, ideally `AdaptiveHedge(…)` + a concurrency budget | race only genuine stragglers, cap extra load |
@@ -35,7 +40,8 @@ against `api-constraints.md` before presenting.
 | Transient faults (5xx/timeouts) | `WithRetry(2–4, ExponentialJitterBackoff(base), MaxDelay(cap))` | jitter avoids synchronized retry waves |
 | Shared dependency hit by the whole fleet | add `WithRetryBudget` (per-policy) or `WithSharedRetryBudget` | caps aggregate retry pressure → no retry storm |
 | Multiple policies under one gateway | nest budgets via `r8e.Parent(parent)` | a storm in one leaf throttles its siblings |
-| Emits `Retry-After` (429/503) | honored automatically if the error implements `RetryAfterProvider` (httpx `StatusError` does); if the hints exceed `MaxDelay` or the budget, do not retry them (`RetryIf`) | `MaxDelay` caps the hint: a capped one re-sends early |
+| Emits `Retry-After` (429/503) | honored automatically if the error implements `RetryAfterProvider` (httpx `StatusError` does); if the hints exceed `MaxDelay` or the budget, `HonorRetryAfter()` (stops on those hints only) or `RetryIf` (stops on every hinted error) | `MaxDelay` caps the hint, then +0–10%: a capped one re-sends early |
+| Several routes under one parent budget; one route can die alone | `ShieldParent()` on each child; parent `MaxTokens` large enough to stay above half after a dead child's drain (`⌈child MaxTokens / 2⌉`) | without it a dead route drains the parent through its first attempts and starves its siblings |
 | Backpressure you can react to (429/Retry-After) | consider `WithRateLimit(rate, AIMD(…))` | client rate adapts to server overload |
 
 ## 4. Capacity & overload → shedding
@@ -52,6 +58,11 @@ against `api-constraints.md` before presenting.
 | Brownout (slow-but-200) is the real failure | add `SlowCallRate(d, rate)` | failure trip alone misses brownouts |
 | Healing downstream re-floods on close | add `RampRecovery(window)` | slow-start admission |
 | Hard external quota / RPS limit | `WithRateLimit(rate)` (+ `RateLimitBlocking()` to wait) | stay under quota |
+| Quota over a sliding window (N per hour) | `WithRateLimit(rate, Burst(1))` (config `rate_limit_burst`) | the default bucket holds one second of tokens; a large burst lets up to burst + rate × window through in one window |
+| Quota answers `429` + `Retry-After` (long hints, or refused calls counted) | `WithCooldown(MaxCooldown(cap), CooldownIf(is429))` | calls stop at the client until the hint; `ErrCoolingDown` is a local rejection |
+| Several routes / policies share that quota | `WithSharedCooldown(NewCooldown(…))` on each (not with `WithCooldown`) | one route's hint stops them all |
+| Several routes / policies share one pool or concurrency cap | `WithSharedBulkhead(NewBulkhead(n))` on each (not with `WithBulkhead` / `WithAdaptiveConcurrency`); the function never calls a policy on the same bulkhead | per-policy bulkheads sum above the pool; a nested call on the shared bulkhead wedges it under load |
+| Bulkhead must cap calls that outlive their timeout | no `WithHedge` in that policy, or a function that stops on its ctx | with `WithHedge` the slot is freed on the cut while the function runs |
 | Client-side load shed by backend health | `WithAdaptiveThrottle(…)` | proportional shed before the binary trip |
 | Shed by a stated SLO's burn rate | `WithSLO(target, …)` | shed when the error budget burns too fast |
 | Has criticality tiers | stamp `WithSheddability(ctx, …)`; throttle/SLO honor it | never shed `Never` traffic; shed `Always` first |
@@ -67,6 +78,7 @@ against `api-constraints.md` before presenting.
 | Hot key, avoid synchronous miss at expiry | `+ RefreshAhead(d<ttl)` (needs `WithTimeout`) | Caffeine refresh-after-write |
 | Failures are cacheable (avoid hammering) | `+ NegativeCache(d)` (a hung origin also needs `WithTimeout` below the callers' deadlines) | repeats fast-fail; a call whose own ctx ended is never cached |
 | Miss stampede on a hot key | `+ WithCoalesce(keyFn)` (needs `WithTimeout`) | collapse concurrent misses |
+| Coalesce / refresh-ahead on a policy owned by a client that shuts down | `WithBaseContext(clientCtx)`, only if every holder stops with the client | stops the detached calls on shutdown; once ended, every coalesced miss fails with `context.Canceled` for good |
 | Data changes frequently | keep `ttl` short, well under the change interval | stale authoritative data is a defect |
 | keyFn must distinguish requests | derive the key from request identity in ctx; empty key opts out | a colliding key returns wrong results |
 
@@ -78,6 +90,9 @@ against `api-constraints.md` before presenting.
 | Policies built per job / tenant / request | `defer policy.Registry().Unregister(policy)`, an empty name, or a `WithRegistry` registry dropped with them | a named policy stays registered: the registry and its health endpoints grow without bound |
 | Failure modes must be visible | `WithHooks(&Hooks{…})` on the patterns present; metrics are automatic | wire hooks to the modes you protect against; hooks run concurrently and may run after `Do` returned, so they must be safe for concurrent use |
 | Breaker with a classifier that makes outcomes neutral | `OnCircuitNeutral` hook, or an alert on `CircuitNeutralOutcomes` (`r8e.policy.circuit_neutral_outcomes`) | a neutral outcome reaches neither the failure counter nor the slow-call window: callers abandoning a slow dep only show there |
+| Cooldown / `PerAttemptTimeout` present | `OnCoolingDown` + `OnCooldownArmed`; `OnAttemptTimeout` (counters `CoolingDown`, `AttemptTimeouts`) | refusals and per-attempt cuts are otherwise silent |
+| Errors go to logs, metric labels or dashboards | `r8e.ErrorCode(err)`, never `err.Error()` or a `permanent:` / `transient:` prefix (gone since v0.13.0) | stable codes; `r8e.rejection_reason` uses them |
+| Shared bulkhead | aggregate its gauges and conditions across policies with max, not sum | every sharing policy reports the same bulkhead |
 | OTel shop | `r8eotel.Register(meter, reg)` + `r8eotel.Trace(policy, tp)` | metrics + tracing bridge |
 | Dedicated/owned dependency whose loss should pull the pod | `WithReadinessImpact()` | only when NOT fleet-shared |
 | Shared dependency | do NOT gate readiness | avoids fleet-wide readiness flip |
@@ -88,7 +103,8 @@ against `api-constraints.md` before presenting.
 
 1. Idempotency decided first; retry/hedge consistent with it.
 2. Every required-companion present (`api-constraints.md`).
-3. No bulkhead + adaptive-concurrency together.
+3. No bulkhead + adaptive-concurrency together; a shared bulkhead or cooldown
+   alone in its slot (`r8e.ValidateOptions` reports the conflicts).
 4. Permanent errors classified if retrying.
 5. Every parameter traces to a service trait (rationale table).
 6. Readiness impact only on non-shared deps.
@@ -100,3 +116,5 @@ against `api-constraints.md` before presenting.
    `HalfOpenProbeLease` above the worst probe span.
 10. Hooks safe for concurrent use; a policy built per job / tenant / request is
     unregistered when done (or unnamed).
+11. httpx `Client`: no coalesce, cache or static fallback; a body read after `Do`
+    is bounded by the ctx deadline, not by an r8e deadline.

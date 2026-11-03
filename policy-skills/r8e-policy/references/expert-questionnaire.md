@@ -42,6 +42,14 @@ by axis, each with the concrete answer options and **what the answer changes**.
      them, so its rejections are not taken for this policy's own
      (`IsLocalRejection`) and the breaker still counts them.
    - No → nothing to do.
+6. **Is it an HTTP call through httpx, and do the callers read the response
+   body after `Do`?**
+   - Yes → bound the call with a deadline on the ctx passed to `Do`: `WithTimeout`,
+     `WithHedge`, `PerAttemptTimeout` and `PropagateDeadline` cut the body once
+     `Do` returns. No `WithCoalesce`, `WithCache` or static `WithFallback` on
+     that client.
+   - Does the status alone tell a retriable case from a final one (same 403 /
+     404 for both)? No → `httpx.NewResponseClient` with a stateless classifier.
 
 ## Axis 2 — timeouts / deadlines
 
@@ -61,6 +69,13 @@ by axis, each with the concrete answer options and **what the answer changes**.
    than what is left. An r8e deadline equal or later arms no timer: the call
    ends with the caller's context error, `OnTimeout` never fires, and a hang is
    the caller's, not r8e's.
+5. **With a budget: must it cut the call on time, and does anything read the
+   error it ends with?**
+   - Cut on time → `PropagateDeadline()` and a `WithTimeout` longer than the
+     budget. `ErrTimeBudgetExceeded` then wraps the cut attempt's error only
+     when it was the last attempt allowed.
+   - A cooperative budget is fine → the last attempt may run past it, up to
+     `WithTimeout`.
 
 ## Axis 3 — retry / amplification
 
@@ -73,10 +88,16 @@ by axis, each with the concrete answer options and **what the answer changes**.
 3. **Does the service emit `Retry-After` / 429 throttling, and how long are the
    hints?**
    - Yes → honored automatically (httpx) — confirm the adapter is used. If the
-     hints exceed `MaxDelay` or the budget, do not retry them (`RetryIf`):
-     `MaxDelay` caps a hint, so a capped one re-sends early.
+     hints exceed `MaxDelay` or the budget, `HonorRetryAfter()` stops on those
+     hints only, `RetryIf` stops on every hinted error: `MaxDelay` caps a hint,
+     so a capped one re-sends early. Long hints on a quota → cooldown (axis 4).
 4. **How many retries can the upstream latency budget actually afford?**
    → caps `maxAttempts` and `MaxDelay`.
+5. **Do several routes share one parent retry budget, and must the others keep
+   retrying when one route dies?**
+   - Yes → `ShieldParent()` on each child budget, and a parent large enough to
+     stay above half its capacity after a dead child's drain.
+   - No, a storm in one route should throttle the others → plain `Parent`.
 
 ## Axis 4 — overload / capacity
 
@@ -89,7 +110,9 @@ by axis, each with the concrete answer options and **what the answer changes**.
    - Reject → default bulkhead.
 3. **Is the failure mode a hard down (errors) or a brownout (slow but 200)?**
    - Brownout → add `SlowCallRate`.
-4. **Is there a hard external rate quota?** → `WithRateLimit`.
+4. **Is there a hard external rate quota, and over which window?**
+   → `WithRateLimit`. A sliding window (N per hour) → `Burst(1)`: the default
+   bucket holds one second of tokens.
 5. **Do you have an explicit SLO for this path, and traffic tiers that can be
    shed?** → `WithSLO` / `WithAdaptiveThrottle` + `Sheddability`.
 6. **Which errors are the service's normal answer rather than a sign it is
@@ -108,6 +131,23 @@ by axis, each with the concrete answer options and **what the answer changes**.
    - Yes / unsure → `HalfOpenProbeLease(d)`, `d` above the worst time a probe
      can take (all attempts, backoff, bulkhead or rate-limiter wait).
    - No (the call honors `ctx` under `WithTimeout`) → no lease needed.
+8. **Does the quota answer `429` with a `Retry-After`? How long are the hints,
+   are refused calls counted against the quota, and do several routes share
+   it? Does anything else (a `503` from one instance) send a hint?**
+   - Long hints, or refused calls counted → `WithCooldown(MaxCooldown(cap))`.
+   - Several routes on that quota → `WithSharedCooldown(NewCooldown(…))`.
+   - Other responses carry hints too → `CooldownIf` narrowed to the quota's
+     `429`.
+   - Short hints, nothing counted → a breaker that counts the `429` may be
+     enough.
+9. **Do several routes or policies call this API through one capacity limit
+   (pool, concurrency quota)? Does one route's call go through another?**
+   - Shared limit → `WithSharedBulkhead(NewBulkhead(n))`, sized to the limit.
+   - One route calls another on the same bulkhead → do not share it: a nested
+     call wedges it under load.
+10. **Can the call outlive its timeout (slow to stop on `ctx`), and must the
+    bulkhead cap those calls?** → no `WithHedge` in that policy: the hedge frees
+    the slot on the cut.
 
 ## Axis 5 — fallback / cache
 
@@ -123,6 +163,11 @@ by axis, each with the concrete answer options and **what the answer changes**.
    - Hot key, avoid expiry stampede → `+ RefreshAhead` / `+ WithCoalesce`.
 4. **What uniquely identifies a request for caching/coalescing?**
    → the `keyFn`; a colliding key returns wrong results.
+5. **With coalescing or refresh-ahead: is the policy owned by a client that
+   shuts down, and do all its holders stop with that client?**
+   - Yes → `WithBaseContext(clientCtx)` stops the detached calls on shutdown.
+   - Holders outlive the client → no base context: once it ends, every
+     coalesced miss fails with `context.Canceled`.
 
 ## Axis 6 — observability / ops
 
@@ -135,7 +180,11 @@ by axis, each with the concrete answer options and **what the answer changes**.
 3. **Do operators need to retune this at runtime without a redeploy?**
    - Yes → express config-expressible params via `r8econf` JSON.
 4. **Is this a metrics/OTel shop?** → `r8eotel.Register` + `Trace`.
-5. **Is the policy built once at start-up, or per job / tenant / request?**
+5. **Do logs, dashboards or alerts match error text or `r8e.rejection_reason`
+   values?** → `r8e.ErrorCode(err)` for labels. Since v0.13.0 there is no
+   `permanent:` / `transient:` prefix, and a retried panic is `panic_recovered`,
+   no longer `retries_exhausted`.
+6. **Is the policy built once at start-up, or per job / tenant / request?**
    - Once → nothing to do.
    - Repeatedly → `defer policy.Registry().Unregister(policy)`, an empty name, or
      a `WithRegistry` registry dropped with the policies; else the registry and
@@ -145,7 +194,7 @@ by axis, each with the concrete answer options and **what the answer changes**.
 
 If the policy fronts **several** services (e.g. a gateway), ask which call the
 `Do` actually wraps — there is one policy per call. If the user wants one policy
-"for the gateway", clarify whether they mean a shared budget tree
-(`Parent`/`WithSharedRetryBudget`) across per-call policies, or a single
-fan-out call. Do not collapse distinct downstreams into one policy with one
-timeout.
+"for the gateway", clarify whether they mean shared guards across per-call
+policies (a budget tree with `Parent`/`WithSharedRetryBudget`, a
+`WithSharedBulkhead`, a `WithSharedCooldown`), or a single fan-out call. Do not
+collapse distinct downstreams into one policy with one timeout.
