@@ -475,11 +475,12 @@ func WithBulkhead(maxConcurrent int, opts ...BulkheadOption) Option {
 // attached to the same bulkhead, the calling policy itself included: the inner
 // call needs a second slot while the outer call holds one. Below capacity the
 // inner call still gets a slot, so the fault shows only under load. Once such
-// outer calls hold every slot, the inner call fails at once with
-// [ErrBulkheadFull] when there is no wait; with [BulkheadMaxWait], it fails
-// with [ErrBulkheadTimeout] once the wait ends; with a CoDel-only queue, it
-// waits until its context ends, forever if the context has no deadline, and
-// every policy sharing the bulkhead waits behind it.
+// outer calls hold every slot, the inner call gets what any caller of a full
+// bulkhead gets (see [Bulkhead.Acquire]): it fails, or it waits for a slot
+// that only the outer call can free. The bulkhead then stays full for as long
+// as those calls last, forever with a CoDel-only queue and contexts without a
+// deadline, and the callers of every sharing policy are refused or wait in
+// turn.
 //
 // Unlike [WithSharedRetryBudget] and [WithSharedConcurrencyBudget], it excludes
 // the policy's own limiter. It cannot be combined with [WithBulkhead] or

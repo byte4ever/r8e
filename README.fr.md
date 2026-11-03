@@ -487,11 +487,12 @@ partage ne doit appeler, directement ou non, aucune politique attachée au même
 bulkhead, y compris elle-même : l'appel interne demande un second slot pendant
 que l'appel externe tient le premier. Tant qu'il reste de la capacité, l'appel
 interne obtient quand même un slot, et le problème n'apparaît qu'en charge. Une
-fois que ces appels externes tiennent tous les slots, l'appel interne échoue
-tout de suite sans attente (`ErrBulkheadFull`), échoue à la fin de l'attente
-avec `BulkheadMaxWait` (`ErrBulkheadTimeout`), et attend la fin de son contexte
-avec une file CoDel seule, donc indéfiniment sans deadline, en bloquant toutes
-les politiques qui partagent le bulkhead.
+fois que ces appels externes tiennent tous les slots, l'appel interne reçoit ce
+que reçoit tout appelant d'un bulkhead plein (voir `Bulkhead.Acquire`) : il
+échoue, ou il attend un slot que seul l'appel externe peut libérer. Le bulkhead
+reste alors plein tant que ces appels durent, donc indéfiniment avec une file
+CoDel seule et des contextes sans deadline, et les appelants de toutes les
+politiques qui le partagent sont refusés ou attendent à leur tour.
 
 Les budgets de retry et de concurrence partagés suivent une autre règle : la
 dernière option l'emporte, et le `Reconfigure` de n'importe quelle politique
