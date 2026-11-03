@@ -93,11 +93,37 @@ func TestEverySentinelHasAUniqueCode(t *testing.T) {
 	for typeName, pos := range isTypes {
 		assert.Contains(t, unwrapTypes, typeName,
 			"%s at %s has an Is method but no Unwrap: ErrorCode cannot reach its sentinel", typeName, pos)
+		assert.Contains(t, isTypeCodes, typeName,
+			"%s at %s has an Is method: add it to isTypeCodes with the code its Is matches", typeName, pos)
 	}
 }
 
-// receiverType returns the name of the type a method is declared on, or ""
-// for a plain function.
+// isTypeCodes lists every package type that matches a sentinel through an Is
+// method, with a value of the type and the code ErrorCode must report for it.
+// TestEverySentinelHasAUniqueCode fails on an Is type missing from this table,
+// and TestIsTypesReportTheirSentinelCode checks each entry, so an Unwrap that
+// leads to a cause instead of the sentinel fails too.
+var isTypeCodes = map[string]struct {
+	err  error
+	code string
+}{
+	"PanicError": {err: &PanicError{Value: "boom"}, code: "panic_recovered"},
+}
+
+func TestIsTypesReportTheirSentinelCode(t *testing.T) {
+	t.Parallel()
+
+	for name, entry := range isTypeCodes {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, entry.code, ErrorCode(entry.err))
+		})
+	}
+}
+
+// receiverType returns the name of the type a method is declared on, generic
+// receivers included (T[P] gives T), or "" for a plain function.
 func receiverType(fn *ast.FuncDecl) string {
 	if fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return ""
@@ -106,6 +132,15 @@ func receiverType(fn *ast.FuncDecl) string {
 	expr := fn.Recv.List[0].Type
 	if star, ok := expr.(*ast.StarExpr); ok {
 		expr = star.X
+	}
+
+	// A generic receiver reads T[P] or T[P, Q].
+	switch generic := expr.(type) {
+	case *ast.IndexExpr:
+		expr = generic.X
+	case *ast.IndexListExpr:
+		expr = generic.X
+	default:
 	}
 
 	ident, ok := expr.(*ast.Ident)

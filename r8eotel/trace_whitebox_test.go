@@ -46,7 +46,7 @@ func TestRejectionReason(t *testing.T) {
 }
 
 // TestRejectionReasonWrapped verifies that wrapped sentinels are still
-// classified correctly (errors.Is walks the chain).
+// classified correctly (ErrorCode walks the Unwrap chain).
 func TestRejectionReasonWrapped(t *testing.T) {
 	t.Parallel()
 

@@ -78,8 +78,9 @@ pour une erreur qui ne porte aucune sentinelle r8e. Une enveloppe de retry ou
 de budget s'efface devant la cause qu'elle porte : une panique relancée
 jusqu'à épuisement a le label `panic_recovered`, pas `retries_exhausted`.
 Un type d'erreur à vous qui ne correspond à une sentinelle que par sa méthode
-`Is` a le label `error` : enveloppez la sentinelle avec `%w` pour obtenir son
-code. Chaque enfant porte
+`Is` a le label `error` seul, et prend le code de l'enveloppe sous un retry ou
+un budget (par exemple `retries_exhausted`) : enveloppez la sentinelle avec
+`%w` pour obtenir son code. Chaque enfant porte
 `r8e.attempt.number`. `TracedPolicy[T]` transmet toutes les méthodes de
 `Policy[T]` (`Do`, `Name`, `Reconfigure`, `Metrics`, `HealthStatus`). Voir
 [`examples/02-tracing`](examples/02-tracing).
