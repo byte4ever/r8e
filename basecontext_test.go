@@ -287,6 +287,10 @@ func TestWithBaseContextIgnoresNil(t *testing.T) {
 		cancelBase(errShutdown)
 
 		require.ErrorIs(t, <-done, context.Canceled)
+
+		// Do returns as soon as the context ends; fn records the cause on
+		// its own goroutine.
+		synctest.Wait()
 		require.ErrorIs(t, causeOf(&seenCause), errShutdown, "the first base still stops the call")
 	})
 }
