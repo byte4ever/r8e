@@ -269,7 +269,8 @@ func TestGetPolicyConfigWithCodeOverrides(t *testing.T) {
 }
 
 // The honor_retry_after key reaches the retry: true stops on a Retry-After hint
-// past max_delay, false keeps the default and retries with the capped hint.
+// past max_delay; false, or no key at all, keeps the default and retries with
+// the capped hint.
 func TestLoadHonorRetryAfter(t *testing.T) {
 	t.Parallel()
 
@@ -277,8 +278,9 @@ func TestLoadHonorRetryAfter(t *testing.T) {
 		value     string
 		wantCalls int
 	}{
-		"true":  {value: "true", wantCalls: 1},
-		"false": {value: "false", wantCalls: 3},
+		"true":   {value: `, "honor_retry_after": true`, wantCalls: 1},
+		"false":  {value: `, "honor_retry_after": false`, wantCalls: 3},
+		"absent": {value: "", wantCalls: 3},
 	}
 
 	for name, tt := range tests {
@@ -287,7 +289,7 @@ func TestLoadHonorRetryAfter(t *testing.T) {
 
 			path := writeTempFile(t, `{"policies": {"quota-api": {"retry": {
 				"max_attempts": 3, "backoff": "constant", "base_delay": "10ms",
-				"max_delay": "10s", "honor_retry_after": `+tt.value+`}}}}`)
+				"max_delay": "10s"`+tt.value+`}}}}`)
 
 			store, err := Load(path)
 			require.NoError(t, err)
