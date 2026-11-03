@@ -267,3 +267,46 @@ func TestGetPolicyConfigWithCodeOverrides(t *testing.T) {
 	require.NotEmpty(t, status.Dependencies)
 	assert.Equal(t, "child-service", status.Dependencies[0].Name)
 }
+
+// The honor_retry_after key reaches the retry: true stops on a Retry-After hint
+// past max_delay; false, or no key at all, keeps the default and retries with
+// the capped hint.
+func TestLoadHonorRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		value     string
+		wantCalls int
+	}{
+		"true":   {value: `, "honor_retry_after": true`, wantCalls: 1},
+		"false":  {value: `, "honor_retry_after": false`, wantCalls: 3},
+		"absent": {value: "", wantCalls: 3},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeTempFile(t, `{"policies": {"quota-api": {"retry": {
+				"max_attempts": 3, "backoff": "constant", "base_delay": "10ms",
+				"max_delay": "10s"`+tt.value+`}}}}`)
+
+			store, err := Load(path)
+			require.NoError(t, err)
+
+			policy, err := GetPolicy[string](store, "quota-api", r8e.WithClock(clocktest.New()))
+			require.NoError(t, err)
+
+			var calls atomic.Int64
+
+			_, err = policy.Do(context.Background(), func(context.Context) (string, error) {
+				calls.Add(1)
+
+				return "", r8e.RetryAfterError(errors.New("quota exceeded"), time.Hour)
+			})
+
+			require.Error(t, err)
+			assert.Equal(t, int64(tt.wantCalls), calls.Load())
+		})
+	}
+}

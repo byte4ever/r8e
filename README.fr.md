@@ -268,6 +268,8 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
+**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative en échec, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline. L'erreur de la tentative reste dans la chaîne, et rien n'y est ajouté : `errors.Is(err, context.DeadlineExceeded)` n'est vrai que si cette erreur correspond elle-même à `context.DeadlineExceeded`. C'est le cas de l'erreur du contexte, et d'une erreur de timeout du service appelé qui lui correspond, comme le timeout d'en-têtes de réponse de net/http ; ce n'est pas le cas d'une erreur de deadline de socket. Pour détecter la coupure, utilisez `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. La coupure se décide quand la deadline tombe, comme pour `WithTimeout` : un appelant qui annule pendant que la tentative coupée se termine ne la reprend pas, et un appelant qui annule avant la deadline garde la tentative. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée. Une tentative coupée marquée `Permanent` est enveloppée elle aussi, et arrête toujours le retry.
+
 **Retry-After :** si l'erreur d'une tentative échouée implémente
 `r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
 ce délai à la place du backoff calculé : l'attente exacte demandée par le serveur
@@ -276,11 +278,29 @@ vers le haut, de 10 % au plus. Un indice inférieur ou égal à `MaxDelay` est u
 plancher : le retry ne part jamais avant. Un indice supérieur à `MaxDelay` est
 ramené entre `MaxDelay` et 1,1 × `MaxDelay` : ce retry part donc avant l'heure
 demandée par le serveur, et l'étalement évite seulement que les clients plafonnés
-repartent tous au même instant. Face à un quota strict, excluez ces indices avec
-`RetryIf`, ou augmentez `MaxDelay`. Attachez un indice fixe à n'importe quelle erreur avec
+repartent tous au même instant. Face à un quota strict, utilisez `HonorRetryAfter`
+(ci-dessous), ou augmentez `MaxDelay`. Attachez un indice fixe à n'importe quelle erreur avec
 `r8e.RetryAfterError(err, d)`, ou implémentez l'interface vous-même ; l'adaptateur
 [`httpx`](httpx) le fait automatiquement depuis un en-tête HTTP `429`/`503`
 `Retry-After` (secondes ou HTTP-date). Voir [`examples/23-retry-after`](examples/23-retry-after).
+
+**Ne jamais relancer trop tôt (`HonorRetryAfter`).** Plafonner un indice, c'est
+relancer avant l'heure demandée par le serveur, et face à un quota ce retry prend
+un autre 429. `HonorRetryAfter()` (champ `honor_retry_after` du bloc `retry`)
+arrête alors le retry quand l'indice brut, avant jitter, dépasse `MaxDelay`. `Do`
+renvoie la dernière erreur telle quelle : l'appelant lit toujours l'indice complet
+par son `RetryAfterProvider`, et l'échec compte quand même dans un retry budget.
+Un indice inférieur ou égal à `MaxDelay` est attendu normalement. Sans `MaxDelay`,
+tout indice est attendu et l'option n'a aucun effet.
+
+```go
+policy := r8e.NewPolicy[*http.Response]("quota-api",
+    r8e.WithRetry(3, r8e.ExponentialBackoff(200*time.Millisecond),
+        r8e.MaxDelay(10*time.Second),
+        r8e.HonorRetryAfter(), // un Retry-After d'1 h termine l'appel, il n'est pas ramené à 10 s
+    ),
+)
+```
 
 ### Circuit Breaker
 
@@ -1266,7 +1286,7 @@ policy := r8e.NewPolicy[string]("observed",
 )
 ```
 
-Hooks disponibles sur `Hooks` (36) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
+Hooks disponibles sur `Hooks` (37) : `OnRetry`, `OnCircuitOpen`, `OnCircuitClose`, `OnCircuitHalfOpen`, `OnCircuitRamping`, `OnCircuitNeutral`, `OnCircuitStaleOutcome`, `OnSlowCallRateExceeded`, `OnRateLimited`, `OnRateAdapted`, `OnBulkheadFull`, `OnBulkheadAcquired`, `OnBulkheadReleased`, `OnBulkheadQueued`, `OnBulkheadTimeout`, `OnCoDelShed`, `OnTimeout`, `OnAttemptTimeout`, `OnHedgeTriggered`, `OnHedgeWon`, `OnFallbackUsed`, `OnRetryBudgetExceeded`, `OnTimeBudgetExceeded`, `OnCoalesceLeader`, `OnCoalesceFollower`, `OnConcurrencyRejected`, `OnConcurrencyLimitChanged`, `OnThrottled`, `OnSLOShed`, `OnCacheHit`, `OnCacheMiss`, `OnCacheStored`, `OnStaleServed`, `OnCacheRefreshed`, `OnPanic`, `OnConcurrencyBudgetExceeded`, `OnChaosInjected`.
 
 StaleCache a ses propres hooks configurés via `StaleCacheOption` : `OnStaleServed[K,V]` et `OnCacheRefreshed[K,V]` (voir [Stale Cache](#stale-cache)).
 

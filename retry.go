@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -12,12 +13,13 @@ type (
 		retryIf           func(error) bool
 		maxDelay          time.Duration
 		perAttemptTimeout time.Duration
+		honorRetryAfter   bool
 	}
 
 	// RetryOption configures retry behavior.
 	//
 	// Pattern: Functional Options — composable optional settings (MaxDelay,
-	// PerAttemptTimeout, RetryIf) applied to the private config, keeping the
+	// HonorRetryAfter, PerAttemptTimeout, RetryIf) applied to the private config, keeping the
 	// retry call signature stable as options are added.
 	RetryOption func(*retryConfig)
 
@@ -42,7 +44,40 @@ func MaxDelay(d time.Duration) RetryOption {
 	}
 }
 
-// PerAttemptTimeout sets a timeout for each individual retry attempt.
+// HonorRetryAfter makes the retry stop, rather than retry early, when a
+// server's Retry-After hint exceeds [MaxDelay]. Without it, the hint is capped
+// by MaxDelay and the retry leaves before the time the server asked for. With
+// it, the retry returns the last error as is, so the caller still reads the
+// full hint through its [RetryAfterProvider]; the failure still counts
+// against a retry budget. This holds on every attempt, the last one included:
+// an over-cap hint is never wrapped with [ErrRetriesExhausted]. The raw hint is
+// compared, before any jitter. Without MaxDelay (or with a non-positive one)
+// every hint is waited, so HonorRetryAfter has no effect.
+func HonorRetryAfter() RetryOption {
+	return func(cfg *retryConfig) {
+		cfg.honorRetryAfter = true
+	}
+}
+
+// PerAttemptTimeout sets a timeout for each individual retry attempt. When that
+// deadline cuts a failed attempt, the attempt's error is wrapped with
+// [ErrAttemptTimeout] and [Hooks.OnAttemptTimeout] fires. The deadline binds
+// only when it is earlier than the caller's and than any enclosing r8e
+// deadline; otherwise the attempt ends on that other deadline and carries no
+// ErrAttemptTimeout.
+//
+// The cut is decided when the deadline fires, as for [WithTimeout] and a time
+// budget: a caller that cancels later, or whose later deadline passes, while
+// the cut attempt is still returning does not take it back. A caller that
+// cancels before the deadline keeps the attempt. An attempt that returns its
+// own error on the deadline, before its context reports it, counts as cut.
+//
+// The wrap keeps the attempt's own error in the chain and adds nothing to it,
+// so errors.Is(err, context.DeadlineExceeded) holds only when that error
+// matches context.DeadlineExceeded itself (the context's error does, and so
+// does net/http's response-header timeout). Detect the cut with
+// errors.Is(err, ErrAttemptTimeout). A cut attempt marked [Permanent], or
+// rejected by [RetryIf], is wrapped too and still stops the retry.
 func PerAttemptTimeout(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.perAttemptTimeout = d
@@ -106,7 +141,10 @@ func DoRetry[T any](
 			permit = params.Concurrency
 		}
 
-		result, err := runRetryAttempt(ctx, fn, cfg, permit)
+		result, cut, err := runRetryAttempt(ctx, fn, cfg, permit)
+		if cut {
+			params.Hooks.emitAttemptTimeout(attempt + 1)
+		}
 
 		// On success: credit the retry budget and return immediately.
 		if err == nil {
@@ -120,18 +158,26 @@ func DoRetry[T any](
 		// If error is Permanent: stop immediately. A non-retryable failure
 		// leaves the budget untouched — it cannot drive a retry storm.
 		if IsPermanent(err) {
-			return zero, err //nolint:wrapcheck // caller's error returned as-is
+			return zero, err //nolint:wrapcheck // caller's error, wrapped with ErrAttemptTimeout when cut
 		}
 
 		// If retryIf predicate is set and returns false: stop (non-retryable).
 		if cfg.retryIf != nil && !cfg.retryIf(err) {
-			return zero, err //nolint:wrapcheck // caller's error returned as-is
+			return zero, err //nolint:wrapcheck // caller's error, wrapped with ErrAttemptTimeout when cut
 		}
 
 		// Retryable failure: charge it against the retry budget. The terminal
 		// attempt is charged too — it is a real downstream failure and a
 		// storm contributor — even though no retry follows it.
 		params.Budget.recordFailure()
+
+		// A server hint past MaxDelay would be capped and retried early: with
+		// HonorRetryAfter, stop and hand the caller the error that carries it.
+		// The check runs before the last-attempt exit, so the error comes back
+		// as is on every attempt, never wrapped with ErrRetriesExhausted.
+		if cfg.honorRetryAfter && hintExceedsMaxDelay(err, cfg.maxDelay) {
+			return zero, err
+		}
 
 		// If this is the last attempt, don't sleep or emit hook.
 		if attempt == maxAttempts-1 {
@@ -200,7 +246,10 @@ func DoRetry[T any](
 // runRetryAttempt executes one attempt of fn, optionally under a per-attempt
 // timeout, and releases the concurrency-budget permit (when permit is non-nil)
 // as the attempt returns. The release is deferred so it runs even if fn panics,
-// keeping the permit accounting balanced without a WithRecover boundary.
+// keeping the permit accounting balanced without a WithRecover boundary. When
+// the per-attempt deadline cut a failed attempt (see attemptDeadlineFired), cut
+// is true and err is fn's error wrapped with ErrAttemptTimeout; otherwise err is
+// fn's error unchanged.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func runRetryAttempt[T any](
@@ -208,19 +257,69 @@ func runRetryAttempt[T any](
 	fn func(context.Context) (T, error),
 	cfg retryConfig,
 	permit *ConcurrencyBudget,
-) (T, error) {
+) (result T, cut bool, err error) {
 	if permit != nil {
 		defer permit.release()
 	}
 
-	if cfg.perAttemptTimeout > 0 {
-		attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
-		defer attemptCancel()
+	if cfg.perAttemptTimeout <= 0 {
+		result, err = fn(ctx)
 
-		return fn(attemptCtx)
+		return result, false, err
 	}
 
-	return fn(ctx)
+	attemptCtx, attemptCancel := withPolicyTimeout(ctx, cfg.perAttemptTimeout)
+	defer attemptCancel()
+
+	result, err = fn(attemptCtx)
+	if err != nil && attemptDeadlineFired(ctx, attemptCtx) {
+		return result, true, fmt.Errorf("%w: %w", ErrAttemptTimeout, err)
+	}
+
+	return result, false, err
+}
+
+// attemptDeadlineFired reports whether the deadline [PerAttemptTimeout] set on
+// attemptCtx cut the attempt. The deadline must bind (see deadlineBinds): one
+// that does not bind leaves attemptCtx with parent's deadline. The decision is
+// then the first end attemptCtx records, as DoTimeout and the time budget
+// decide when their deadline fires: its own deadline means a cut, and a
+// parent cancelled before it means none, whatever happens to parent while the
+// attempt is still returning. A binding deadline comes strictly before any
+// deadline of parent, so DeadlineExceeded as the first end is the attempt's
+// own. When attemptCtx has not reported an end yet, the clock decides: an
+// attempt that returns on or after its deadline, before the context's timer
+// ran, is cut unless parent was cancelled.
+func attemptDeadlineFired(parent, attemptCtx context.Context) bool {
+	deadline, ok := attemptCtx.Deadline()
+	if !ok || !deadlineBinds(parent, deadline) {
+		return false
+	}
+
+	if err := attemptCtx.Err(); err != nil {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
+
+	if time.Now().Before(deadline) {
+		return false
+	}
+
+	err := parent.Err()
+
+	return err == nil || errors.Is(err, context.DeadlineExceeded)
+}
+
+// hintExceedsMaxDelay reports whether err carries a Retry-After hint, before
+// jitter, longer than maxDelay. A non-positive maxDelay sets no cap, so no hint
+// exceeds it.
+func hintExceedsMaxDelay(err error, maxDelay time.Duration) bool {
+	if maxDelay <= 0 {
+		return false
+	}
+
+	after, ok := retryAfterFromError(err)
+
+	return ok && after > maxDelay
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the

@@ -175,6 +175,10 @@ type (
 		// MaxAttempts is the maximum number of retry attempts.
 		// Required. Example: 3.
 		MaxAttempts *int `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+		// HonorRetryAfter stops the retry, rather than retry early, when a
+		// Retry-After hint exceeds MaxDelay (see [HonorRetryAfter]).
+		// Optional. Default: false. Example: true.
+		HonorRetryAfter *bool `json:"honor_retry_after,omitempty" yaml:"honor_retry_after,omitempty"`
 	}
 
 	// AdaptiveConfig holds adaptive-concurrency configuration values.
@@ -1091,6 +1095,10 @@ func retryRuntimeFromConfig(cfg *RetryConfig) (*retryRuntime, error) {
 		}
 
 		opts = append(opts, MaxDelay(maxDelay))
+	}
+
+	if cfg.HonorRetryAfter != nil && *cfg.HonorRetryAfter {
+		opts = append(opts, HonorRetryAfter())
 	}
 
 	// max_attempts is required: a nil value would silently collapse the retry to
