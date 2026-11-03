@@ -266,7 +266,7 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
-**Attempts cut by `PerAttemptTimeout`.** When that deadline cuts a failed attempt, the attempt's error is wrapped with `ErrAttemptTimeout`, so `errors.Is(err, r8e.ErrAttemptTimeout)` tells r8e's cut apart from the expiry of your own deadline. The attempt's own error stays in the chain, and nothing is added to it: `errors.Is(err, context.DeadlineExceeded)` holds only when that error matches `context.DeadlineExceeded` itself. The context's error does, and so does a downstream timeout error that matches it, such as net/http's response-header timeout; a socket deadline error does not. To detect the cut, use `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` fires for each cut attempt (1-indexed) and the `AttemptTimeouts` metric counts them. The deadline binds only when it is earlier than the caller's and than any enclosing `WithTimeout` or time budget; an attempt ended by one of those carries no `ErrAttemptTimeout`. The cut is decided when the deadline fires, as for `WithTimeout`: a caller that cancels while the cut attempt is still returning does not take it back, and a caller that cancels before the deadline keeps the attempt. An attempt whose function returns its own error on the deadline, before the context reports it, still counts as cut. A cut attempt marked `Permanent` is wrapped too, and still stops the retry.
+**Attempts cut by `PerAttemptTimeout`.** When that deadline cuts a failed attempt, the attempt's error is wrapped with `ErrAttemptTimeout`, so `errors.Is(err, r8e.ErrAttemptTimeout)` tells r8e's cut apart from the expiry of your own deadline. The attempt's own error stays in the chain, and nothing is added to it: `errors.Is(err, context.DeadlineExceeded)` holds only when that error matches `context.DeadlineExceeded` itself. The context's error does, and so does a downstream timeout error that matches it, such as net/http's response-header timeout; a socket deadline error does not. To detect the cut, use `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` fires for each cut attempt (1-indexed) and the `AttemptTimeouts` metric counts them. The deadline binds only when it is earlier than the caller's and than any enclosing `WithTimeout` or time budget; an attempt ended by one of those carries no `ErrAttemptTimeout`. The cut is decided when the deadline fires, as for `WithTimeout`: a caller that cancels while the cut attempt is still returning does not take it back, and a caller that cancels before the deadline keeps the attempt. An attempt whose function returns its own error on the deadline, before the context reports it, still counts as cut. A cut attempt marked `Permanent` is wrapped too, and still stops the retry. See [`examples/49-attempt-timeout`](examples/49-attempt-timeout).
 
 **Retry-After:** if a failed attempt's error implements `r8e.RetryAfterProvider`
 (`RetryAfter() (time.Duration, bool)`), retry honors that delay in place of the computed backoff — the precise wait a
@@ -288,7 +288,7 @@ retry instead when the raw hint, before jitter, exceeds `MaxDelay`. `Do` then
 returns the last error as is, so the caller still reads the full hint through its
 `RetryAfterProvider`; the failure still counts against a retry budget. A hint at
 or below `MaxDelay` is waited as usual, and without `MaxDelay` every hint is
-waited, so the option has no effect.
+waited, so the option has no effect. See [`examples/48-honor-retry-after`](examples/48-honor-retry-after).
 
 ```go
 policy := r8e.NewPolicy[*http.Response]("quota-api",
@@ -381,7 +381,7 @@ policy = r8e.NewPolicy[string]("rl-blocking",
 )
 ```
 
-**Bucket size (`Burst`).** `Burst(n)` sets the bucket capacity to `n` tokens, apart from the rate. The bucket starts full, so without it 100 calls leave at once on start-up at 100 req/s; `WithRateLimit(100, r8e.Burst(1))` spaces them out from the first call. `Reconfigure` and the AIMD step change the rate, never a capacity set by `Burst`. `n` must be between 1 and `r8e.MaxBurst`, or `NewPolicy` panics with `ErrRateLimitBurstOutOfRange`. A rate of zero or less still empties the bucket, `Burst` or not; a later positive rate brings the `Burst` capacity back, with an empty bucket. In JSON the field is `rate_limit_burst` (requires `rate_limit`). A reload can change the burst of a policy built with one, but cannot add one to a policy built without it (`ErrPatternAbsent`). A reload without the field keeps the current bucket, like any absent field: removing `rate_limit_burst` from the file keeps the burst until the policy is rebuilt. A NaN rate, like a rate of zero or less, admits nothing.
+**Bucket size (`Burst`).** `Burst(n)` sets the bucket capacity to `n` tokens, apart from the rate. The bucket starts full, so without it 100 calls leave at once on start-up at 100 req/s; `WithRateLimit(100, r8e.Burst(1))` spaces them out from the first call. `Reconfigure` and the AIMD step change the rate, never a capacity set by `Burst`. `n` must be between 1 and `r8e.MaxBurst`, or `NewPolicy` panics with `ErrRateLimitBurstOutOfRange`. A rate of zero or less still empties the bucket, `Burst` or not; a later positive rate brings the `Burst` capacity back, with an empty bucket. In JSON the field is `rate_limit_burst` (requires `rate_limit`). A reload can change the burst of a policy built with one, but cannot add one to a policy built without it (`ErrPatternAbsent`). A reload without the field keeps the current bucket, like any absent field: removing `rate_limit_burst` from the file keeps the burst until the policy is rebuilt. A NaN rate, like a rate of zero or less, admits nothing. See [`examples/47-rate-limit-burst`](examples/47-rate-limit-burst).
 
 A bucket holds a quota only over its refill window. Against a quota of 450 calls per sliding hour, `WithRateLimit(0.125, r8e.Burst(450))` can let up to 900 calls through in an hour: 450 at once, then 450 more as the bucket refills. `Burst(1)` at the same rate never goes past 451.
 
@@ -793,7 +793,7 @@ parent for it. No bound is promised for a flapping child: its successes are
 still credited to the parent, and each one that lifts it back above the
 threshold lets the next failure through. While the shield holds, the parent's
 tokens leave out that child's failures but still count its successes: watch the
-child's own budget. Like `Parent`, it is set at construction and code-only.
+child's own budget. Like `Parent`, it is set at construction and code-only. See [`examples/50-shield-parent`](examples/50-shield-parent).
 
 ```go
 svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
@@ -1231,7 +1231,7 @@ r8e.IsTransient(err)  // true for unclassified and explicitly transient errors
 r8e.IsPermanent(err)  // true only for explicitly permanent errors
 ```
 
-Every r8e sentinel has a short, stable code for logs, metrics and trace labels. `r8e.ErrorCode(err)` returns it (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`, …), even when the sentinel is wrapped, and `""` for an error that carries none. Three sentinels are envelopes: `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` and `ErrConcurrencyBudgetExceeded` wrap the error that ended the last attempt, so they yield to the cause they carry. A panic retried to exhaustion reports `"panic_recovered"`, and a timeout `"timeout"`. An error that carries only envelopes reports the outermost one, so a time budget that cuts a retry reports `"time_budget_exceeded"`. `ErrorCode` reaches a sentinel through `Unwrap`, not through an `Is` method: an error type of your own that matches a sentinel only through `Is` carries no code, so wrap the sentinel with `%w`.
+Every r8e sentinel has a short, stable code for logs, metrics and trace labels. `r8e.ErrorCode(err)` returns it (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`, …), even when the sentinel is wrapped, and `""` for an error that carries none. Three sentinels are envelopes: `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` and `ErrConcurrencyBudgetExceeded` wrap the error that ended the last attempt, so they yield to the cause they carry. A panic retried to exhaustion reports `"panic_recovered"`, and a timeout `"timeout"`. An error that carries only envelopes reports the outermost one, so a time budget that cuts a retry reports `"time_budget_exceeded"`. `ErrorCode` reaches a sentinel through `Unwrap`, not through an `Is` method: an error type of your own that matches a sentinel only through `Is` carries no code, so wrap the sentinel with `%w`. See [`examples/46-error-codes`](examples/46-error-codes).
 
 ```go
 slog.Warn("call failed", "reason", r8e.ErrorCode(err), "err", err)
@@ -1602,6 +1602,11 @@ go run ./examples/42-nested-retry-budget/
 go run ./examples/43-deadline-propagation-cross-service/
 go run ./examples/44-circuit-breaker-classifier/
 go run ./examples/45-registry-unregister/
+go run ./examples/46-error-codes/
+go run ./examples/47-rate-limit-burst/
+go run ./examples/48-honor-retry-after/
+go run ./examples/49-attempt-timeout/
+go run ./examples/50-shield-parent/
 ```
 
 ## License

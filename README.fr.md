@@ -268,7 +268,7 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
-**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative en échec, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline. L'erreur de la tentative reste dans la chaîne, et rien n'y est ajouté : `errors.Is(err, context.DeadlineExceeded)` n'est vrai que si cette erreur correspond elle-même à `context.DeadlineExceeded`. C'est le cas de l'erreur du contexte, et d'une erreur de timeout du service appelé qui lui correspond, comme le timeout d'en-têtes de réponse de net/http ; ce n'est pas le cas d'une erreur de deadline de socket. Pour détecter la coupure, utilisez `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. La coupure se décide quand la deadline tombe, comme pour `WithTimeout` : un appelant qui annule pendant que la tentative coupée se termine ne la reprend pas, et un appelant qui annule avant la deadline garde la tentative. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée. Une tentative coupée marquée `Permanent` est enveloppée elle aussi, et arrête toujours le retry.
+**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative en échec, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline. L'erreur de la tentative reste dans la chaîne, et rien n'y est ajouté : `errors.Is(err, context.DeadlineExceeded)` n'est vrai que si cette erreur correspond elle-même à `context.DeadlineExceeded`. C'est le cas de l'erreur du contexte, et d'une erreur de timeout du service appelé qui lui correspond, comme le timeout d'en-têtes de réponse de net/http ; ce n'est pas le cas d'une erreur de deadline de socket. Pour détecter la coupure, utilisez `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. La coupure se décide quand la deadline tombe, comme pour `WithTimeout` : un appelant qui annule pendant que la tentative coupée se termine ne la reprend pas, et un appelant qui annule avant la deadline garde la tentative. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée. Une tentative coupée marquée `Permanent` est enveloppée elle aussi, et arrête toujours le retry. Voir [`examples/49-attempt-timeout`](examples/49-attempt-timeout).
 
 **Retry-After :** si l'erreur d'une tentative échouée implémente
 `r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
@@ -291,7 +291,7 @@ arrête alors le retry quand l'indice brut, avant jitter, dépasse `MaxDelay`. `
 renvoie la dernière erreur telle quelle : l'appelant lit toujours l'indice complet
 par son `RetryAfterProvider`, et l'échec compte quand même dans un retry budget.
 Un indice inférieur ou égal à `MaxDelay` est attendu normalement. Sans `MaxDelay`,
-tout indice est attendu et l'option n'a aucun effet.
+tout indice est attendu et l'option n'a aucun effet. Voir [`examples/48-honor-retry-after`](examples/48-honor-retry-after).
 
 ```go
 policy := r8e.NewPolicy[*http.Response]("quota-api",
@@ -384,7 +384,7 @@ policy = r8e.NewPolicy[string]("rl-blocking",
 )
 ```
 
-**Taille du bucket (`Burst`).** `Burst(n)` fixe la capacité du bucket à `n` jetons, indépendamment du débit. Le bucket démarre plein : sans `Burst`, à 100 req/s, 100 appels partent d'un coup au démarrage. Avec `WithRateLimit(100, r8e.Burst(1))`, ils sont espacés dès le premier appel. `Reconfigure` et l'ajustement AIMD changent le débit, jamais une capacité fixée par `Burst`. `n` doit être compris entre 1 et `r8e.MaxBurst`, sinon `NewPolicy` panique avec `ErrRateLimitBurstOutOfRange`. Un débit nul ou négatif vide quand même le bucket, `Burst` ou pas ; un débit positif ramène ensuite la capacité de `Burst`, avec un bucket vide. En JSON, le champ s'appelle `rate_limit_burst` (il exige `rate_limit`). Un rechargement peut changer le burst d'une policy construite avec un burst, mais ne peut pas en ajouter à une policy construite sans (`ErrPatternAbsent`). Un rechargement sans ce champ garde le bucket actuel, comme pour tout champ absent : retirer `rate_limit_burst` du fichier garde le burst jusqu'à la reconstruction de la policy. Un débit NaN, comme un débit nul ou négatif, ne laisse passer aucun appel.
+**Taille du bucket (`Burst`).** `Burst(n)` fixe la capacité du bucket à `n` jetons, indépendamment du débit. Le bucket démarre plein : sans `Burst`, à 100 req/s, 100 appels partent d'un coup au démarrage. Avec `WithRateLimit(100, r8e.Burst(1))`, ils sont espacés dès le premier appel. `Reconfigure` et l'ajustement AIMD changent le débit, jamais une capacité fixée par `Burst`. `n` doit être compris entre 1 et `r8e.MaxBurst`, sinon `NewPolicy` panique avec `ErrRateLimitBurstOutOfRange`. Un débit nul ou négatif vide quand même le bucket, `Burst` ou pas ; un débit positif ramène ensuite la capacité de `Burst`, avec un bucket vide. En JSON, le champ s'appelle `rate_limit_burst` (il exige `rate_limit`). Un rechargement peut changer le burst d'une policy construite avec un burst, mais ne peut pas en ajouter à une policy construite sans (`ErrPatternAbsent`). Un rechargement sans ce champ garde le bucket actuel, comme pour tout champ absent : retirer `rate_limit_burst` du fichier garde le burst jusqu'à la reconstruction de la policy. Un débit NaN, comme un débit nul ou négatif, ne laisse passer aucun appel. Voir [`examples/47-rate-limit-burst`](examples/47-rate-limit-burst).
 
 Un bucket ne respecte un quota que sur sa fenêtre de recharge. Face à un quota de 450 appels par heure glissante, `WithRateLimit(0.125, r8e.Burst(450))` peut laisser passer jusqu'à 900 appels en une heure : 450 d'un coup, puis 450 autres pendant que le bucket se remplit. `Burst(1)` au même débit ne dépasse jamais 451.
 
@@ -804,7 +804,7 @@ instable : ses succès sont toujours crédités au parent, et chaque succès qui
 ramène au-dessus du seuil laisse passer l'échec suivant. Tant que la protection
 joue, les jetons du parent ne comptent plus les échecs de cet enfant, mais
 comptent toujours ses succès : surveillez le budget de l'enfant. Comme `Parent`,
-l'option se pose à la construction, en code uniquement.
+l'option se pose à la construction, en code uniquement. Voir [`examples/50-shield-parent`](examples/50-shield-parent).
 
 ```go
 svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
@@ -1261,7 +1261,7 @@ r8e.IsTransient(err)  // true pour les erreurs non classifiées et explicitement
 r8e.IsPermanent(err)  // true uniquement pour les erreurs explicitement permanentes
 ```
 
-Chaque sentinelle de r8e a un code court et stable, pour les logs, les métriques et les labels de trace. `r8e.ErrorCode(err)` le renvoie (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`…), même quand la sentinelle est enveloppée, et `""` pour une erreur qui n'en porte aucune. Trois sentinelles sont des enveloppes : `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` et `ErrConcurrencyBudgetExceeded` enveloppent l'erreur qui a mis fin à la dernière tentative, et elles s'effacent devant la cause qu'elles portent. Une panique relancée jusqu'à épuisement renvoie `"panic_recovered"`, un timeout `"timeout"`. Une erreur qui ne porte que des enveloppes renvoie la plus externe : un budget de temps qui coupe un retry renvoie `"time_budget_exceeded"`. `ErrorCode` atteint une sentinelle par `Unwrap`, pas par une méthode `Is` : un type d'erreur à vous qui ne correspond à une sentinelle que par `Is` ne porte aucun code. Enveloppez plutôt la sentinelle avec `%w`.
+Chaque sentinelle de r8e a un code court et stable, pour les logs, les métriques et les labels de trace. `r8e.ErrorCode(err)` le renvoie (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`…), même quand la sentinelle est enveloppée, et `""` pour une erreur qui n'en porte aucune. Trois sentinelles sont des enveloppes : `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` et `ErrConcurrencyBudgetExceeded` enveloppent l'erreur qui a mis fin à la dernière tentative, et elles s'effacent devant la cause qu'elles portent. Une panique relancée jusqu'à épuisement renvoie `"panic_recovered"`, un timeout `"timeout"`. Une erreur qui ne porte que des enveloppes renvoie la plus externe : un budget de temps qui coupe un retry renvoie `"time_budget_exceeded"`. `ErrorCode` atteint une sentinelle par `Unwrap`, pas par une méthode `Is` : un type d'erreur à vous qui ne correspond à une sentinelle que par `Is` ne porte aucun code. Enveloppez plutôt la sentinelle avec `%w`. Voir [`examples/46-error-codes`](examples/46-error-codes).
 
 ```go
 slog.Warn("call failed", "reason", r8e.ErrorCode(err), "err", err)
@@ -1635,6 +1635,11 @@ go run ./examples/42-nested-retry-budget/
 go run ./examples/43-deadline-propagation-cross-service/
 go run ./examples/44-circuit-breaker-classifier/
 go run ./examples/45-registry-unregister/
+go run ./examples/46-error-codes/
+go run ./examples/47-rate-limit-burst/
+go run ./examples/48-honor-retry-after/
+go run ./examples/49-attempt-timeout/
+go run ./examples/50-shield-parent/
 ```
 
 ## Licence
