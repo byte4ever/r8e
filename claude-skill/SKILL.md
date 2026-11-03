@@ -631,7 +631,9 @@ r8e.IsPermanent(err) // true only for explicitly permanent
 ```
 
 **Sentinel errors** (match with `errors.Is`, even when wrapped):
-`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`.
+`r8e.ErrCircuitOpen`, `r8e.ErrCircuitRamping`, `r8e.ErrRateLimited`, `r8e.ErrBulkheadFull`, `r8e.ErrBulkheadTimeout`, `r8e.ErrCoDelShed`, `r8e.ErrConcurrencyLimited`, `r8e.ErrThrottled`, `r8e.ErrSLOShed`, `r8e.ErrTimeout`, `r8e.ErrTimeBudgetExceeded`, `r8e.ErrRetriesExhausted`, `r8e.ErrConcurrencyBudgetExceeded`, `r8e.ErrPanic`, `r8e.ErrChaosInjected`.
+
+**Sentinel codes**: `r8e.ErrorCode(err)` returns the short, stable code of the sentinel `err` carries (`"circuit_open"`, `"timeout"`, `"retries_exhausted"`, …), wrapped or not, and `""` for none. The most specific sentinel wins: a timeout inside `ErrRetriesExhausted` reports `"timeout"`. Use it for log fields and metric labels instead of a hand-written `errors.Is` switch; `r8eotel` builds `r8e.rejection_reason` from it.
 
 ## Hooks
 

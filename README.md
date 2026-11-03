@@ -1192,6 +1192,12 @@ r8e.IsTransient(err)  // true for unclassified and explicitly transient errors
 r8e.IsPermanent(err)  // true only for explicitly permanent errors
 ```
 
+Every r8e sentinel has a short, stable code for logs, metrics and trace labels. `r8e.ErrorCode(err)` returns it (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`, …), even when the sentinel is wrapped, and `""` for an error that carries none. When an error carries several sentinels, the most specific wins: a timeout wrapped in `ErrRetriesExhausted` reports `"timeout"`.
+
+```go
+slog.Warn("call failed", "reason", r8e.ErrorCode(err), "err", err)
+```
+
 ## Hooks & Observability
 
 Set lifecycle callbacks to integrate with your logging, metrics, or alerting systems:

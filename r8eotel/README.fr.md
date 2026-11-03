@@ -71,9 +71,10 @@ result, err := traced.Do(ctx, fn) // même signature que policy.Do
 ```
 
 Le span racine porte `r8e.policy`, `r8e.attempts` et (en cas d'erreur)
-`r8e.rejection_reason` — une classification courte de la sentinelle
+`r8e.rejection_reason` — le code de la sentinelle donné par `r8e.ErrorCode`
 (`circuit_open`, `circuit_ramping` pour un appel délesté pendant la reprise
-progressive, `retries_exhausted`, `timeout`, …). Chaque enfant porte
+progressive, `retries_exhausted`, `timeout`, `chaos_injected`…), ou `error`
+pour une erreur qui ne porte aucune sentinelle r8e. Chaque enfant porte
 `r8e.attempt.number`. `TracedPolicy[T]` transmet toutes les méthodes de
 `Policy[T]` (`Do`, `Name`, `Reconfigure`, `Metrics`, `HealthStatus`). Voir
 [`examples/02-tracing`](examples/02-tracing).

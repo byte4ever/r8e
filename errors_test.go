@@ -302,3 +302,63 @@ func TestSentinelErrorsDetectableViaErrorsIsWhenWrapped(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sentinel codes
+// ---------------------------------------------------------------------------
+
+func TestErrorCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"circuit open", r8e.ErrCircuitOpen, "circuit_open"},
+		{"circuit ramping", r8e.ErrCircuitRamping, "circuit_ramping"},
+		{"rate limited", r8e.ErrRateLimited, "rate_limited"},
+		{"bulkhead full", r8e.ErrBulkheadFull, "bulkhead_full"},
+		{"bulkhead timeout", r8e.ErrBulkheadTimeout, "bulkhead_timeout"},
+		{"codel shed", r8e.ErrCoDelShed, "codel_shed"},
+		{"concurrency limited", r8e.ErrConcurrencyLimited, "concurrency_limited"},
+		{"throttled", r8e.ErrThrottled, "throttled"},
+		{"slo shed", r8e.ErrSLOShed, "slo_shed"},
+		{"timeout", r8e.ErrTimeout, "timeout"},
+		{"time budget exceeded", r8e.ErrTimeBudgetExceeded, "time_budget_exceeded"},
+		{
+			"concurrency budget exceeded",
+			r8e.ErrConcurrencyBudgetExceeded, "concurrency_budget_exceeded",
+		},
+		{"retries exhausted", r8e.ErrRetriesExhausted, "retries_exhausted"},
+		{"panic", &r8e.PanicError{Value: "boom"}, "panic_recovered"},
+		{"chaos injected", r8e.ErrChaosInjected, "chaos_injected"},
+		{"config sentinel", r8e.ErrCoalesceWithoutTimeout, "coalesce_without_timeout"},
+		{"wrapped", fmt.Errorf("call: %w", r8e.ErrRateLimited), "rate_limited"},
+		{"classified", r8e.Transient(r8e.ErrCircuitOpen), "circuit_open"},
+		{
+			"timeout inside retries exhausted",
+			fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted, r8e.ErrTimeout),
+			"timeout",
+		},
+		{
+			"plain error inside retries exhausted",
+			fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted, errors.New("boom")),
+			"retries_exhausted",
+		},
+		{
+			"chaos inside retries exhausted",
+			fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted, r8e.ErrChaosInjected),
+			"retries_exhausted",
+		},
+		{"plain error", errors.New("boom"), ""},
+		{"nil", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, r8e.ErrorCode(tt.err))
+		})
+	}
+}

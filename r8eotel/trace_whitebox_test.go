@@ -32,6 +32,7 @@ func TestRejectionReason(t *testing.T) {
 			r8e.ErrConcurrencyBudgetExceeded, "concurrency_budget_exceeded",
 		},
 		"panic_recovered": {&r8e.PanicError{Value: "boom"}, "panic_recovered"},
+		"chaos_injected":  {r8e.ErrChaosInjected, "chaos_injected"},
 		"plain_error":     {errors.New("something else"), "error"},
 	}
 
