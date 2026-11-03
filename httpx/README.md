@@ -221,7 +221,8 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   above).
 - A failure reading the body is transient, and the classifier is not called.
 
-`NewClient` and its `Classifier` are unchanged.
+`NewClient` and its `Classifier` are unchanged. See
+[`examples/52-response-classifier`](../examples/52-response-classifier).
 
 ## Deadline propagation
 
