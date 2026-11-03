@@ -104,8 +104,9 @@ func NewResponseClient(
 // classifyResponse runs classify on resp (see [ResponseClassifier]) and
 // returns the error the attempt fails with, nil for a success. For a status
 // of 300 or above, the body is read up to MaxClassifiedBody and put back in
-// front of the rest, so the caller still reads it whole. settleBody then
-// decides whether the body stays open.
+// front of the rest, so the caller reads the body from its first byte, within
+// the limits [ResponseClassifier] gives for options that end the attempt's
+// context. settleBody then decides whether the body stays open.
 func classifyResponse(resp *http.Response, classify ResponseClassifier) error {
 	if resp.StatusCode < http.StatusMultipleChoices {
 		return settleBody(resp, classifyHidingBody(resp, nil, classify))
