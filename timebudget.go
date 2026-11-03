@@ -99,6 +99,13 @@ type (
 // cancels later, while the cut attempt is still returning, does not change
 // the decision either.
 //
+// Unlike DoTimeout, the budget waits for the chain to return. Without
+// [WithHedge], a success that comes back after the budget's deadline cut the
+// call stays a success, where DoTimeout, which has already returned
+// [ErrTimeout], drops it. With WithHedge, the hedge returns as soon as it
+// sees the cut, without waiting for the downstream, so the call fails with
+// ErrTimeBudgetExceeded.
+//
 // The deadline is driven by the policy's [Clock], not the wall clock, so it
 // stays deterministic under a fake test clock. Because a real
 // [context.Context] deadline is intrinsically wall-clock, the propagated value
@@ -200,8 +207,8 @@ func applyHardDeadline[T any](
 
 	val, err := next(hardCtx)
 
-	if !params.clock.Now().Before(params.deadline) {
-		hardCtx.settle()
+	if now := params.clock.Now(); !now.Before(params.deadline) {
+		hardCtx.settle(now)
 	}
 
 	if budgetDeadlineFired(hardCtx, err) {
@@ -325,7 +332,7 @@ func newBudgetDeadlineCtx(
 	// taken before this check, so a parent found past a later deadline of its
 	// own reached it after the budget's.
 	if parent.Err() != nil {
-		bctx.settle()
+		bctx.settle(clock.Now())
 
 		return bctx, cancel
 	}
@@ -341,9 +348,13 @@ func newBudgetDeadlineCtx(
 
 	// A budget of its own that is already spent (deadline now or past)
 	// resolves immediately too.
-	remaining := deadline.Sub(clock.Now())
+	// One clock read decides and settles: a second read could step back
+	// before the deadline and leave the context unresolved with no watcher.
+	now := clock.Now()
+
+	remaining := deadline.Sub(now)
 	if remaining <= 0 {
-		bctx.settle()
+		bctx.settle(now)
 
 		return bctx, cancel
 	}
@@ -368,9 +379,11 @@ func (c *budgetDeadlineCtx) watch(timer Timer) {
 
 	select {
 	case <-fired:
-		c.settle()
+		// The timer stands for the deadline: decide at that instant.
+		c.settle(c.deadline)
 	case <-c.parent.Done():
-		c.settle()
+		// The parent's end decides; no instant is needed.
+		c.settle(time.Time{})
 	case <-c.done:
 		// Resolved by an explicit cancel; nothing to record.
 	}
@@ -395,21 +408,21 @@ func (c *budgetDeadlineCtx) cancel(err error) {
 // deadline comes strictly before the parent's, so a parent found past its
 // deadline reached it after the budget's: the context ends with
 // [context.DeadlineExceeded] and cut records that the budget ended the call.
-func (c *budgetDeadlineCtx) settle() {
-	err := c.parent.Err()
-	if err == nil && !c.ownDeadline {
-		// The deadline is the parent's, and the parent has not ended yet.
+// The decision is cutByOwnDeadline's, the rule DoTimeout and
+// PerAttemptTimeout apply too; now is the decision instant (see
+// cutByOwnDeadline), read once by the caller.
+func (c *budgetDeadlineCtx) settle(now time.Time) {
+	if cutByOwnDeadline(c.parent, c.deadline, now) {
+		c.resolve(context.DeadlineExceeded, true)
+
 		return
 	}
 
-	if err != nil &&
-		(!c.ownDeadline || !errors.Is(err, context.DeadlineExceeded)) {
+	if err := c.parent.Err(); err != nil {
 		c.resolve(err, false)
-
-		return
 	}
-
-	c.resolve(context.DeadlineExceeded, true)
+	// Otherwise the parent is live and the budget's deadline is not due (or is
+	// the parent's): the context stays unresolved.
 }
 
 // resolve sets the context's error and whether the budget cut the call, the

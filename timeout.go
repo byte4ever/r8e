@@ -187,9 +187,9 @@ func DoTimeout[T any](
 // deadline means a cut, a parent cancelled before it means none, whatever
 // happens to parent afterwards. A binding deadline comes strictly before any
 // deadline of parent, so DeadlineExceeded as the first end is r8e's own.
-// When derived has not reported an end yet, the clock decides: a call that
-// returns on or after the deadline, before the context's timer ran, is cut
-// unless parent was cancelled.
+// When derived has not reported an end yet, the wall clock decides through
+// cutByOwnDeadline: a call that returns on or after the deadline, before the
+// context's timer ran, is cut unless parent was cancelled.
 func policyDeadlineCut(parent, derived context.Context) bool {
 	deadline, ok := derived.Deadline()
 	if !ok || !deadlineBinds(parent, deadline) {
@@ -200,13 +200,37 @@ func policyDeadlineCut(parent, derived context.Context) bool {
 		return errors.Is(err, context.DeadlineExceeded)
 	}
 
-	if time.Now().Before(deadline) {
+	return cutByOwnDeadline(parent, deadline, time.Now())
+}
+
+// cutByOwnDeadline is the one rule for who ended a call run under deadline,
+// a deadline r8e set on a context derived from parent: the timeout of
+// DoTimeout, the per-attempt deadline of PerAttemptTimeout, or a hard time
+// budget (see budgetDeadlineCtx.settle). now is the instant the caller
+// decides at: a wall-clock reading for the timeouts; for the budget, a
+// policy Clock reading, or the deadline itself when the budget's timer fired.
+// It is consulted only while the parent is live, so a caller that has seen
+// the parent end may pass any value. A caller that checks whether the
+// deadline is due must pass the same reading it checked.
+//
+// A deadline that does not bind (see deadlineBinds) is the parent's, so it
+// never cuts. A parent already cancelled keeps the call. A parent found past
+// its own deadline reached it after r8e's, which binds and so comes strictly
+// first: the call is r8e's. A live parent leaves the decision to the clock:
+// the call is cut once now reaches deadline. The parent's side is decided
+// from parent.Err() alone, never on the clock: a call that fails before the
+// parent reports its end is never given to the parent, only to r8e's cut or
+// to the call itself.
+func cutByOwnDeadline(parent context.Context, deadline, now time.Time) bool {
+	if !deadlineBinds(parent, deadline) {
 		return false
 	}
 
-	err := parent.Err()
+	if err := parent.Err(); err != nil {
+		return errors.Is(err, context.DeadlineExceeded)
+	}
 
-	return err == nil || errors.Is(err, context.DeadlineExceeded)
+	return !now.Before(deadline)
 }
 
 // withPolicyTimeout derives the context for a timeout r8e sets. When the
