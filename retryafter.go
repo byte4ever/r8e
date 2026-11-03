@@ -30,13 +30,13 @@ type (
 	}
 )
 
-// retryAfterJitterFraction is the ±fraction of randomised jitter applied to a
+// retryAfterJitterFraction is the fraction of randomised jitter added to a
 // Retry-After delay, spreading synchronised retries to avoid a thundering herd.
-const retryAfterJitterFraction = 10 // one tenth = ±10%
+const retryAfterJitterFraction = 10 // one tenth = up to +10%
 
 // RetryAfterError wraps err with a retry-after delay that [DoRetry] honors as the
 // backoff before the next attempt (in place of the configured strategy), capped
-// by any MaxDelay. The wrapped error keeps its own classification — it is
+// by any MaxDelay, then spread upward by up to 10%. The wrapped error keeps its own classification — it is
 // retryable unless err is [Permanent]. Returns nil if err is nil.
 func RetryAfterError(err error, after time.Duration) error {
 	if err == nil {
@@ -65,9 +65,11 @@ func retryAfterFromError(err error) (time.Duration, bool) {
 	return 0, false
 }
 
-// jitteredRetryAfter returns d spread uniformly within ±10% to avoid a
-// thundering herd when many clients receive the same Retry-After. A non-positive
-// or sub-10ns delay is returned unchanged (no room to jitter).
+// jitteredRetryAfter returns d spread uniformly over [d, d+10%] to avoid a
+// thundering herd when many clients receive the same Retry-After. The spread is
+// upward only: a Retry-After is a minimum, and a retry sent before it lands on
+// another rejection. A non-positive delay returns 0, and a sub-10ns delay is
+// returned unchanged (no room to jitter).
 func jitteredRetryAfter(delay time.Duration) time.Duration {
 	if delay <= 0 {
 		return 0
@@ -78,10 +80,10 @@ func jitteredRetryAfter(delay time.Duration) time.Duration {
 		return delay
 	}
 
-	// Uniform in [delay-jitter, delay+jitter]. For a delay near math.MaxInt64
-	// the upper end can exceed int64 and wrap negative; clamp it to the maximum
+	// Uniform in [delay, delay+jitter]. For a delay near math.MaxInt64 the
+	// upper end can exceed int64 and wrap negative; clamp it to the maximum
 	// duration in that case.
-	result := delay - jitter + time.Duration(rand.Int64N(int64(2*jitter)+1))
+	result := delay + time.Duration(rand.Int64N(int64(jitter)+1))
 	if result < 0 {
 		return math.MaxInt64
 	}

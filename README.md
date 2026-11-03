@@ -267,9 +267,11 @@ policy := r8e.NewPolicy[string]("retry-example",
 ```
 
 **Retry-After:** if a failed attempt's error implements `r8e.RetryAfterProvider`
-(`RetryAfter() (time.Duration, bool)`), retry honors that delay (with ±10% jitter,
-capped by `MaxDelay`) in place of the computed backoff — the precise wait a server
-asked for beats anything you'd guess. Attach a fixed hint to any error with
+(`RetryAfter() (time.Duration, bool)`), retry honors that delay in place of the computed backoff — the precise wait a
+server asked for beats anything you'd guess. The hint is capped by `MaxDelay`, then
+spread upward by up to 10%: a Retry-After is a minimum, so a retry never leaves
+before it, and clients capped at the same `MaxDelay` do not all retry at once. A
+capped hint therefore waits between `MaxDelay` and 1.1 × `MaxDelay`. Attach a fixed hint to any error with
 `r8e.RetryAfterError(err, d)`, or implement the interface yourself; the
 [`httpx`](httpx) adapter does it automatically from an HTTP `429`/`503`
 `Retry-After` header (delay-seconds or HTTP-date). See

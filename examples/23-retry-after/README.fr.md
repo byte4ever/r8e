@@ -21,7 +21,7 @@ vaut mieux que toute estimation.
    **20 ms**. Si `Retry-After` était ignoré, le retry se déclencherait presque
    immédiatement.
 4. Comme l'adaptateur expose `Retry-After` sous forme d'erreur
-   `RetryAfterProvider`, le retry attend plutôt **~1 s** (±10 % de gigue) — la
+   `RetryAfterProvider`, le retry attend plutôt **entre 1 s et 1,1 s** (gigue vers le haut seulement) — la
    valeur demandée par le serveur.
 
 Le programme affiche le statut final, le nombre d'appels et le temps écoulé afin
@@ -49,7 +49,7 @@ sequenceDiagram
 | `RetryAfterProvider` | Une erreur exposant `RetryAfter() (time.Duration, bool)` ; le retry la respecte à la place du backoff calculé |
 | Adaptateur `httpx` | Expose automatiquement un en-tête `Retry-After` d'un `429`/`503` HTTP (en secondes ou date HTTP) sous forme de `RetryAfterProvider` |
 | `httpx.ErrorClass` | Le classifieur associe les codes de statut à `Transient` / `Permanent` / `Success` pour que le retry sache quelles réponses réessayer |
-| Gigue ±10 %, plafond `MaxDelay` | Le délai respecté est jitté et plafonné, pour qu'un `Retry-After` hostile ne puisse pas vous bloquer indéfiniment |
+| Plafond `MaxDelay`, puis gigue de +10 % au plus | Le délai respecté est plafonné, pour qu'un `Retry-After` hostile ne puisse pas vous bloquer indéfiniment, puis étalé vers le haut : les clients plafonnés ne repartent pas ensemble, et aucun ne repart trop tôt |
 
 ## Quand l'utiliser
 

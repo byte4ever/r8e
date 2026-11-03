@@ -270,9 +270,11 @@ policy := r8e.NewPolicy[string]("retry-example",
 
 **Retry-After :** si l'erreur d'une tentative échouée implémente
 `r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
-ce délai (avec un jitter ±10%, plafonné par `MaxDelay`) à la place du backoff
-calculé — l'attente exacte demandée par le serveur vaut mieux que toute
-estimation. Attachez un indice fixe à n'importe quelle erreur avec
+ce délai à la place du backoff calculé : l'attente exacte demandée par le serveur
+vaut mieux que toute estimation. L'indice est plafonné par `MaxDelay`, puis étalé
+vers le haut, de 10 % au plus. Un Retry-After est un minimum : le retry ne part
+jamais avant, et les clients plafonnés au même `MaxDelay` ne repartent pas tous
+ensemble. Un indice plafonné attend donc entre `MaxDelay` et 1,1 × `MaxDelay`. Attachez un indice fixe à n'importe quelle erreur avec
 `r8e.RetryAfterError(err, d)`, ou implémentez l'interface vous-même ; l'adaptateur
 [`httpx`](httpx) le fait automatiquement depuis un en-tête HTTP `429`/`503`
 `Retry-After` (secondes ou HTTP-date). Voir [`examples/23-retry-after`](examples/23-retry-after).

@@ -19,7 +19,7 @@ necessary — honoring the server's hint beats anything you'd guess.
 3. The `httpx` client is configured with a deliberately tiny **20ms** backoff. If
    `Retry-After` were ignored, the retry would fire almost immediately.
 4. Because the adapter surfaces `Retry-After` as a `RetryAfterProvider` error,
-   retry instead waits **~1s** (±10% jitter) — the value the server asked for.
+   retry instead waits **1s to 1.1s** (upward jitter only) — the value the server asked for.
 
 The program prints the final status, the number of calls, and the elapsed time so
 you can confirm the wait tracks the server's hint, not the local backoff.
@@ -46,7 +46,7 @@ sequenceDiagram
 | `RetryAfterProvider` | An error exposing `RetryAfter() (time.Duration, bool)`; retry honors it in place of the computed backoff |
 | `httpx` adapter | Surfaces an HTTP `429`/`503` `Retry-After` header (delay-seconds or HTTP-date) as a `RetryAfterProvider` automatically |
 | `httpx.ErrorClass` | The classifier maps status codes to `Transient` / `Permanent` / `Success` so retry knows which responses to retry |
-| ±10% jitter, `MaxDelay` cap | The honored delay is jittered and capped, so a hostile `Retry-After` can't pin you indefinitely |
+| `MaxDelay` cap, then up to +10% jitter | The honored delay is capped, so a hostile `Retry-After` can't pin you indefinitely, then spread upward so capped clients don't retry together and none retries early |
 
 ## When to use
 

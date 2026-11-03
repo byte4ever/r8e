@@ -33,7 +33,9 @@ type (
 	}
 )
 
-// MaxDelay caps the backoff delay to a maximum value.
+// MaxDelay caps the backoff delay to a maximum value. A Retry-After hint is
+// capped too, then spread upward by up to 10% so that capped clients do not
+// retry together: a capped hint waits between d and 1.1×d.
 func MaxDelay(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.maxDelay = d
@@ -221,10 +223,12 @@ func runRetryAttempt[T any](
 }
 
 // nextBackoffDelay computes the wait before the next retry attempt: the
-// strategy's backoff for this attempt, overridden by a server-supplied
-// Retry-After hint (with ±10% jitter to avoid a thundering herd) when the error
-// carries one, then capped by maxDelay (which also bounds an over-large
-// Retry-After). A non-positive maxDelay disables the cap.
+// strategy's backoff for this attempt, capped by maxDelay. A server-supplied
+// Retry-After hint replaces the backoff when the error carries one: it is
+// capped by maxDelay first, then spread upward by up to 10%, so clients capped
+// at the same maxDelay do not all retry at the same instant. A capped hint can
+// therefore wait up to 10% past maxDelay. A non-positive maxDelay disables the
+// cap.
 func nextBackoffDelay(
 	attempt int,
 	err error,
@@ -233,12 +237,17 @@ func nextBackoffDelay(
 ) time.Duration {
 	delay := strategy.Delay(attempt)
 
-	if after, ok := retryAfterFromError(err); ok {
-		delay = jitteredRetryAfter(after)
+	after, hinted := retryAfterFromError(err)
+	if hinted {
+		delay = after
 	}
 
 	if maxDelay > 0 && delay > maxDelay {
 		delay = maxDelay
+	}
+
+	if hinted {
+		delay = jitteredRetryAfter(delay)
 	}
 
 	return delay

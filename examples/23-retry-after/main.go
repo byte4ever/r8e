@@ -3,7 +3,7 @@
 // retrying on your own backoff either hammers it too early (wasting the retry) or
 // waits longer than needed. When the server answers 429 with "Retry-After: 1",
 // the httpx adapter surfaces that as a RetryAfterProvider error and retry waits
-// the second the server asked for (±10% jitter) instead of its own configured
+// the second the server asked for (plus up to 10% jitter) instead of its own configured
 // backoff.
 //
 //nolint:forbidigo // This is an example program.
