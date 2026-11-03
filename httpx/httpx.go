@@ -48,6 +48,17 @@ type (
 	// [r8e.WithFallbackFunc] instead, and close the body
 	// of the StatusError's Response found with errors.As.
 	//
+	// A response's body is read on the attempt's context.
+	// [r8e.WithTimeout], [r8e.WithHedge] and
+	// [r8e.PerAttemptTimeout] end that context when they
+	// return, whatever the outcome, so with any of them
+	// the caller reads only the bytes already buffered
+	// after Do, then gets [context.Canceled]. The
+	// r8e.StandardHTTPClient and r8e.AggressiveHTTPClient
+	// presets include WithTimeout. To read a whole body,
+	// bound the call with a deadline on the context passed
+	// to Do instead.
+	//
 	// Pattern: Adapter — bridges net/http and r8e's
 	// resilience policy by translating HTTP responses
 	// into r8e error classification.

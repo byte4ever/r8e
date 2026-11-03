@@ -837,11 +837,14 @@ classifier := func(code int) httpx.ErrorClass {
 }
 
 client := httpx.NewClient("api", http.DefaultClient, classifier,
-    r8e.WithTimeout(2*time.Second),
     r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
     r8e.WithCircuitBreaker(),
 )
 
+// Bound the call with a deadline on ctx, not r8e.WithTimeout: WithTimeout,
+// WithHedge and PerAttemptTimeout end the attempt's context when they return,
+// so the caller reads only the buffered start of the body after Do (the
+// StandardHTTPClient/AggressiveHTTPClient presets include WithTimeout).
 resp, err := client.Do(ctx, req)
 // Transient: body drained+closed for connection reuse during retries
 // Permanent: body preserved but caller must close it (under WithRetry resp
@@ -874,7 +877,9 @@ build an httpx `Client` with `WithCoalesce` or `WithCache` (every sharing caller
 would get the same `*http.Response` and body stream) or with a static
 `WithFallback` (it drops the `StatusError` keeping a permanent body open, which
 leaks the connection); use `WithFallbackFunc` and close
-`StatusError.Response.Body`.
+`StatusError.Response.Body`. The open body is read on the attempt's context:
+under `WithTimeout`, `WithHedge` or `PerAttemptTimeout` only its buffered start
+survives `Do`; bound the call with a deadline on the ctx passed to `Do` instead.
 
 ## Presets
 

@@ -203,10 +203,10 @@ func constErr(err error) func(*http.Response) error {
 	return func(*http.Response) error { return err }
 }
 
-// The body stays open only where the caller can reach it: on a permanent
-// error that carries the response in a StatusError. A retriable outcome, for
-// a 2xx as for an error status, and a permanent error without a StatusError
-// drain and close it.
+// On an error, the body stays open only on a permanent error that carries the
+// response in a StatusError. A retriable outcome, for a 2xx as for an error
+// status, a permanent error without a StatusError, and one whose StatusError
+// does not carry this response close it.
 func TestResponseClassifierClosesAnUnreachableBody(t *testing.T) {
 	t.Parallel()
 
@@ -227,8 +227,10 @@ func TestResponseClassifierClosesAnUnreachableBody(t *testing.T) {
 			wantClosed: true,
 		},
 		"permanent StatusError without the response": {
-			status:     http.StatusForbidden,
-			classify:   func(resp *http.Response) error { return r8e.Permanent(&httpx.StatusError{StatusCode: resp.StatusCode}) },
+			status: http.StatusForbidden,
+			classify: func(resp *http.Response) error {
+				return r8e.Permanent(&httpx.StatusError{StatusCode: resp.StatusCode})
+			},
 			wantClosed: true,
 		},
 	}
@@ -265,7 +267,7 @@ func TestResponseClassifierClosesAnUnreachableBody(t *testing.T) {
 }
 
 // A WithFallbackFunc receives the permanent StatusError, so it can close the
-// body of the response it replaces.
+// body of the response it drops.
 func TestResponseClassifierFallbackFuncClosesTheBody(t *testing.T) {
 	t.Parallel()
 
@@ -291,6 +293,101 @@ func TestResponseClassifierFallbackFuncClosesTheBody(t *testing.T) {
 	require.Error(t, err)
 	require.NotNil(t, seen, "the fallback gets the StatusError")
 	assert.True(t, body.closed.Load(), "the fallback closed the body")
+}
+
+// serveBody answers every request with status and payload.
+func serveBody(t *testing.T, status int, payload []byte) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// keepBody returns nil below 300 and a permanent StatusError carrying the
+// response above, so the adapter leaves the body open in both cases.
+func keepBody(resp *http.Response, _ []byte) error {
+	if resp.StatusCode < http.StatusMultipleChoices {
+		return nil
+	}
+
+	return permanentStatusError(resp)
+}
+
+// openBody returns the body Do left open: resp's, or the StatusError's.
+func openBody(t *testing.T, resp *http.Response, err error) io.ReadCloser {
+	t.Helper()
+
+	if err == nil {
+		require.NotNil(t, resp)
+
+		return resp.Body
+	}
+
+	var statusErr *httpx.StatusError
+
+	require.ErrorAs(t, err, &statusErr)
+
+	return statusErr.Response.Body
+}
+
+// With no option that ends the attempt's context, the body Do leaves open
+// reads to its end after Do, for a success and for a permanent StatusError,
+// on a real transport.
+func TestResponseClassifierBodyOutlivesDo(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("x"), 4*httpx.MaxClassifiedBody)
+
+	tests := map[string]int{
+		"2xx":           http.StatusOK,
+		"permanent 403": http.StatusForbidden,
+	}
+
+	for name, status := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := serveBody(t, status, payload)
+			cl := httpx.NewResponseClient("", srv.Client(), keepBody,
+				r8e.WithRetry(2, r8e.ConstantBackoff(time.Millisecond)))
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+			require.NoError(t, err)
+
+			resp, err := cl.Do(t.Context(), req)
+			body := openBody(t, resp, err)
+
+			got, readErr := io.ReadAll(body)
+			require.NoError(t, readErr)
+			require.NoError(t, body.Close())
+			assert.Len(t, got, len(payload), "the whole body")
+		})
+	}
+}
+
+// Under WithTimeout the attempt's context ends when Do returns, so a body
+// larger than the transport's buffers breaks off with context.Canceled.
+func TestResponseClassifierBodyCutByWithTimeout(t *testing.T) {
+	t.Parallel()
+
+	srv := serveBody(t, http.StatusOK, bytes.Repeat([]byte("x"), 8<<20))
+	cl := httpx.NewResponseClient("", srv.Client(), keepBody, r8e.WithTimeout(time.Minute))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := cl.Do(t.Context(), req)
+	require.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	_, readErr := io.ReadAll(resp.Body)
+	require.ErrorIs(t, readErr, context.Canceled)
 }
 
 // Under a retrying policy, Do returns a nil response on a permanent error, so

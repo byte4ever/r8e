@@ -45,6 +45,14 @@ permanente. La connexion fuit alors jusqu'à la fin du contexte de l'appelant.
 Utilisez plutôt `r8e.WithFallbackFunc`, et fermez le corps du `Response` du
 `StatusError`, que vous retrouvez avec `errors.As`.
 
+Le corps d'une réponse se lit sur le contexte de la tentative. `r8e.WithTimeout`,
+`r8e.WithHedge` et `r8e.PerAttemptTimeout` terminent ce contexte à leur retour,
+quel que soit le résultat. Avec l'une de ces options, l'appelant ne lit donc
+après `Do` que les octets déjà en tampon, puis reçoit `context.Canceled`. Les
+presets `r8e.StandardHTTPClient` et `r8e.AggressiveHTTPClient` incluent
+`WithTimeout`. Pour lire tout le corps, bornez l'appel avec une deadline sur le
+contexte passé à `Do`, comme le font les exemples ci-dessous.
+
 ## Flux de requete
 
 Le diagramme montre un `Client` construit par `NewClient`. Avec
@@ -101,13 +109,15 @@ func main() {
     client := httpx.NewClient("payment-api",
         http.DefaultClient,
         classifier,
-        r8e.WithTimeout(2*time.Second),
         r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
         r8e.WithCircuitBreaker(),
     )
 
-    // Utiliser comme http.Client.Do.
-    ctx := context.Background()
+    // Utiliser comme http.Client.Do. La deadline sur ctx borne l'appel et la
+    // lecture du corps ; r8e.WithTimeout couperait le corps au retour de Do.
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+
     req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
         "https://api.example.com/pay", nil)
 
@@ -178,9 +188,10 @@ classify := func(resp *http.Response, body []byte) error {
 }
 
 client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
-    r8e.WithTimeout(2*time.Second),
     r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
 )
+// Bornez chaque appel avec une deadline sur le ctx passé à Do, pas avec
+// WithTimeout, pour lire le corps après Do (voir plus haut).
 ```
 
 - Le classifier renvoie `nil` pour un succès, ou l'erreur qui fait échouer la
@@ -206,10 +217,12 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   celle de l'appelant, en parallèle de lui-même (appels `Do` concurrents, `WithHedge`),
   et parfois après le retour de `Do` (une tentative coupée par `WithTimeout`).
   Tout état qu'il partage doit supporter l'accès concurrent.
-- Le corps reste lisible dans deux cas : sur `nil`, où `Do` renvoie `resp`, et
-  sur une erreur permanente qui porte un `StatusError` pour `resp`, comme dans
-  l'exemple, où `errors.As` le retrouve même quand `WithRetry` fait renvoyer à
-  `Do` une réponse `nil`. Toute autre erreur vide puis ferme le corps (un 101
+- L'adapter laisse le corps ouvert dans deux cas : sur `nil`, où `Do` renvoie
+  `resp`, et sur une erreur permanente qui porte un `StatusError` pour `resp`,
+  comme dans l'exemple, où `errors.As` le retrouve même quand `WithRetry` fait
+  renvoyer à `Do` une réponse `nil`. Avec `WithTimeout`, `WithHedge` ou
+  `PerAttemptTimeout`, seul son début déjà en tampon reste lisible après `Do`
+  (voir plus haut). Toute autre erreur vide puis ferme le corps (un 101
   est seulement fermé), pour réutiliser la connexion. Une option qui jette
   l'erreur jette aussi le `StatusError` : c'est pour cela qu'un `WithFallback`
   statique est exclu (voir plus haut).

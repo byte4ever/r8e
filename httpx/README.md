@@ -41,6 +41,14 @@ response's body open, so the connection leaks until the caller's context ends.
 Use `r8e.WithFallbackFunc` and close the body of the `StatusError`'s `Response`,
 found with `errors.As`.
 
+A response's body is read on the attempt's context. `r8e.WithTimeout`,
+`r8e.WithHedge` and `r8e.PerAttemptTimeout` end that context when they return,
+whatever the outcome, so with any of them the caller reads only the bytes
+already buffered after `Do`, then gets `context.Canceled`. The
+`r8e.StandardHTTPClient` and `r8e.AggressiveHTTPClient` presets include
+`WithTimeout`. To read a whole body, bound the call with a deadline on the
+context passed to `Do`, as the examples below do.
+
 ## Request flow
 
 The diagram shows a `Client` built by `NewClient`. With `NewResponseClient`, the
@@ -97,13 +105,15 @@ func main() {
     client := httpx.NewClient("payment-api",
         http.DefaultClient,
         classifier,
-        r8e.WithTimeout(2*time.Second),
         r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
         r8e.WithCircuitBreaker(),
     )
 
-    // Use it like http.Client.Do.
-    ctx := context.Background()
+    // Use it like http.Client.Do. The deadline on ctx bounds the call and the
+    // body read; r8e.WithTimeout would cut the body when Do returns.
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+
     req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
         "https://api.example.com/pay", nil)
 
@@ -171,9 +181,10 @@ classify := func(resp *http.Response, body []byte) error {
 }
 
 client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
-    r8e.WithTimeout(2*time.Second),
     r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
 )
+// Bound each call with a deadline on the ctx passed to Do, not WithTimeout,
+// to read the body after Do (see above).
 ```
 
 - The classifier returns `nil` for a success, or the error the attempt fails
@@ -198,10 +209,12 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   the caller's, concurrently with itself (concurrent `Do` calls, `WithHedge`), and
   possibly after `Do` has returned (an attempt cut by `WithTimeout`). Any state
   it shares must be safe for concurrent use.
-- The body stays readable in two cases: on `nil`, where `Do` returns `resp`,
-  and on a permanent error that carries a `StatusError` for `resp`, as in the
-  example, where `errors.As` finds it even when `WithRetry` makes `Do` return a
-  `nil` response. Any other error drains and closes the body (a 101 is only
+- The adapter leaves the body open in two cases: on `nil`, where `Do` returns
+  `resp`, and on a permanent error that carries a `StatusError` for `resp`, as
+  in the example, where `errors.As` finds it even when `WithRetry` makes `Do`
+  return a `nil` response. Under `WithTimeout`, `WithHedge` or
+  `PerAttemptTimeout`, only its buffered start can still be read after `Do`
+  (see above). Any other error drains and closes the body (a 101 is only
   closed), so the connection is reused. An option that drops the error drops
   the `StatusError` too: this is why a static `WithFallback` is excluded (see
   above).

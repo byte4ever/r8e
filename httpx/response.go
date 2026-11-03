@@ -35,16 +35,21 @@ type (
 	// resp.Body is [http.NoBody]. The classifier must not modify body, since
 	// the caller reads the same bytes back.
 	//
-	// The body stays open, to read from the start, in two cases: on a nil
-	// error, where Do returns resp, and on a permanent error that carries a
-	// [StatusError] for resp, where errors.As finds it even when a retrying
-	// policy makes Do return a nil response. Any other error closes the body,
-	// after draining it for a status of 200 or above, so the connection can
-	// be reused. A policy option that drops the attempt's error also drops
-	// that StatusError: a static [r8e.WithFallback] is excluded for this
-	// reason (see [Client]), and an attempt cut by [r8e.WithTimeout] or a
-	// losing hedge ends with its context, on which a net/http transport
-	// closes the connection.
+	// The adapter leaves the body open, to read from the start, in two cases:
+	// on a nil error, where Do returns resp, and on a permanent error that
+	// carries a [StatusError] for resp, where errors.As finds it even when a
+	// retrying policy makes Do return a nil response. Any other error closes
+	// the body, after draining it for a status of 200 or above, so the
+	// connection can be reused. A static [r8e.WithFallback] drops the error,
+	// and that StatusError with it, so it is excluded (see [Client]).
+	//
+	// An open body is still read on the attempt's context. [r8e.WithTimeout],
+	// [r8e.WithHedge] and [r8e.PerAttemptTimeout] end that context when they
+	// return, whatever the outcome, and net/http then cuts the body: after Do,
+	// the caller reads only the bytes already buffered (for a status of 300 or
+	// above, at least the start handed to the classifier) and then gets
+	// [context.Canceled]. To read a whole body after Do, bound the call with a
+	// deadline on the context passed to Do instead (see [Client]).
 	//
 	// The classifier runs inside the attempt. It may run on a goroutine other
 	// than the caller's, concurrently with itself (concurrent Do calls on one
@@ -75,7 +80,9 @@ const MaxClassifiedBody = 64 << 10
 // failure from a final one.
 //
 // A nil error, or a permanent one that carries a [StatusError] for the
-// response, leaves the body readable from the start. Any other error drains
+// response, leaves the body open, to read from the start, within the limits
+// [ResponseClassifier] gives for options that end the attempt's context. Any
+// other error drains
 // and closes the body (a 1xx body is only closed), since a retry may follow
 // or the policy may drop the response. A failure reading the body is
 // transient, and classify is not called. As for any Client, do not pass
