@@ -74,6 +74,9 @@ type (
 		// ConcurrencyRejected counts calls rejected by the adaptive concurrency
 		// limiter because in-flight was at its current limit.
 		ConcurrencyRejected int64 `json:"concurrency_rejected"`
+		// CoolingDown counts calls the cooldown refused with ErrCoolingDown
+		// (see WithCooldown).
+		CoolingDown int64 `json:"cooling_down"`
 		// Throttled counts calls shed locally by the adaptive throttler to
 		// protect a struggling backend (see [WithAdaptiveThrottle]).
 		Throttled int64 `json:"throttled"`
@@ -239,6 +242,7 @@ type (
 		coalesceFollowers    atomic.Int64
 		concurrencyRejected  atomic.Int64
 		throttled            atomic.Int64
+		coolingDown          atomic.Int64
 		sloShed              atomic.Int64
 		rateAdaptations      atomic.Int64
 		slowCallRateExceeded atomic.Int64
@@ -332,6 +336,8 @@ func (m *policyMetrics) instrument(user *Hooks) Hooks {
 		OnConcurrencyRejected:     countingHook(&m.concurrencyRejected, user.OnConcurrencyRejected),
 		OnConcurrencyLimitChanged: user.OnConcurrencyLimitChanged,
 		OnThrottled:               countingHook(&m.throttled, user.OnThrottled),
+		OnCoolingDown:             countingHook(&m.coolingDown, user.OnCoolingDown),
+		OnCooldownArmed:           user.OnCooldownArmed,
 		OnSLOShed:                 countingHook(&m.sloShed, user.OnSLOShed),
 		OnRateAdapted: func(rate float64) {
 			m.rateAdaptations.Add(1)
@@ -392,6 +398,7 @@ func (p *Policy[T]) Metrics() PolicyMetrics {
 		CoalesceFollowers:         p.metrics.coalesceFollowers.Load(),
 		ConcurrencyRejected:       p.metrics.concurrencyRejected.Load(),
 		Throttled:                 p.metrics.throttled.Load(),
+		CoolingDown:               p.metrics.coolingDown.Load(),
 		SLOShed:                   p.metrics.sloShed.Load(),
 		RateAdaptations:           p.metrics.rateAdaptations.Load(),
 		SlowCallRateExceeded:      p.metrics.slowCallRateExceeded.Load(),

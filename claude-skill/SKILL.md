@@ -353,6 +353,25 @@ RampRecovery, like the slow-call tuners). Observability: `OnCircuitRamping` hook
 `CircuitRamps` counter, `RampRecoveryFraction` gauge. Example:
 `examples/39-ramp-recovery`.
 
+### Cooldown
+
+```go
+r8e.WithCooldown(opts ...CooldownOption)      // MaxCooldown(d) (default 1h, <=0 panics), CooldownIf(fn)
+r8e.WithSharedCooldown(r8e.NewCooldown(opts...)) // one cooldown for several policies (code-only)
+```
+
+Refuses calls locally with `r8e.ErrCoolingDown` (a local rejection) until the
+deadline of a server's Retry-After hint. Any failed attempt whose error carries
+a `RetryAfterProvider` arms it (capped by `MaxCooldown`, narrowed by
+`CooldownIf`); later hints only extend it; a success does not disarm it. Chain
+slot: after Coalesce, before Timeout and the breaker, so the breaker never sees
+a refusal. Inside `WithRetry`, a retry due while armed is not made: the loop
+returns the last error as is. Hooks `OnCoolingDown()` (metric `CoolingDown`) and
+`OnCooldownArmed(d)`; health `cooling_down` is degraded, never critical. Config
+`cooldown` = the cap (reloadable for an own cooldown; a shared one changes with
+`Cooldown.SetMaxCooldown`). `WithCooldown` + `WithSharedCooldown` panics with
+`r8e.ErrSharedCooldownConflict`.
+
 ### Rate Limiter
 
 ```go

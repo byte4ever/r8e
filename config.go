@@ -24,6 +24,11 @@ type (
 		// [AdaptiveTimeout]). Requires Timeout, which becomes the ceiling and warmup
 		// fallback. Optional. Example: {"percentile": 0.99, "multiplier": 2.0}.
 		AdaptiveTimeout *AdaptiveTimeoutConfig `json:"adaptive_timeout,omitempty" yaml:"adaptive_timeout,omitempty"`
+		// Cooldown enables the cooldown (see [WithCooldown]) and sets its cap,
+		// the longest one Retry-After hint keeps it armed ([MaxCooldown]).
+		// Optional. Parsed via time.ParseDuration; must be positive.
+		// Example: "1h".
+		Cooldown *string `json:"cooldown,omitempty" yaml:"cooldown,omitempty"`
 		// TimeBudget is the total time budget shared across retry and hedge.
 		// Optional. Parsed via time.ParseDuration. Example: "5s".
 		TimeBudget *string `json:"time_budget,omitempty" yaml:"time_budget,omitempty"`
@@ -363,6 +368,15 @@ func BuildOptions(pc *PolicyConfig) ([]Option, error) {
 
 	opts = append(opts, budgetOpts...)
 
+	if pc.Cooldown != nil {
+		limit, err := parseCooldownCap(*pc.Cooldown)
+		if err != nil {
+			return nil, err
+		}
+
+		opts = append(opts, WithCooldown(MaxCooldown(limit)))
+	}
+
 	if pc.CircuitBreaker != nil {
 		cbOpts, err := cbOptionsFromConfig(pc.CircuitBreaker)
 		if err != nil {
@@ -534,8 +548,9 @@ func adaptiveOptionsFromConfig(cfg *AdaptiveConfig) []AdaptiveOption {
 // adaptive-throttler options. Shared by [BuildOptions] and [Policy.Reconfigure].
 // It returns an error only when the window string fails to parse.
 //
-//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
 // distinct config type to a distinct option type; no shared abstraction without generics.
+//
+//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
 func throttleOptionsFromConfig(
 	cfg *AdaptiveThrottleConfig,
 ) ([]ThrottleOption, error) {
@@ -707,8 +722,9 @@ func timeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]TimeoutOption, erro
 // [AdaptiveTimeout] options. Shared by [BuildOptions] and [Policy.Reconfigure]. It
 // returns an error only when the floor string fails to parse.
 //
-//nolint:dupl // structurally mirrors throttleOptionsFromConfig but maps a distinct
 // config type to a distinct option type; no shared abstraction without generics.
+//
+//nolint:dupl // structurally mirrors throttleOptionsFromConfig but maps a distinct
 func adaptiveTimeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]AdaptiveTimeoutOption, error) {
 	var opts []AdaptiveTimeoutOption
 
@@ -757,8 +773,9 @@ func hedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]HedgeOption, error) {
 // [AdaptiveHedge] options. Shared by [BuildOptions] and [Policy.Reconfigure]. It
 // returns an error only when the floor string fails to parse.
 //
-//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
 // distinct config type to a distinct option type; no shared abstraction without generics.
+//
+//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
 func adaptiveHedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]AdaptiveHedgeOption, error) {
 	var opts []AdaptiveHedgeOption
 
@@ -1159,4 +1176,18 @@ func parseBackoffStrategy(
 			*name,
 		)
 	}
+}
+
+// parseCooldownCap parses the cooldown config value: a positive duration.
+func parseCooldownCap(raw string) (time.Duration, error) {
+	limit, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("cooldown: %w", err)
+	}
+
+	if limit <= 0 {
+		return 0, fmt.Errorf("cooldown: %w", ErrCooldownNonPositiveMax)
+	}
+
+	return limit, nil
 }

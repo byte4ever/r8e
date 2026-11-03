@@ -30,6 +30,10 @@ type (
 		Clock       Clock
 		Budget      *RetryBudget
 		Concurrency *ConcurrencyBudget
+		// Cooldown, when set, is armed by each failed attempt's Retry-After
+		// hint, and stops the loop when a retry would be due while it is
+		// armed (see WithCooldown).
+		Cooldown    *Cooldown
 		Opts        []RetryOption
 		MaxAttempts int
 	}
@@ -155,6 +159,11 @@ func DoRetry[T any](
 
 		lastErr = err
 
+		// A server's Retry-After hint arms the cooldown, whatever happens next.
+		if armedFor, armed := params.Cooldown.observe(err); armed {
+			params.Hooks.emitCooldownArmed(armedFor)
+		}
+
 		// If error is Permanent: stop immediately. A non-retryable failure
 		// leaves the budget untouched — it cannot drive a retry storm.
 		if IsPermanent(err) {
@@ -182,6 +191,12 @@ func DoRetry[T any](
 		// If this is the last attempt, don't sleep or emit hook.
 		if attempt == maxAttempts-1 {
 			break
+		}
+
+		// While the cooldown is armed no attempt may leave: stop and return
+		// the server's error as is, as HonorRetryAfter does.
+		if params.Cooldown.Armed() {
+			return zero, err
 		}
 
 		// If the budget is exhausted, stop retrying and return the real

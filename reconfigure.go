@@ -97,6 +97,15 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		actions = append(actions, action)
 	}
 
+	if cfg.Cooldown != nil {
+		action, err := p.cooldownReconfigureAction(*cfg.Cooldown)
+		if err != nil {
+			return err
+		}
+
+		actions = append(actions, action)
+	}
+
 	if cfg.AIMD != nil {
 		action, err := p.aimdReconfigureAction(cfg.AIMD)
 		if err != nil {
@@ -520,4 +529,25 @@ func (p *Policy[T]) concurrencyBudgetReconfigureAction(
 
 func absentPatternError(pattern string) error {
 	return fmt.Errorf("%w: %q", ErrPatternAbsent, pattern)
+}
+
+// cooldownReconfigureAction validates a new cooldown cap and returns the action
+// that applies it. A policy without a cooldown has none to change, and a shared
+// cooldown belongs to every policy using it: only Cooldown.SetMaxCooldown
+// changes its cap.
+func (p *Policy[T]) cooldownReconfigureAction(raw string) (func(), error) {
+	if p.cooldown == nil {
+		return nil, absentPatternError("cooldown")
+	}
+
+	if p.sharedCooldown {
+		return nil, fmt.Errorf("r8e: reconfigure: %w", ErrSharedCooldownConflict)
+	}
+
+	limit, err := parseCooldownCap(raw)
+	if err != nil {
+		return nil, fmt.Errorf("r8e: reconfigure: %w", err)
+	}
+
+	return func() { p.cooldown.SetMaxCooldown(limit) }, nil
 }

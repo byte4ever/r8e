@@ -31,6 +31,7 @@ type (
 		slo               *SLOGovernor
 		retryBudget       *RetryBudget
 		concurrencyBudget *ConcurrencyBudget
+		cooldown          *Cooldown
 		coalescer         *Coalescer[T]
 		registry          *Registry
 		metrics           *policyMetrics
@@ -66,6 +67,9 @@ type (
 		// affectsReadiness gates Kubernetes readiness when this policy is
 		// critically unhealthy (see WithReadinessImpact). False by default.
 		affectsReadiness bool
+		// sharedCooldown reports that cooldown came from WithSharedCooldown,
+		// so Reconfigure leaves its cap to Cooldown.SetMaxCooldown.
+		sharedCooldown bool
 	}
 
 	// retryRuntime is the hot-swappable retry configuration read per call.
@@ -81,6 +85,7 @@ type (
 	retryBudgets struct {
 		retry       *RetryBudget
 		concurrency *ConcurrencyBudget
+		cooldown    *Cooldown
 	}
 
 	// Option configures a [Policy] during [NewPolicy]. Construct options with
@@ -116,6 +121,8 @@ type (
 		fallbackFunc      *funcFallback
 		retryBudget       *RetryBudget
 		concurrencyBudget *ConcurrencyBudget
+		cooldownOpts      []CooldownOption
+		sharedCooldown    *Cooldown
 		coalesce          *coalesceDesc
 		cache             *cacheDesc
 		chaos             *chaosDesc
@@ -131,6 +138,9 @@ type (
 		// panicRecover, when true, adds the innermost recover middleware that
 		// catches panics and converts them to *PanicError (see WithRecover).
 		panicRecover bool
+		// cooldown reports that WithCooldown was given; cooldownOpts may be
+		// empty.
+		cooldown bool
 	}
 
 	// retryDesc holds deferred retry configuration.
@@ -365,6 +375,37 @@ func WithRetryBudget(opts ...RetryBudgetOption) Option {
 func WithSharedRetryBudget(budget *RetryBudget) Option {
 	return optionFunc(func(s *policySetup) {
 		s.retryBudget = budget
+	})
+}
+
+// WithCooldown makes the policy refuse calls locally, with [ErrCoolingDown],
+// until the deadline of a server's Retry-After hint (see [Cooldown]). Any
+// failed attempt whose error carries a [RetryAfterProvider] arms it, capped by
+// [MaxCooldown] (default one hour); [CooldownIf] narrows the trigger. The
+// cooldown sits outside every guard, after coalescing, so a refused call never
+// reaches the circuit breaker. Inside [WithRetry], a retry due while the
+// cooldown is armed is not made: the loop returns the last error as is, so the
+// breaker counts the server's real error. An armed cooldown makes the policy
+// degraded, never critical. Config: `cooldown` (the cap).
+func WithCooldown(opts ...CooldownOption) Option {
+	return optionFunc(func(s *policySetup) {
+		s.cooldown = true
+		s.cooldownOpts = append(s.cooldownOpts, opts...)
+	})
+}
+
+// WithSharedCooldown attaches an existing [Cooldown], so one server's
+// Retry-After stops the calls of every policy sharing it, for example every
+// route under one quota. Each policy reports its own refusals and arms to its
+// own hooks, and shows the shared state in its health. It cannot be combined
+// with [WithCooldown] ([NewPolicy] panics with [ErrSharedCooldownConflict]),
+// and Policy.Reconfigure does not change its cap: call
+// [Cooldown.SetMaxCooldown]. Code-only. A nil cooldown is ignored.
+func WithSharedCooldown(cd *Cooldown) Option {
+	return optionFunc(func(s *policySetup) {
+		if cd != nil {
+			s.sharedCooldown = cd
+		}
 	})
 }
 
@@ -728,6 +769,9 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		)
 	}
 
+	cooldown, cooldownEntries := cooldownEntriesFor[T](&setup, clock, &hooks)
+	entries = append(entries, cooldownEntries...)
+
 	if setup.retry != nil {
 		retryCell = new(atomic.Pointer[retryRuntime])
 		retryCell.Store(&retryRuntime{
@@ -740,6 +784,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 			newRetryEntry[T](retryCell, &hooks, clock, retryBudgets{
 				retry:       setup.retryBudget,
 				concurrency: setup.concurrencyBudget,
+				cooldown:    cooldown,
 			}),
 		)
 	}
@@ -838,6 +883,8 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		throttler:         throttler,
 		slo:               slo,
 		retryBudget:       setup.retryBudget,
+		cooldown:          cooldown,
+		sharedCooldown:    setup.sharedCooldown != nil,
 		concurrencyBudget: setup.concurrencyBudget,
 		coalescer:         coalescer,
 		metrics:           metrics,
@@ -925,6 +972,10 @@ func checkSetupInvariants(setup *policySetup) error {
 
 	// The bulkhead and the adaptive limiter both drive the concurrency slot;
 	// configuring both is contradictory.
+	if setup.sharedCooldown != nil && setup.cooldown {
+		return ErrSharedCooldownConflict
+	}
+
 	if setup.bulkhead != nil && setup.adaptive != nil {
 		return ErrConcurrencyLimiterConflict
 	}
@@ -1059,6 +1110,7 @@ func newRetryEntry[T any](
 					Clock:       clock,
 					Budget:      budgets.retry,
 					Concurrency: budgets.concurrency,
+					Cooldown:    budgets.cooldown,
 					Opts:        rt.opts,
 				})
 			}
@@ -1453,5 +1505,25 @@ func newFuncFallbackEntry[T any](desc funcFallback, hooks *Hooks) PatternEntry[T
 				return DoFallbackFunc[T](ctx, next, fn, hooks)
 			}
 		},
+	}
+}
+
+// cooldownEntriesFor returns the policy's cooldown, its own or the shared one
+// (nil without either), and the middleware that gates calls on it. With a
+// retry, the retry loop arms the cooldown from each attempt; without one, the
+// middleware arms it from the call.
+func cooldownEntriesFor[T any](setup *policySetup, clock Clock, hooks *Hooks) (*Cooldown, []PatternEntry[T]) {
+	cooldown := setup.sharedCooldown
+	if setup.cooldown {
+		cooldown = NewCooldown(append([]CooldownOption{CooldownClock(clock)}, setup.cooldownOpts...)...)
+	}
+
+	switch {
+	case cooldown == nil:
+		return nil, nil
+	case setup.retry != nil:
+		return cooldown, []PatternEntry[T]{newCooldownGateEntry[T](cooldown, hooks)}
+	default:
+		return cooldown, []PatternEntry[T]{newCooldownEntry[T](cooldown, hooks)}
 	}
 }

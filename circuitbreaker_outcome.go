@@ -142,11 +142,13 @@ func CallerCancellationIsNeutral(ctx context.Context, err error) Outcome {
 }
 
 // IsLocalRejection reports whether err is one of [ErrRateLimited],
-// [ErrBulkheadFull], [ErrBulkheadTimeout], [ErrCoDelShed] or
-// [ErrConcurrencyLimited] itself, not an error that wraps it. That is exactly
-// what a rate limiter, a bulkhead or an adaptive concurrency limiter running
-// inside the circuit breaker returns when it turns a call away, before the
-// call reaches the downstream.
+// [ErrBulkheadFull], [ErrBulkheadTimeout], [ErrCoDelShed],
+// [ErrConcurrencyLimited] or [ErrCoolingDown] itself, not an error that wraps
+// it. That is exactly what a rate limiter, a bulkhead or an adaptive
+// concurrency limiter running inside the circuit breaker returns when it turns
+// a call away, before the call reaches the downstream. A cooldown runs outside
+// the breaker, so the breaker of its own policy never sees ErrCoolingDown; the
+// breaker of an outer policy can, from a nested policy.
 //
 // In a [Policy], those guards run inside the breaker, and by default the
 // breaker counts their rejections as failures: a burst past the bulkhead's
@@ -185,7 +187,7 @@ func IsLocalRejection(err error) bool {
 	// A wrapped sentinel is not a local rejection: identity is the contract.
 	switch err {
 	case ErrRateLimited, ErrBulkheadFull, ErrBulkheadTimeout, //nolint:errorlint // identity, see above
-		ErrCoDelShed, ErrConcurrencyLimited:
+		ErrCoDelShed, ErrConcurrencyLimited, ErrCoolingDown:
 		return true
 	default:
 		return false

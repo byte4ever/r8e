@@ -311,7 +311,7 @@ func TestRegisterEmitsAllInstruments(t *testing.T) {
 		"r8e.policy.time_budget_exceeded", "r8e.policy.attempt_timeouts",
 		"r8e.policy.coalesce_leaders",
 		"r8e.policy.coalesce_followers", "r8e.policy.concurrency_rejected",
-		"r8e.policy.throttled", "r8e.policy.slo_shed",
+		"r8e.policy.throttled", "r8e.policy.cooling_down", "r8e.policy.slo_shed",
 		"r8e.policy.rate_adaptations",
 		"r8e.policy.slow_call_rate_exceeded",
 		"r8e.policy.cache_hits", "r8e.policy.cache_misses",
