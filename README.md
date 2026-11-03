@@ -453,6 +453,30 @@ r8e.WithBulkhead(10,
 )
 ```
 
+**Sharing one bulkhead across policies (`WithSharedBulkhead`).** To cap the calls
+in flight to one API across all its routes, each with its own policy, build one
+`Bulkhead` and attach it to every policy. It takes the same place in the chain
+as `WithBulkhead`, so a slot covers the whole call, retries and backoff
+included, and its options (max wait, queue depth, CoDel) apply to every policy.
+
+```go
+api := r8e.NewBulkhead(20, r8e.RealClock{}, &r8e.Hooks{}, r8e.BulkheadMaxWait(50*time.Millisecond))
+
+orders := r8e.NewPolicy[Order]("orders", r8e.WithSharedBulkhead(api), r8e.WithRetry(3, strategy))
+users := r8e.NewPolicy[User]("users", r8e.WithSharedBulkhead(api))
+```
+
+Each policy reports its own calls: the bulkhead events (`OnBulkheadFull`,
+`OnBulkheadQueued`, …) go to that policy's hooks and counters, not to the hooks
+passed to `NewBulkhead`. The gauges (`BulkheadInUse`, `BulkheadCap`,
+`BulkheadQueued`, `CoDelLoad`) and the `bulkhead_full` health condition describe
+the same bulkhead in every policy: aggregate them across policies with max, not
+sum, as for `RetryBudgetTokens`. It cannot be combined with `WithBulkhead` or
+`WithAdaptiveConcurrency` (`NewPolicy` panics with `ErrSharedBulkheadConflict`),
+and a policy's `Reconfigure` does not resize it (it returns
+`ErrSharedBulkheadConflict`): call `Bulkhead.Reconfigure` on the shared bulkhead.
+Code-only.
+
 ### Hedged Request
 
 Fire a second concurrent call after a delay. The first response wins; the other is cancelled. Reduces tail latency.

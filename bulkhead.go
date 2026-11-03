@@ -193,20 +193,30 @@ func (b *Bulkhead) Reconfigure(maxConcurrent int, opts ...BulkheadOption) {
 //   - [ErrCoDelShed] if the controlled-delay discipline shed the caller because
 //     the queue was overloaded and it had waited past the slough timeout;
 //   - ctx.Err() if ctx is cancelled while waiting.
+//
+// Its events go to the hooks passed to [NewBulkhead]. A bulkhead shared
+// through [WithSharedBulkhead] reports the calls each policy makes to that
+// policy's hooks instead.
 func (b *Bulkhead) Acquire(ctx context.Context) error {
+	return b.acquireFor(ctx, b.hooks)
+}
+
+// acquireFor is [Bulkhead.Acquire] with the events sent to hooks, so that each
+// policy sharing the bulkhead reports its own calls.
+func (b *Bulkhead) acquireFor(ctx context.Context, hooks *Hooks) error {
 	b.mu.Lock()
 
 	if b.cur < b.maxConc {
 		b.cur++
 		b.mu.Unlock()
-		b.hooks.emitBulkheadAcquired()
+		hooks.emitBulkheadAcquired()
 
 		return nil
 	}
 
 	if len(b.waiters) >= b.maxQueue || !b.queueable() {
 		b.mu.Unlock()
-		b.hooks.emitBulkheadFull()
+		hooks.emitBulkheadFull()
 
 		return ErrBulkheadFull
 	}
@@ -215,9 +225,9 @@ func (b *Bulkhead) Acquire(ctx context.Context) error {
 	b.waiters = append(b.waiters, w)
 	maxWait := b.maxWait // capture under the lock; Reconfigure may change it
 	b.mu.Unlock()
-	b.hooks.emitBulkheadQueued()
+	hooks.emitBulkheadQueued()
 
-	return b.waitForSlot(ctx, w, maxWait)
+	return b.waitForSlot(ctx, w, maxWait, hooks)
 }
 
 // queueable reports whether a full bulkhead should enqueue a caller rather than
@@ -238,6 +248,7 @@ func (b *Bulkhead) waitForSlot(
 	ctx context.Context,
 	waiter *bulkheadWaiter,
 	maxWait time.Duration,
+	hooks *Hooks,
 ) error {
 	var timeout <-chan time.Time
 
@@ -250,16 +261,16 @@ func (b *Bulkhead) waitForSlot(
 
 	select {
 	case <-waiter.ready:
-		return b.resolveOutcome(waiter)
+		return waiterOutcome(waiter, hooks)
 
 	case <-timeout:
 		if b.abandon(waiter) {
-			b.hooks.emitBulkheadTimeout()
+			hooks.emitBulkheadTimeout()
 
 			return ErrBulkheadTimeout
 		}
 		// Woken (granted or shed) just as the timer fired — honour the outcome.
-		return b.resolveOutcome(waiter)
+		return waiterOutcome(waiter, hooks)
 
 	case <-ctx.Done():
 		if b.abandon(waiter) {
@@ -268,7 +279,7 @@ func (b *Bulkhead) waitForSlot(
 		// Woken just as ctx was cancelled. A shed owns no slot; a grant hands us
 		// one we will not use, so return it without an acquired/released pair.
 		if waiter.shed {
-			b.hooks.emitCoDelShed()
+			hooks.emitCoDelShed()
 
 			return ErrCoDelShed
 		}
@@ -279,18 +290,18 @@ func (b *Bulkhead) waitForSlot(
 	}
 }
 
-// resolveOutcome interprets a closed grant signal. A controlled-delay shed
+// waiterOutcome interprets a closed grant signal. A controlled-delay shed
 // returns [ErrCoDelShed]; otherwise the caller now holds a slot. w.shed is set
 // under mu before the channel close, so reading it after the receive is
 // race-free (the close establishes the happens-before edge).
-func (b *Bulkhead) resolveOutcome(w *bulkheadWaiter) error {
+func waiterOutcome(w *bulkheadWaiter, hooks *Hooks) error {
 	if w.shed {
-		b.hooks.emitCoDelShed()
+		hooks.emitCoDelShed()
 
 		return ErrCoDelShed
 	}
 
-	b.hooks.emitBulkheadAcquired()
+	hooks.emitBulkheadAcquired()
 
 	return nil
 }
@@ -321,8 +332,13 @@ func (b *Bulkhead) abandon(target *bulkheadWaiter) bool {
 // callers are queued, the freed slot is handed to a waiter instead of being
 // returned to the pool.
 func (b *Bulkhead) Release() {
+	b.releaseFor(b.hooks)
+}
+
+// releaseFor is [Bulkhead.Release] with the event sent to hooks (see acquireFor).
+func (b *Bulkhead) releaseFor(hooks *Hooks) {
 	if b.releaseSlot() {
-		b.hooks.emitBulkheadReleased()
+		hooks.emitBulkheadReleased()
 	}
 }
 

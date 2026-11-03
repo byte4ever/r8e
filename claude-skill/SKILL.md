@@ -397,6 +397,15 @@ hot-reloadable. Observability: `OnBulkheadQueued` / `OnBulkheadTimeout` hooks,
 `Bulkhead.Acquire(ctx) error` (takes a ctx — may block on the wait) + `Release()`
 + `Queued()`.
 
+**Shared bulkhead** (`r8e.WithSharedBulkhead(*Bulkhead)`, code-only): one
+`NewBulkhead` attached to several policies caps their calls in flight together
+(same chain slot as `WithBulkhead`, so retries and backoff hold the slot). Each
+policy reports its own calls to its own hooks and counters; the gauges and
+`bulkhead_full` describe the same bulkhead in every policy, so aggregate them
+with max, not sum. Combining it with `WithBulkhead` or `WithAdaptiveConcurrency`
+panics with `r8e.ErrSharedBulkheadConflict`; a policy `Reconfigure` touching the
+bulkhead returns that error (resize with `Bulkhead.Reconfigure`).
+
 **Controlled-delay queue (CoDel + adaptive LIFO)** (opt-in): `r8e.BulkheadCoDel(target, interval)`
 disciplines the wait queue by observed dwell (RFC 8289 / folly), instead of (or
 alongside) the fixed max-wait. It watches the standing queue delay (oldest

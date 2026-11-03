@@ -456,6 +456,32 @@ r8e.WithBulkhead(10,
 )
 ```
 
+**Partager un bulkhead entre politiques (`WithSharedBulkhead`).** Pour limiter
+les appels en cours vers une même API sur toutes ses routes, chacune avec sa
+propre politique, créez un seul `Bulkhead` et rattachez-le à chaque politique.
+Il occupe la même place dans la chaîne que `WithBulkhead` : un slot couvre tout
+l'appel, retries et backoff compris, et ses options (attente maximale,
+profondeur de file, CoDel) valent pour toutes les politiques.
+
+```go
+api := r8e.NewBulkhead(20, r8e.RealClock{}, &r8e.Hooks{}, r8e.BulkheadMaxWait(50*time.Millisecond))
+
+orders := r8e.NewPolicy[Order]("orders", r8e.WithSharedBulkhead(api), r8e.WithRetry(3, strategy))
+users := r8e.NewPolicy[User]("users", r8e.WithSharedBulkhead(api))
+```
+
+Chaque politique rapporte ses propres appels : les événements du bulkhead
+(`OnBulkheadFull`, `OnBulkheadQueued`, …) vont aux hooks et aux compteurs de
+cette politique, pas aux hooks passés à `NewBulkhead`. Les jauges
+(`BulkheadInUse`, `BulkheadCap`, `BulkheadQueued`, `CoDelLoad`) et la condition
+de santé `bulkhead_full` décrivent le même bulkhead dans chaque politique :
+agrégez-les entre politiques avec max, pas avec une somme, comme pour
+`RetryBudgetTokens`. L'option ne se combine ni avec `WithBulkhead` ni avec
+`WithAdaptiveConcurrency` (`NewPolicy` panique avec
+`ErrSharedBulkheadConflict`), et le `Reconfigure` d'une politique ne le
+redimensionne pas (il renvoie `ErrSharedBulkheadConflict`) : appelez
+`Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement.
+
 ### Requête spéculative
 
 Lance un second appel concurrent après un délai. La première réponse gagne ; l'autre est annulée. Réduit la latence de queue.

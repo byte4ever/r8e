@@ -106,6 +106,12 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		actions = append(actions, action)
 	}
 
+	if p.sharedBulkhead && (cfg.Bulkhead != nil || cfg.hasAnyBulkheadWaitSetting()) {
+		// A shared bulkhead belongs to every policy using it: one policy's
+		// reload must not resize it for the others.
+		return fmt.Errorf("r8e: reconfigure: %w", ErrSharedBulkheadConflict)
+	}
+
 	if cfg.Bulkhead != nil {
 		if p.bulkhead == nil {
 			return absentPatternError("bulkhead")

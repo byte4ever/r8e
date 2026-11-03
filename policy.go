@@ -66,6 +66,9 @@ type (
 		// affectsReadiness gates Kubernetes readiness when this policy is
 		// critically unhealthy (see WithReadinessImpact). False by default.
 		affectsReadiness bool
+		// sharedBulkhead reports that bulkhead came from WithSharedBulkhead,
+		// so Reconfigure leaves its size to Bulkhead.Reconfigure.
+		sharedBulkhead bool
 	}
 
 	// retryRuntime is the hot-swappable retry configuration read per call.
@@ -107,6 +110,7 @@ type (
 		circuitBreaker    *circuitBreakerDesc
 		rateLimit         *rateLimitDesc
 		bulkhead          *bulkheadDesc
+		sharedBulkhead    *Bulkhead
 		adaptive          *adaptiveDesc
 		throttle          *throttleDesc
 		slo               *sloDesc
@@ -427,6 +431,29 @@ func WithRateLimit(rate float64, opts ...RateLimitOption) Option {
 func WithBulkhead(maxConcurrent int, opts ...BulkheadOption) Option {
 	return optionFunc(func(s *policySetup) {
 		s.bulkhead = &bulkheadDesc{maxConcurrent: maxConcurrent, opts: opts}
+	})
+}
+
+// WithSharedBulkhead attaches an existing [Bulkhead], letting several policies
+// share one ceiling: at most its capacity of calls are in flight across all of
+// them, for example every route of one API, each with its own policy. It takes
+// the same place in the chain as [WithBulkhead], so a slot covers the whole
+// call, retries and backoff included. Build it with [NewBulkhead]; its options
+// (max wait, queue depth, CoDel) apply to every policy.
+//
+// Each policy reports the calls it makes: its own hooks receive the bulkhead
+// events, and its metrics and health show the shared bulkhead's state. Those
+// gauges describe the same bulkhead in every policy, so aggregate them across
+// policies with max, not sum. It cannot be combined with [WithBulkhead] or
+// [WithAdaptiveConcurrency] ([NewPolicy] panics with
+// [ErrSharedBulkheadConflict]), and Policy.Reconfigure does not resize it:
+// call [Bulkhead.Reconfigure] on the shared bulkhead. Code-only. A nil bulkhead
+// is ignored.
+func WithSharedBulkhead(bh *Bulkhead) Option {
+	return optionFunc(func(s *policySetup) {
+		if bh != nil {
+			s.sharedBulkhead = bh
+		}
 	})
 }
 
@@ -763,7 +790,12 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 
 	if setup.bulkhead != nil {
 		bulkhead = NewBulkhead(setup.bulkhead.maxConcurrent, clock, &hooks, setup.bulkhead.opts...)
-		entries = append(entries, newBulkheadEntry[T](bulkhead))
+		entries = append(entries, newBulkheadEntry[T](bulkhead, &hooks))
+	}
+
+	if setup.sharedBulkhead != nil {
+		bulkhead = setup.sharedBulkhead
+		entries = append(entries, newBulkheadEntry[T](bulkhead, &hooks))
 	}
 
 	if setup.adaptive != nil {
@@ -834,6 +866,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker:    circuitBreaker,
 		rateLimiter:       rateLimiter,
 		bulkhead:          bulkhead,
+		sharedBulkhead:    setup.sharedBulkhead != nil,
 		adaptive:          adaptive,
 		throttler:         throttler,
 		slo:               slo,
@@ -927,6 +960,12 @@ func checkSetupInvariants(setup *policySetup) error {
 	// configuring both is contradictory.
 	if setup.bulkhead != nil && setup.adaptive != nil {
 		return ErrConcurrencyLimiterConflict
+	}
+
+	// A shared bulkhead drives the same slot as a policy's own bulkhead or
+	// adaptive limiter.
+	if setup.sharedBulkhead != nil && (setup.bulkhead != nil || setup.adaptive != nil) {
+		return ErrSharedBulkheadConflict
 	}
 
 	// A time budget only gates retry and hedge; with neither it would do nothing.
@@ -1160,13 +1199,16 @@ func newRateLimiterEntry[T any](rl *RateLimiter) PatternEntry[T] {
 	)
 }
 
-func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
+// newBulkheadEntry builds the bulkhead middleware. Its events go to hooks, the
+// policy's own, so a bulkhead shared across policies reports each policy's
+// calls to that policy.
+func newBulkheadEntry[T any](bh *Bulkhead, hooks *Hooks) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityBulkhead,
 		Name:     "bulkhead",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				if err := bh.Acquire(ctx); err != nil {
+				if err := bh.acquireFor(ctx, hooks); err != nil {
 					var zero T
 
 					// Returned as-is: IsLocalRejection compares it by
@@ -1175,7 +1217,7 @@ func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
 					return zero, err //nolint:wrapcheck // bulkhead error returned as-is
 				}
 
-				defer bh.Release()
+				defer bh.releaseFor(hooks)
 
 				return next(ctx)
 			}
