@@ -23,6 +23,13 @@ type (
 	RetryOption func(*retryConfig)
 
 	// RetryParams holds the required configuration for retry behavior.
+	//
+	// Budget lets a retry written outside [WithRetry] share a [RetryBudget]:
+	// DoRetry then credits each success to it, debits each retryable failure
+	// and checks it before each retry, its ancestors included (see [Parent]),
+	// as a policy built
+	// with [WithSharedRetryBudget] does. A nil Budget sets no limit. Clock
+	// must not be nil when a retry can happen: DoRetry waits on it.
 	RetryParams struct {
 		Strategy    BackoffStrategy
 		Hooks       *Hooks

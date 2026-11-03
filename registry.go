@@ -98,6 +98,15 @@ func (r *Registry) Register(hr HealthReporter) {
 // To remove a policy from the registry it joined, whichever that is:
 //
 //	defer policy.Registry().Unregister(policy)
+//
+// [HealthReporter] is not generic, so policies with different result types
+// fit in one slice. To remove a group of policies built together, such as
+// those of one tenant in one registry, collect them in a []HealthReporter
+// when you build them, then loop over it:
+//
+//	for _, p := range tenantPolicies {
+//		reg.Unregister(p)
+//	}
 func (r *Registry) Unregister(hr HealthReporter) bool {
 	if r == nil || hr == nil || !reflect.ValueOf(hr).Comparable() {
 		return false

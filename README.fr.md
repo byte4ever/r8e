@@ -193,7 +193,7 @@ func main() {
 
 ### Timeout
 
-Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant. On décide qui a terminé l'appel quand le timeout tombe, comme pour un budget de temps posé avec `PropagateDeadline` : un appelant qui a annulé avant garde l'appel, et un appelant qui annule ou atteint sa propre deadline plus tard ne le reprend pas. Un service appelé qui s'arrête de lui-même sur la deadline propagée (une deadline de socket ou de client) et renvoie sa propre erreur à cet instant obtient quand même `ErrTimeout` et un seul `OnTimeout`. Un appel en échec que l'appelant a terminé renvoie l'erreur du contexte de l'appelant, même si le service appelé répond par sa propre erreur à cet instant ; une erreur qui revient avant que le contexte de l'appelant signale sa fin reste celle du service appelé. Un succès qui arrive à `Do` avant qu'il voie le timeout reste un succès.
+Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant. Mettez le bulkhead dans la même policy : il tourne à l'intérieur du timeout. Un appel qui survit à `Do` garde donc sa place jusqu'au retour de la fonction, et le bulkhead plafonne aussi les appels qui tournent encore après leur timeout. Ce n'est plus vrai avec `WithHedge` : le hedge rend la main dès que le timeout termine son contexte, sans attendre ses tentatives, et le bulkhead libère la place alors que la fonction tourne encore. Un bulkhead placé autour de `Do`, ou dans une policy englobante, libère sa place dès que `Do` rend la main. On décide qui a terminé l'appel quand le timeout tombe, comme pour un budget de temps posé avec `PropagateDeadline` : un appelant qui a annulé avant garde l'appel, et un appelant qui annule ou atteint sa propre deadline plus tard ne le reprend pas. Un service appelé qui s'arrête de lui-même sur la deadline propagée (une deadline de socket ou de client) et renvoie sa propre erreur à cet instant obtient quand même `ErrTimeout` et un seul `OnTimeout`. Un appel en échec que l'appelant a terminé renvoie l'erreur du contexte de l'appelant, même si le service appelé répond par sa propre erreur à cet instant ; une erreur qui revient avant que le contexte de l'appelant signale sa fin reste celle du service appelé. Un succès qui arrive à `Do` avant qu'il voie le timeout reste un succès.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
@@ -268,7 +268,7 @@ policy := r8e.NewPolicy[string]("retry-example",
 )
 ```
 
-**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative en échec, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline. L'erreur de la tentative reste dans la chaîne, et rien n'y est ajouté : `errors.Is(err, context.DeadlineExceeded)` n'est vrai que si cette erreur correspond elle-même à `context.DeadlineExceeded`. C'est le cas de l'erreur du contexte, et d'une erreur de timeout du service appelé qui lui correspond, comme le timeout d'en-têtes de réponse de net/http ; ce n'est pas le cas d'une erreur de deadline de socket. Pour détecter la coupure, utilisez `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. La coupure se décide quand la deadline tombe, comme pour `WithTimeout` : un appelant qui annule pendant que la tentative coupée se termine ne la reprend pas, et un appelant qui annule avant la deadline garde la tentative. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée. Une tentative coupée marquée `Permanent` est enveloppée elle aussi, et arrête toujours le retry.
+**Tentatives coupées par `PerAttemptTimeout`.** Quand cette deadline coupe une tentative en échec, l'erreur de la tentative est enveloppée dans `ErrAttemptTimeout`. `errors.Is(err, r8e.ErrAttemptTimeout)` distingue donc la coupure de r8e de l'expiration de votre propre deadline. L'erreur de la tentative reste dans la chaîne, et rien n'y est ajouté : `errors.Is(err, context.DeadlineExceeded)` n'est vrai que si cette erreur correspond elle-même à `context.DeadlineExceeded`. C'est le cas de l'erreur du contexte, et d'une erreur de timeout du service appelé qui lui correspond, comme le timeout d'en-têtes de réponse de net/http ; ce n'est pas le cas d'une erreur de deadline de socket. Pour détecter la coupure, utilisez `errors.Is(err, r8e.ErrAttemptTimeout)`. `OnAttemptTimeout(attempt int)` se déclenche pour chaque tentative coupée (numérotée à partir de 1), et la métrique `AttemptTimeouts` les compte. La deadline ne s'applique que si elle tombe avant celle de l'appelant et avant tout `WithTimeout` ou budget de temps englobant ; une tentative terminée par l'une de celles-là ne porte pas `ErrAttemptTimeout`. La coupure se décide quand la deadline tombe, comme pour `WithTimeout` : un appelant qui annule pendant que la tentative coupée se termine ne la reprend pas, et un appelant qui annule avant la deadline garde la tentative. Une tentative dont la fonction renvoie sa propre erreur sur la deadline, avant que le contexte la signale, compte quand même comme coupée. Une tentative coupée marquée `Permanent` est enveloppée elle aussi, et arrête toujours le retry. Voir [`examples/49-attempt-timeout`](examples/49-attempt-timeout).
 
 **Retry-After :** si l'erreur d'une tentative échouée implémente
 `r8e.RetryAfterProvider` (`RetryAfter() (time.Duration, bool)`), le retry honore
@@ -291,7 +291,7 @@ arrête alors le retry quand l'indice brut, avant jitter, dépasse `MaxDelay`. `
 renvoie la dernière erreur telle quelle : l'appelant lit toujours l'indice complet
 par son `RetryAfterProvider`, et l'échec compte quand même dans un retry budget.
 Un indice inférieur ou égal à `MaxDelay` est attendu normalement. Sans `MaxDelay`,
-tout indice est attendu et l'option n'a aucun effet.
+tout indice est attendu et l'option n'a aucun effet. Voir [`examples/48-honor-retry-after`](examples/48-honor-retry-after).
 
 ```go
 policy := r8e.NewPolicy[*http.Response]("quota-api",
@@ -364,9 +364,43 @@ r8e.WithCircuitBreaker(
 )
 ```
 
-**Admissions et résultats périmés.** La policy rattache chaque résultat à l'admission dont il vient. Le résultat d'un appel admis avant la dernière ouverture du breaker, ou avant son dernier passage en half-open, est ignoré. Un appel lent qui dure plus longtemps que le recovery timeout ne peut donc ni fermer ni rouvrir le breaker pendant qu'une sonde est en vol. Une panique dans l'appel protégé compte comme un échec, ce qui libère aussi une sonde half-open, puis elle se propage (avec `WithRecover`, la panique est déjà une erreur à ce stade). Une panique dans le hook `OnCircuitHalfOpen` libère aussi la sonde. Une sonde garde sa place jusqu'à ce qu'elle rende son résultat : un appel qui ignore son contexte peut donc bloquer le breaker en half-open jusqu'au redémarrage du process. `WithTimeout` ne l'empêche pas : le timeout tourne à l'extérieur du breaker, répond `ErrTimeout` à l'appelant et laisse tourner l'appel, qui garde sa place. `HalfOpenProbeLease(d)` (opt-in, en config `half_open_probe_lease`) borne ce temps. Quand toutes les places sont prises et que même la sonde la plus récente a été admise il y a plus de `d`, l'appel suivant compte les sondes comme une sonde ratée et rouvre le breaker. Le résultat tardif d'une telle sonde est périmé. Le bail court de l'admission de la sonde jusqu'à son résultat. Dans une policy, cela inclut les retries, leur backoff et les attentes d'un rate limiter ou d'un bulkhead placés sous le breaker. Choisissez `d` au-dessus du pire cas de cette durée : quand toutes les places sont prises, les sondes encore en cours après `d` comptent comme ratées, même si elles allaient réussir. Sans policy, `cb.Acquire()` renvoie un `CircuitPermit`, et `permit.Done(elapsed, outcome)` rapporte le résultat. `Allow` et `Record` gardent leur comportement, mais ils ne sont pas liés à une admission.
+**Vos propres gardes.** Une garde que vous placez dans la fonction, par exemple un quota par tenant, refuse des appels avant qu'ils atteignent le downstream. Mais `IsLocalRejection` ne reconnaît pas son erreur. Il compare par identité, et c'est voulu : il ne sait d'où viennent ses sentinelles que quand elles ne sont pas enveloppées. Donnez à la garde son propre type d'erreur, et reconnaissez-le dans le classifier avec `errors.As`. `errors.As` traverse aussi les enveloppes. Avec `WithRetry` dans la policy, un retry qui épuise ses tentatives sur l'erreur de la garde la renvoie enveloppée dans `ErrRetriesExhausted`. L'appel est alors neutre, même si une tentative précédente a atteint le downstream et échoué.
+
+```go
+type QuotaError struct{ Tenant string }
+
+func (e *QuotaError) Error() string { return "quota reached for " + e.Tenant }
+
+r8e.WithCircuitBreaker(
+    r8e.CircuitBreakerClassifier(func(ctx context.Context, err error) r8e.Outcome {
+        var quota *QuotaError
+        if errors.As(err, &quota) || r8e.IsLocalRejection(err) {
+            return r8e.OutcomeNeutral // refus local : le downstream n'a pas été appelé
+        }
+        return r8e.CallerCancellationIsNeutral(ctx, err)
+    }),
+)
+```
+
+**Admissions et résultats périmés.** La policy rattache chaque résultat à l'admission dont il vient. Le résultat d'un appel admis avant la dernière ouverture du breaker, ou avant son dernier passage en half-open, est ignoré. Un appel lent qui dure plus longtemps que le recovery timeout ne peut donc ni fermer ni rouvrir le breaker pendant qu'une sonde est en vol. Une panique dans l'appel protégé compte comme un échec, ce qui libère aussi une sonde half-open, puis elle se propage (avec `WithRecover`, la panique est déjà une erreur à ce stade). Une panique dans le hook `OnCircuitHalfOpen` libère aussi la sonde. Une sonde garde sa place jusqu'à ce qu'elle rende son résultat : un appel qui ignore son contexte peut donc bloquer le breaker en half-open jusqu'au redémarrage du process. `WithTimeout` ne l'empêche pas : le timeout tourne à l'extérieur du breaker, répond `ErrTimeout` à l'appelant et laisse tourner l'appel, qui garde sa place. `HalfOpenProbeLease(d)` (opt-in, en config `half_open_probe_lease`) borne ce temps. Quand toutes les places sont prises et que même la sonde la plus récente a été admise il y a plus de `d`, l'appel suivant compte les sondes comme une sonde ratée et rouvre le breaker. Le résultat tardif d'une telle sonde est périmé. Le bail court de l'admission de la sonde jusqu'à son résultat. Dans une policy, cela inclut les retries, leur backoff et les attentes d'un rate limiter ou d'un bulkhead placés sous le breaker. Choisissez `d` au-dessus du pire cas de cette durée : quand toutes les places sont prises, les sondes encore en cours après `d` comptent comme ratées, même si elles allaient réussir. Avec `WithTimeout` dans la même policy, cette durée est bornée pour une fonction qui respecte son contexte : le timeout enveloppe le breaker et tout ce qu'il contient, et le backoff du retry comme les attentes du rate limiter et du bulkhead s'arrêtent quand le contexte se termine. Une telle sonde rend son résultat quand la fonction revient sur le contexte annulé. Le bail ne sert alors que pour une fonction qui ignore son contexte, et un petit multiple du timeout suffit : avec deux fois le timeout, la fonction a encore autant de temps pour revenir après la coupure. Avec `AdaptiveTimeout`, partez de la durée passée à `WithTimeout`, qui sert de plafond. Sans policy, `cb.Acquire()` renvoie un `CircuitPermit`, et `permit.Done(elapsed, outcome)` rapporte le résultat. `Allow` et `Record` gardent leur comportement, mais ils ne sont pas liés à une admission.
 
 **Compter les résultats neutres et périmés.** `CircuitNeutralOutcomes` compte les résultats que le classifier a jugés neutres, et `CircuitStaleOutcomes` ceux que le breaker a ignorés parce qu'ils étaient périmés. Les hooks `OnCircuitNeutral` et `OnCircuitStaleOutcome` se déclenchent sur les mêmes événements, hors du verrou du breaker. Un résultat périmé compte une seule fois, comme périmé, même s'il est neutre. Une hausse des résultats neutres peut cacher un downstream que les appelants abandonnent sans cesse. Un résultat périmé vient d'un appel encore en cours quand le breaker s'est ouvert ou est passé en half-open : chaque ouverture en ajoute à peu près autant qu'il y avait d'appels en vol, quel que soit le recovery timeout.
+
+`OnCircuitNeutral` ne porte pas de cause. Pour logger ou compter la cause des résultats neutres, enveloppez votre classifier dans un autre qui note l'erreur chaque fois qu'il renvoie `OutcomeNeutral`. Ce wrapper voit aussi les résultats neutres que le breaker ignore ensuite parce qu'ils sont périmés : son compte peut donc dépasser `CircuitNeutralOutcomes`.
+
+```go
+func logNeutral(next func(context.Context, error) r8e.Outcome) func(context.Context, error) r8e.Outcome {
+    return func(ctx context.Context, err error) r8e.Outcome {
+        outcome := next(ctx, err)
+        if outcome == r8e.OutcomeNeutral {
+            slog.InfoContext(ctx, "circuit breaker: neutral outcome", "cause", err)
+        }
+        return outcome
+    }
+}
+
+r8e.WithCircuitBreaker(r8e.CircuitBreakerClassifier(logNeutral(r8e.CallerCancellationIsNeutral)))
+```
 
 ### Cooldown
 
@@ -422,6 +456,8 @@ p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
   `Cooldown.SetMaxCooldown`, qui renvoie `ErrCooldownNonPositiveMax` pour un
   plafond non positif.
 
+Voir [`examples/54-cooldown`](examples/54-cooldown).
+
 ### Rate Limiter
 
 Limiteur de débit par token bucket. Le mode par défaut rejette avec `r8e.ErrRateLimited` ; le mode bloquant attend un jeton. Pour un débit positif, le bucket contient une seconde de jetons, et au moins un jeton. Un débit sous 1 req/s marche donc : `WithRateLimit(0.125)` laisse passer un appel toutes les 8 secondes, soit environ 450 par heure. Un débit nul ou négatif ne laisse passer aucun appel.
@@ -438,7 +474,7 @@ policy = r8e.NewPolicy[string]("rl-blocking",
 )
 ```
 
-**Taille du bucket (`Burst`).** `Burst(n)` fixe la capacité du bucket à `n` jetons, indépendamment du débit. Le bucket démarre plein : sans `Burst`, à 100 req/s, 100 appels partent d'un coup au démarrage. Avec `WithRateLimit(100, r8e.Burst(1))`, ils sont espacés dès le premier appel. `Reconfigure` et l'ajustement AIMD changent le débit, jamais une capacité fixée par `Burst`. `n` doit être compris entre 1 et `r8e.MaxBurst`, sinon `NewPolicy` panique avec `ErrRateLimitBurstOutOfRange`. Un débit nul ou négatif vide quand même le bucket, `Burst` ou pas ; un débit positif ramène ensuite la capacité de `Burst`, avec un bucket vide. En JSON, le champ s'appelle `rate_limit_burst` (il exige `rate_limit`). Un rechargement peut changer le burst d'une policy construite avec un burst, mais ne peut pas en ajouter à une policy construite sans (`ErrPatternAbsent`). Un rechargement sans ce champ garde le bucket actuel, comme pour tout champ absent : retirer `rate_limit_burst` du fichier garde le burst jusqu'à la reconstruction de la policy. Un débit NaN, comme un débit nul ou négatif, ne laisse passer aucun appel.
+**Taille du bucket (`Burst`).** `Burst(n)` fixe la capacité du bucket à `n` jetons, indépendamment du débit. Le bucket démarre plein : sans `Burst`, à 100 req/s, 100 appels partent d'un coup au démarrage. Avec `WithRateLimit(100, r8e.Burst(1))`, ils sont espacés dès le premier appel. `Reconfigure` et l'ajustement AIMD changent le débit, jamais une capacité fixée par `Burst`. `n` doit être compris entre 1 et `r8e.MaxBurst`, sinon `NewPolicy` panique avec `ErrRateLimitBurstOutOfRange`. Un débit nul ou négatif vide quand même le bucket, `Burst` ou pas ; un débit positif ramène ensuite la capacité de `Burst`, avec un bucket vide. En JSON, le champ s'appelle `rate_limit_burst` (il exige `rate_limit`). Un rechargement peut changer le burst d'une policy construite avec un burst, mais ne peut pas en ajouter à une policy construite sans (`ErrPatternAbsent`). Un rechargement sans ce champ garde le bucket actuel, comme pour tout champ absent : retirer `rate_limit_burst` du fichier garde le burst jusqu'à la reconstruction de la policy. Un débit NaN, comme un débit nul ou négatif, ne laisse passer aucun appel. Voir [`examples/47-rate-limit-burst`](examples/47-rate-limit-burst).
 
 Un bucket ne respecte un quota que sur sa fenêtre de recharge. Face à un quota de 450 appels par heure glissante, `WithRateLimit(0.125, r8e.Burst(450))` peut laisser passer jusqu'à 900 appels en une heure : 450 d'un coup, puis 450 autres pendant que le bucket se remplit. `Burst(1)` au même débit ne dépasse jamais 451.
 
@@ -554,7 +590,8 @@ limiteur propre de la politique. L'option ne se combine ni avec `WithBulkhead`
 ni avec `WithAdaptiveConcurrency` (`NewPolicy` panique avec
 `ErrSharedBulkheadConflict`), et le `Reconfigure` d'une politique refuse tout
 réglage de bulkhead (il renvoie `ErrSharedBulkheadConflict`) : appelez
-`Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement.
+`Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement. Voir
+[`examples/53-shared-bulkhead`](examples/53-shared-bulkhead).
 
 ### Requête spéculative
 
@@ -734,6 +771,31 @@ ou `WithHedge` — configuré sans aucun des deux, `NewPolicy` panique avec
 `ErrTimeBudgetWithoutConsumer`. Observabilité : le hook `OnTimeBudgetExceeded` et
 la métrique `TimeBudgetExceeded`. Voir [`examples/22-time-budget`](examples/22-time-budget).
 
+**Une tentative peut démarrer tard.** Le gate du retry compare seulement le
+backoff au budget restant. Il ne peut pas savoir combien de temps prendra la
+tentative suivante : une tentative peut donc démarrer alors qu'il ne reste
+qu'une seconde de budget. Un budget coopératif laisse cette tentative dépasser
+le budget. Avec un `WithTimeout` à peu près égal au budget, c'est le timeout
+qui la coupe : l'appel se termine en `ErrTimeout`, et l'erreur de la tentative
+précédente n'y figure pas. Utilisez `PropagateDeadline` (plus bas) avec un
+budget de temps, et donnez à `WithTimeout` une durée plus longue que le budget.
+La deadline du budget coupe alors la tentative à la fin du budget, et l'appel
+se termine en `ErrTimeBudgetExceeded`. Cette erreur n'enveloppe celle de la
+tentative coupée que si c'était la dernière tentative autorisée ; sinon, elle
+enveloppe `context.DeadlineExceeded`. La deadline du budget ne s'applique que si
+elle tombe strictement avant celle du timeout : tant que `WithTimeout` est égal
+au budget ou plus court, `PropagateDeadline` ne change rien. Aucune erreur ne
+contient celles des tentatives précédentes : le hook `OnRetry` reçoit chacune
+d'elles avant son retry.
+
+```go
+policy := r8e.NewPolicy[Response]("svc",
+    r8e.WithRetry(3, r8e.ConstantBackoff(500*time.Millisecond)),
+    r8e.WithTimeBudget(5*time.Second, r8e.PropagateDeadline()), // coupe à la fin du budget
+    r8e.WithTimeout(10*time.Second),                            // simple filet de sécurité
+)
+```
+
 ### Propagation de deadline dure
 
 Par défaut le budget laisse `context.Context.Deadline()` **non défini** : un
@@ -862,6 +924,18 @@ policy := r8e.NewPolicy[string]("svc",
 )
 ```
 
+**Dimensionner pour la reprise.** Chaque échec réessayable retire un token,
+première tentative comprise : une panne vide donc le bucket. Seuls les succès
+le remplissent. Depuis un bucket vide, et sans aucun échec entre-temps, le
+budget a besoin d'environ `MaxTokens / (2 × TokenRatio)` succès pour repasser
+au-dessus de la moitié de sa capacité : 51 avec les valeurs par défaut. Chaque
+échec qui s'intercale coûte `1 / TokenRatio` succès de plus. Le compte se fait
+en appels, pas en temps. À 50 appels par heure, un budget vidé par une panne
+refuse tous les retries pendant un peu plus d'une heure après le retour du
+downstream. Un `MaxTokens` plus grand absorbe plus d'échecs avant la coupure
+(environ la moitié de `MaxTokens` depuis un bucket plein), mais il allonge la
+reprise dans la même proportion. Un `TokenRatio` plus grand la raccourcit.
+
 Pour coordonner les retries entre plusieurs policies d'un même process,
 construisez un budget et partagez-le :
 
@@ -870,6 +944,22 @@ budget := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.TokenRatio(0.1))
 
 a := r8e.NewPolicy[string]("a", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
 b := r8e.NewPolicy[string]("b", r8e.WithRetry(3, strategy), r8e.WithSharedRetryBudget(budget))
+```
+
+**Retries écrits à la main (`DoRetry`).** Un retry écrit hors de `WithRetry`
+peut partager le même budget. Renseignez `RetryParams.Budget` : `DoRetry`
+crédite alors chaque succès au budget, débite chaque échec réessayable et
+consulte le budget avant chaque retry, ancêtres compris (voir `Parent` plus
+bas). Renseignez aussi `Clock` : `DoRetry` s'en sert pour attendre entre deux
+tentatives.
+
+```go
+val, err := r8e.DoRetry(ctx, fetch, r8e.RetryParams{
+    MaxAttempts: 3,
+    Strategy:    r8e.ExponentialBackoff(100 * time.Millisecond),
+    Clock:       r8e.RealClock{},
+    Budget:      budget, // le budget partagé avec les policies ci-dessus
+})
 ```
 
 **Budgets imbriqués (en arbre).** `Parent(*RetryBudget)` imbrique un budget sous
@@ -903,7 +993,7 @@ instable : ses succès sont toujours crédités au parent, et chaque succès qui
 ramène au-dessus du seuil laisse passer l'échec suivant. Tant que la protection
 joue, les jetons du parent ne comptent plus les échecs de cet enfant, mais
 comptent toujours ses succès : surveillez le budget de l'enfant. Comme `Parent`,
-l'option se pose à la construction, en code uniquement.
+l'option se pose à la construction, en code uniquement. Voir [`examples/50-shield-parent`](examples/50-shield-parent).
 
 ```go
 svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
@@ -1110,7 +1200,8 @@ terminé, cette politique n'écrit plus d'entrée négative. En revanche, une
 politique ou un cache qui l'enveloppe met quand même en cache le
 `context.Canceled` qu'elle renvoie. Ne posez `ctx` que sur une politique dont
 tous les utilisateurs s'arrêtent avec son propriétaire. L'option se pose en code
-uniquement, et `Reconfigure` ne la change pas.
+uniquement, et `Reconfigure` ne la change pas. Voir
+[`examples/51-base-context`](examples/51-base-context).
 
 ```go
 base, stop := context.WithCancelCause(context.Background())
@@ -1128,6 +1219,27 @@ compteurs `CoalesceLeaders` / `CoalesceFollowers` (leur ratio est le taux de
 déduplication) et la jauge `CoalesceInFlight`. Le coalescing est une optimisation
 saine : il n'expose aucune condition de santé. Voir
 [`examples/20-coalesce`](examples/20-coalesce).
+
+**Tests avec `testing/synctest`.** L'appel partagé peut survivre à tous ses
+appelants. Si la fonction de test se termine alors que l'appel partagé est
+bloqué, sur un timer factice ou sur un channel, `synctest.Test` panique avec
+`deadlock: main bubble goroutine has exited but blocked goroutines remain`.
+Avant de sortir, attendez que `Metrics().CoalesceInFlight` vaille 0, puis
+appelez `synctest.Wait()` pour laisser la goroutine de l'appel partagé se
+terminer. La recette ne marche que si la fonction partagée rend la main quand
+son contexte se termine. Si elle l'ignore, attendez aussi qu'elle revienne, par
+exemple sur un channel qu'elle ferme :
+
+```go
+synctest.Test(t, func(t *testing.T) {
+    // ... des appels dont les appelants partent avant le retour de l'appel partagé ...
+
+    for policy.Metrics().CoalesceInFlight > 0 {
+        time.Sleep(time.Millisecond) // temps factice : fait avancer l'horloge de la bulle
+    }
+    synctest.Wait()
+})
+```
 
 Un `Coalescer` peut aussi s'utiliser seul, sans `Policy` (pas de timeout de policy
 ici, donnez donc sa propre deadline à `fetch`) :
@@ -1393,7 +1505,7 @@ r8e.IsTransient(err)  // true pour les erreurs non classifiées et explicitement
 r8e.IsPermanent(err)  // true uniquement pour les erreurs explicitement permanentes
 ```
 
-Chaque sentinelle de r8e a un code court et stable, pour les logs, les métriques et les labels de trace. `r8e.ErrorCode(err)` le renvoie (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`…), même quand la sentinelle est enveloppée, et `""` pour une erreur qui n'en porte aucune. Trois sentinelles sont des enveloppes : `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` et `ErrConcurrencyBudgetExceeded` enveloppent l'erreur qui a mis fin à la dernière tentative, et elles s'effacent devant la cause qu'elles portent. Une panique relancée jusqu'à épuisement renvoie `"panic_recovered"`, un timeout `"timeout"`. Une erreur qui ne porte que des enveloppes renvoie la plus externe : un budget de temps qui coupe un retry renvoie `"time_budget_exceeded"`. `ErrorCode` atteint une sentinelle par `Unwrap`, pas par une méthode `Is` : un type d'erreur à vous qui ne correspond à une sentinelle que par `Is` ne porte aucun code. Enveloppez plutôt la sentinelle avec `%w`.
+Chaque sentinelle de r8e a un code court et stable, pour les logs, les métriques et les labels de trace. `r8e.ErrorCode(err)` le renvoie (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`…), même quand la sentinelle est enveloppée, et `""` pour une erreur qui n'en porte aucune. Trois sentinelles sont des enveloppes : `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` et `ErrConcurrencyBudgetExceeded` enveloppent l'erreur qui a mis fin à la dernière tentative, et elles s'effacent devant la cause qu'elles portent. Une panique relancée jusqu'à épuisement renvoie `"panic_recovered"`, un timeout `"timeout"`. Une erreur qui ne porte que des enveloppes renvoie la plus externe : un budget de temps qui coupe un retry renvoie `"time_budget_exceeded"`. `ErrorCode` atteint une sentinelle par `Unwrap`, pas par une méthode `Is` : un type d'erreur à vous qui ne correspond à une sentinelle que par `Is` ne porte aucun code. Enveloppez plutôt la sentinelle avec `%w`. Voir [`examples/46-error-codes`](examples/46-error-codes).
 
 ```go
 slog.Warn("call failed", "reason", r8e.ErrorCode(err), "err", err)
@@ -1520,6 +1632,20 @@ report := r8e.DefaultRegistry().Health() // agrégat : "healthy" | "degraded" | 
 ```go
 policy := r8e.NewPolicy[string]("job-42", r8e.WithTimeout(time.Second))
 defer policy.Registry().Unregister(policy)
+```
+
+Pour retirer un groupe de policies créées ensemble, par exemple celles d'un tenant, rangez-les dans un `[]r8e.HealthReporter` au moment de les créer. `HealthReporter` n'est pas générique : des policies de types de résultat différents tiennent dans la même slice. Bouclez ensuite sur `Unregister` :
+
+```go
+reg := r8e.DefaultRegistry()
+users := r8e.NewPolicy[User]("tenant-42/users", r8e.WithTimeout(time.Second))
+orders := r8e.NewPolicy[[]Order]("tenant-42/orders", r8e.WithTimeout(time.Second))
+tenantPolicies := []r8e.HealthReporter{users, orders}
+
+// Quand le tenant disparaît :
+for _, p := range tenantPolicies {
+    reg.Unregister(p)
+}
 ```
 
 ## Configuration
@@ -1767,6 +1893,15 @@ go run ./examples/42-nested-retry-budget/
 go run ./examples/43-deadline-propagation-cross-service/
 go run ./examples/44-circuit-breaker-classifier/
 go run ./examples/45-registry-unregister/
+go run ./examples/46-error-codes/
+go run ./examples/47-rate-limit-burst/
+go run ./examples/48-honor-retry-after/
+go run ./examples/49-attempt-timeout/
+go run ./examples/50-shield-parent/
+go run ./examples/51-base-context/
+go run ./examples/52-response-classifier/
+go run ./examples/53-shared-bulkhead/
+go run ./examples/54-cooldown/
 ```
 
 ## Licence

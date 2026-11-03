@@ -54,6 +54,19 @@ type (
 	// immutable. Because the parent always exists before the child, the tree is
 	// acyclic by construction.
 	//
+	// Size the budget for its recovery too. Every retryable failure removes
+	// a token, first attempts included, so an outage empties the bucket.
+	// Only successes refill it: from an empty bucket, with no
+	// failure in between, it takes about MaxTokens / (2 × TokenRatio)
+	// successes to climb back above half its capacity, 51 with the defaults.
+	// Each failure in between costs 1 / TokenRatio more successes. The count
+	// is in calls, not in time: at 50 calls per hour, a budget emptied by an
+	// outage refuses every retry for a little over an hour after the
+	// downstream has recovered. A larger [MaxTokens] absorbs more failures
+	// before the cut (about half of MaxTokens from a full bucket), but
+	// lengthens the recovery in the same proportion. A larger [TokenRatio]
+	// shortens it.
+	//
 	// Pattern: Retry Budget — adaptive token bucket gates retries against the
 	// live success/failure ratio; mutex-guarded so the (tokens, capacity, ratio)
 	// triple stays coherent under concurrent Reconfigure.
@@ -79,7 +92,7 @@ const (
 
 // MaxTokens sets the budget capacity. Retries are suppressed once the bucket
 // drains to half this value. Values below 1 are clamped to the default.
-// Default: 10.
+// Default: 10. A larger value also slows the recovery (see [RetryBudget]).
 func MaxTokens(n int) RetryBudgetOption {
 	return func(cfg *retryBudgetConfig) {
 		cfg.maxTokens = n

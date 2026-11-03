@@ -179,6 +179,22 @@ func CallerCancellationIsNeutral(ctx context.Context, err error) Outcome {
 // the only sign left that the downstream hangs; keep [WithTimeout] and a
 // function that honours its context.
 //
+// A guard of your own placed inside the function, such as a per-tenant
+// quota, is not a local rejection here, and IsLocalRejection stays
+// identity-based on purpose: it knows where its sentinels come from only
+// when they are not wrapped. Give the guard its own error type and match it
+// in the classifier with errors.As:
+//
+//	var quota *QuotaError
+//	if errors.As(err, &quota) {
+//		return r8e.OutcomeNeutral
+//	}
+//
+// errors.As also matches through a wrap. With [WithRetry] in the policy, a
+// retry that runs out of attempts on the guard's error returns it wrapped
+// in [ErrRetriesExhausted], and the call is then neutral even if an earlier
+// attempt reached the downstream and failed.
+//
 // It reports false for [ErrThrottled] and [ErrSLOShed], whose shedders run
 // outside the breaker and react to the downstream's recent outcomes, and for
 // [ErrCircuitOpen], which an inner policy's breaker returns when its

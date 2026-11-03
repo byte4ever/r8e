@@ -231,7 +231,8 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
 - Un échec de lecture du corps est transitoire, et le classifier n'est pas
   appelé.
 
-`NewClient` et son `Classifier` ne changent pas.
+`NewClient` et son `Classifier` ne changent pas. Voir
+[`examples/52-response-classifier`](../examples/52-response-classifier).
 
 ## Propagation de deadline
 
