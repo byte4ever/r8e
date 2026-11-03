@@ -1239,6 +1239,47 @@ func TestApplyHardDeadlineKeepsARetryRefusalWhenTheCallerEndsAfter(t *testing.T)
 	require.ErrorIs(t, err, errDownstream)
 }
 
+// stepBackClock returns first on its first Now, then one nanosecond less: a
+// wall clock stepping back across a deadline between two reads.
+type stepBackClock struct {
+	first time.Time
+	reads int
+}
+
+func (c *stepBackClock) Now() time.Time {
+	c.reads++
+	if c.reads == 1 {
+		return c.first
+	}
+
+	return c.first.Add(-time.Nanosecond)
+}
+
+func (c *stepBackClock) Since(t time.Time) time.Duration { return c.Now().Sub(t) }
+
+func (*stepBackClock) NewTimer(d time.Duration) Timer { return RealClock{}.NewTimer(d) }
+
+// A spent budget resolves from the one reading that found it spent, even if
+// the clock steps back before the deadline right after.
+func TestNewBudgetDeadlineCtxSpentOnAStepBackClock(t *testing.T) {
+	t.Parallel()
+
+	deadline := time.Now()
+	clk := &stepBackClock{first: deadline}
+
+	ctx, cancel := newBudgetDeadlineCtx(context.Background(), clk, deadline)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+	default:
+		require.Fail(t, "a spent budget must resolve at once")
+	}
+
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+	assert.True(t, ctx.cutByBudget())
+}
+
 func TestBudgetDeadlineCtxSettleDecidesFromTheParent(t *testing.T) {
 	t.Parallel()
 
@@ -1255,29 +1296,28 @@ func TestBudgetDeadlineCtxSettleDecidesFromTheParent(t *testing.T) {
 	t.Cleanup(cancelExpired)
 
 	tests := []struct {
-		parent      context.Context
-		wantErr     error
-		deadline    time.Time
-		at          time.Time
-		name        string
-		ownDeadline bool
-		wantCut     bool
+		parent   context.Context
+		wantErr  error
+		deadline time.Time
+		at       time.Time
+		name     string
+		wantCut  bool
 	}{
 		{
 			name: "parent live", parent: context.Background(), deadline: own, at: now,
-			ownDeadline: true, wantErr: context.DeadlineExceeded, wantCut: true,
+			wantErr: context.DeadlineExceeded, wantCut: true,
 		},
 		{
 			name: "parent live, own deadline not due", parent: context.Background(),
-			deadline: own, at: own.Add(-time.Nanosecond), ownDeadline: true,
+			deadline: own, at: own.Add(-time.Nanosecond),
 		},
 		{
 			name: "parent cancelled", parent: cancelled, deadline: own, at: now,
-			ownDeadline: true, wantErr: context.Canceled,
+			wantErr: context.Canceled,
 		},
 		{
 			name: "parent past its later deadline", parent: expired, deadline: own, at: now,
-			ownDeadline: true, wantErr: context.DeadlineExceeded, wantCut: true,
+			wantErr: context.DeadlineExceeded, wantCut: true,
 		},
 		{
 			name: "parent past the deadline it set", parent: expired,
@@ -1294,10 +1334,9 @@ func TestBudgetDeadlineCtxSettleDecidesFromTheParent(t *testing.T) {
 			t.Parallel()
 
 			c := &budgetDeadlineCtx{
-				parent:      tt.parent,
-				done:        make(chan struct{}),
-				deadline:    tt.deadline,
-				ownDeadline: tt.ownDeadline,
+				parent:   tt.parent,
+				done:     make(chan struct{}),
+				deadline: tt.deadline,
 			}
 
 			c.settle(tt.at)

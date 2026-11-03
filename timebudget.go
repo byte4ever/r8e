@@ -207,8 +207,8 @@ func applyHardDeadline[T any](
 
 	val, err := next(hardCtx)
 
-	if !params.clock.Now().Before(params.deadline) {
-		hardCtx.settle(params.clock.Now())
+	if now := params.clock.Now(); !now.Before(params.deadline) {
+		hardCtx.settle(now)
 	}
 
 	if budgetDeadlineFired(hardCtx, err) {
@@ -348,9 +348,13 @@ func newBudgetDeadlineCtx(
 
 	// A budget of its own that is already spent (deadline now or past)
 	// resolves immediately too.
-	remaining := deadline.Sub(clock.Now())
+	// One clock read decides and settles: a second read could step back
+	// before the deadline and leave the context unresolved with no watcher.
+	now := clock.Now()
+
+	remaining := deadline.Sub(now)
 	if remaining <= 0 {
-		bctx.settle(clock.Now())
+		bctx.settle(now)
 
 		return bctx, cancel
 	}
@@ -405,8 +409,8 @@ func (c *budgetDeadlineCtx) cancel(err error) {
 // deadline reached it after the budget's: the context ends with
 // [context.DeadlineExceeded] and cut records that the budget ended the call.
 // The decision is cutByOwnDeadline's, the rule DoTimeout and
-// PerAttemptTimeout apply too; now is the decision instant on the policy
-// Clock.
+// PerAttemptTimeout apply too; now is the decision instant (see
+// cutByOwnDeadline), read once by the caller.
 func (c *budgetDeadlineCtx) settle(now time.Time) {
 	if cutByOwnDeadline(c.parent, c.deadline, now) {
 		c.resolve(context.DeadlineExceeded, true)

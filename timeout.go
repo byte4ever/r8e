@@ -207,16 +207,20 @@ func policyDeadlineCut(parent, derived context.Context) bool {
 // a deadline r8e set on a context derived from parent: the timeout of
 // DoTimeout, the per-attempt deadline of PerAttemptTimeout, or a hard time
 // budget (see budgetDeadlineCtx.settle). now is the instant the caller
-// decides at, read from the wall clock for the timeouts and from the policy
-// Clock for the budget.
+// decides at: a wall-clock reading for the timeouts; for the budget, a
+// policy Clock reading, or the deadline itself when the budget's timer fired.
+// It is consulted only while the parent is live, so a caller that has seen
+// the parent end may pass any value. A caller that checks whether the
+// deadline is due must pass the same reading it checked.
 //
 // A deadline that does not bind (see deadlineBinds) is the parent's, so it
 // never cuts. A parent already cancelled keeps the call. A parent found past
 // its own deadline reached it after r8e's, which binds and so comes strictly
 // first: the call is r8e's. A live parent leaves the decision to the clock:
 // the call is cut once now reaches deadline. The parent's side is decided
-// from parent.Err() alone, never on the clock: an error the call returns
-// before the parent reports its end stays the call's.
+// from parent.Err() alone, never on the clock: a call that fails before the
+// parent reports its end is never given to the parent, only to r8e's cut or
+// to the call itself.
 func cutByOwnDeadline(parent context.Context, deadline, now time.Time) bool {
 	if !deadlineBinds(parent, deadline) {
 		return false

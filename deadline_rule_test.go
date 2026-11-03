@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -37,10 +38,11 @@ func ruleOutcome(val string, err error) string {
 }
 
 // DoTimeout, WithTimeout in a policy and a hard time budget decide who ended
-// a call with one rule (cutByOwnDeadline). On the real clock they give the
-// same outcome for every case, except a success that comes back after r8e's
-// deadline: the timeouts have already returned ErrTimeout, while the budget
-// waits for the chain and keeps the success.
+// a call with one rule (cutByOwnDeadline). They give the same outcome for
+// every case, except a success that comes back after r8e's deadline: the
+// timeouts have already returned ErrTimeout, while the budget waits for the
+// chain and keeps the success. Each case runs in a synctest bubble, so virtual
+// time orders the cancel, the deadlines and the late downstream.
 func TestDeadlineRuleSharedByTheThreePatterns(t *testing.T) {
 	t.Parallel()
 
@@ -126,7 +128,14 @@ func TestDeadlineRuleSharedByTheThreePatterns(t *testing.T) {
 				}
 
 				for range runs {
-					require.Equal(t, want, ruleOutcome(tt.call(run)))
+					synctest.Test(t, func(t *testing.T) {
+						require.Equal(t, want, ruleOutcome(tt.call(run)))
+
+						// A late downstream outlives DoTimeout: let it return
+						// before the bubble ends.
+						time.Sleep(2 * deadline)
+						synctest.Wait()
+					})
 				}
 			})
 		}
