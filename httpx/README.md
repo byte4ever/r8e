@@ -27,6 +27,7 @@ and a user-provided HTTP status code classifier.
 | `NewClient` | Constructor — pass a name, HTTP client, classifier, and r8e options |
 | `Client.Do` | Executes `*http.Request` through the resilience policy |
 | `Classifier` | `func(statusCode int) ErrorClass` — maps status codes to error classes |
+| `NewResponseClient` / `ResponseClassifier` | `func(resp *http.Response, body []byte) error` — classifies from the status, headers and body |
 | `ErrorClass` | Enum: `Success`, `Transient`, `Permanent` |
 | `StatusError` | Error type carrying the original `*http.Response` for inspection |
 
@@ -126,6 +127,46 @@ if errors.As(err, &statusErr) {
 | Permanent (e.g. 400) | non-nil | `Permanent` | extractable |
 | Retries exhausted | `nil` | `ErrRetriesExhausted` | extractable (last attempt) |
 | Transport error | `nil` | transport error | not present |
+
+## Classifying from the body (`ResponseClassifier`)
+
+Some APIs answer the same status for opposite cases, and only the body tells
+them apart: a 403 for a token to renew or for a resource that moved, a 404 for
+an unknown object or for a route missing during a rollout. `NewResponseClient`
+takes a `ResponseClassifier` instead of a `Classifier`:
+
+```go
+classify := func(resp *http.Response, body []byte) error {
+    switch {
+    case resp.StatusCode/100 == 2:
+        return nil
+    case resp.StatusCode == http.StatusForbidden && bytes.Contains(body, []byte("token_expired")):
+        return errTokenExpired // transient: retried
+    default:
+        return r8e.Permanent(fmt.Errorf("status %d", resp.StatusCode))
+    }
+}
+
+client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
+    r8e.WithTimeout(2*time.Second),
+    r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
+)
+```
+
+- The classifier returns `nil` for a success, or the error the attempt fails
+  with. That error is classified as anywhere in r8e: `r8e.Permanent(err)` stops
+  the retry, `r8e.RetryAfterError(err, d)` carries a delay hint, and any other
+  error is transient.
+- For a non-2xx response, `body` holds the first `httpx.MaxClassifiedBody`
+  bytes (64 KiB), and `resp.Body` still reads the whole body from the start.
+- For a 2xx response, `body` is `nil` and the body is not read, so a streamed
+  success stays streamed.
+- When the error is not permanent, a retry may follow: the body is drained and
+  closed so the connection is reused. A permanent error, or `nil`, leaves the
+  body readable.
+- A failure reading the body is transient, and the classifier is not called.
+
+`NewClient` and its `Classifier` are unchanged.
 
 ## Deadline propagation
 

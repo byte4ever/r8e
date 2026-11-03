@@ -839,6 +839,15 @@ resp, err := client.Do(ctx, req)
 // automatically (over the configured backoff) on 429/503.
 ```
 
+When the status alone is ambiguous (same 403/404 for a retriable and a final
+case), use `httpx.NewResponseClient(name, hc, rc, opts...)` with
+`rc func(resp *http.Response, body []byte) error`: nil = success; the returned
+error is classified as usual (`r8e.Permanent` stops, `r8e.RetryAfterError`
+hints, anything else is transient). Non-2xx: `body` = first
+`httpx.MaxClassifiedBody` (64 KiB) bytes and `resp.Body` still reads the whole
+body; 2xx: `body` is nil and the body is not read. A non-permanent error drains
+and closes the body; a body read failure is transient and skips `rc`.
+
 ## Presets
 
 ```go

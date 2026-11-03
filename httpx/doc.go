@@ -4,6 +4,8 @@
 // Client wraps a standard http.Client with an r8e resilience
 // policy and a user-provided status code classifier that maps
 // HTTP response codes to transient or permanent errors.
+// NewResponseClient takes a ResponseClassifier instead, which
+// also sees the start of a non-2xx body.
 //
 // Each retry attempt replays the request body via req.GetBody, so a
 // retried request carrying a body (POST/PUT) resends it correctly; a

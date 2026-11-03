@@ -30,6 +30,7 @@ l'utilisateur.
 | `NewClient` | Constructeur — passer un nom, un client HTTP, un classificateur et des options r8e |
 | `Client.Do` | Execute `*http.Request` a travers la politique de resilience |
 | `Classifier` | `func(statusCode int) ErrorClass` — associe les codes de statut aux classes d'erreur |
+| `NewResponseClient` / `ResponseClassifier` | `func(resp *http.Response, body []byte) error` — classe à partir du statut, des en-têtes et du corps |
 | `ErrorClass` | Enum : `Success`, `Transient`, `Permanent` |
 | `StatusError` | Type d'erreur portant le `*http.Response` original pour inspection |
 
@@ -129,6 +130,48 @@ if errors.As(err, &statusErr) {
 | Permanent (ex. 400) | non-nil | `Permanent` | extractible |
 | Tentatives epuisees | `nil` | `ErrRetriesExhausted` | extractible (derniere tentative) |
 | Erreur de transport | `nil` | erreur de transport | absent |
+
+## Classer à partir du corps (`ResponseClassifier`)
+
+Certaines API renvoient le même statut pour deux cas opposés, et seul le corps
+les distingue : un 403 pour un jeton à renouveler ou pour une ressource
+déplacée, un 404 pour un objet inconnu ou pour une route absente pendant un
+déploiement. `NewResponseClient` prend un `ResponseClassifier` à la place d'un
+`Classifier` :
+
+```go
+classify := func(resp *http.Response, body []byte) error {
+    switch {
+    case resp.StatusCode/100 == 2:
+        return nil
+    case resp.StatusCode == http.StatusForbidden && bytes.Contains(body, []byte("token_expired")):
+        return errTokenExpired // transitoire : retenté
+    default:
+        return r8e.Permanent(fmt.Errorf("status %d", resp.StatusCode))
+    }
+}
+
+client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
+    r8e.WithTimeout(2*time.Second),
+    r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
+)
+```
+
+- Le classifier renvoie `nil` pour un succès, ou l'erreur qui fait échouer la
+  tentative. Cette erreur est classée comme partout dans r8e :
+  `r8e.Permanent(err)` arrête le retry, `r8e.RetryAfterError(err, d)` porte un
+  délai, et toute autre erreur est transitoire.
+- Pour une réponse non-2xx, `body` contient les `httpx.MaxClassifiedBody`
+  premiers octets (64 Kio), et `resp.Body` relit tout le corps depuis le début.
+- Pour une réponse 2xx, `body` vaut `nil` et le corps n'est pas lu : un succès
+  en streaming reste en streaming.
+- Quand l'erreur n'est pas permanente, un retry peut suivre : le corps est vidé
+  puis fermé pour réutiliser la connexion. Une erreur permanente, ou `nil`,
+  laisse le corps lisible.
+- Un échec de lecture du corps est transitoire, et le classifier n'est pas
+  appelé.
+
+`NewClient` et son `Classifier` ne changent pas.
 
 ## Propagation de deadline
 
