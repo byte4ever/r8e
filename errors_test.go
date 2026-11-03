@@ -180,6 +180,33 @@ func TestIsPermanentDetectsWrappedPermanent(t *testing.T) {
 	require.True(t, r8e.IsPermanent(wrapped))
 }
 
+// Transient cannot make a permanent error retriable: the inner Permanent mark
+// still stops the retry after one attempt.
+func TestTransientCannotOverridePermanent(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("http status 400")
+	err := r8e.Transient(r8e.Permanent(cause))
+
+	require.True(t, r8e.IsPermanent(err))
+	require.False(t, r8e.IsTransient(err))
+
+	calls := 0
+	policy := r8e.NewPolicy[string]("",
+		r8e.WithRetry(3, r8e.ConstantBackoff(0)),
+	)
+
+	_, got := policy.Do(t.Context(), func(context.Context) (string, error) {
+		calls++
+
+		return "", err
+	})
+
+	assert.Equal(t, 1, calls)
+	require.ErrorIs(t, got, cause)
+	assert.NotErrorIs(t, got, r8e.ErrRetriesExhausted)
+}
+
 // doWithRetries runs one Do of a two-attempt policy whose function always
 // returns err, and returns the error Do returns.
 func doWithRetries(t *testing.T, err error) error {
