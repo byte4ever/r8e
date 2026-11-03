@@ -204,7 +204,9 @@ health condition (degraded).
 
 **Nested (tree) budgets** (`r8e.Parent(*RetryBudget)`): a budget can nest under a
 parent — a child's outcomes also roll up into the parent and every ancestor
-(parent = subtree aggregate, each level credits a success by its own ratio), and a
+(parent = subtree aggregate, each level credits a success by its own ratio; the
+exception is a child built with `ShieldParent()`, whose failures stop reaching its
+ancestors while it is exhausted), and a
 retry is permitted only when the child AND every ancestor allow it (short-circuited
 up the tree). So a gateway-wide parent caps aggregate retry pressure: a storm in
 one leaf drains the shared parent and throttles its siblings. `Exhausted()` stays
