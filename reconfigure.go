@@ -1,7 +1,6 @@
 package r8e
 
 import (
-	"errors"
 	"fmt"
 	"time"
 )
@@ -21,15 +20,17 @@ var (
 	// new configuration tries to tune a pattern the policy was not built with.
 	// Hot-reload retunes existing patterns; it cannot add or remove them —
 	// rebuild the policy for structural changes.
-	ErrPatternAbsent = errors.New(
-		"r8e: cannot reconfigure a pattern the policy does not have",
-	)
+	ErrPatternAbsent error = resilienceError{
+		code: "pattern_absent",
+		msg:  "r8e: cannot reconfigure a pattern the policy does not have",
+	}
 
 	// ErrPolicyNotRegistered is returned (wrapped) by [Registry.Reconfigure]
 	// when no registered policy matches the given name.
-	ErrPolicyNotRegistered = errors.New(
-		"r8e: no policy with that name is registered",
-	)
+	ErrPolicyNotRegistered error = resilienceError{
+		code: "policy_not_registered",
+		msg:  "r8e: no policy with that name is registered",
+	}
 )
 
 // Reconfigure applies cfg to the registered policy named name, retuning its

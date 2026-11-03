@@ -2,7 +2,6 @@ package r8eotel
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -122,39 +121,13 @@ func (p *TracedPolicy[T]) Metrics() r8e.PolicyMetrics { return p.policy.Metrics(
 // HealthStatus delegates to the wrapped policy's HealthStatus.
 func (p *TracedPolicy[T]) HealthStatus() r8e.PolicyStatus { return p.policy.HealthStatus() }
 
-// rejectionReason maps known r8e sentinel errors to a short classification
-// string suitable for dashboard filtering on the r8e.rejection_reason attribute.
+// rejectionReason returns the r8e sentinel code of err (see [r8e.ErrorCode])
+// for dashboard filtering on the r8e.rejection_reason attribute, or "error"
+// when err carries no r8e sentinel.
 func rejectionReason(err error) string {
-	switch {
-	case errors.Is(err, r8e.ErrCircuitOpen):
-		return "circuit_open"
-	case errors.Is(err, r8e.ErrCircuitRamping):
-		return "circuit_ramping"
-	case errors.Is(err, r8e.ErrRateLimited):
-		return "rate_limited"
-	case errors.Is(err, r8e.ErrBulkheadFull):
-		return "bulkhead_full"
-	case errors.Is(err, r8e.ErrBulkheadTimeout):
-		return "bulkhead_timeout"
-	case errors.Is(err, r8e.ErrCoDelShed):
-		return "codel_shed"
-	case errors.Is(err, r8e.ErrConcurrencyLimited):
-		return "concurrency_limited"
-	case errors.Is(err, r8e.ErrThrottled):
-		return "throttled"
-	case errors.Is(err, r8e.ErrSLOShed):
-		return "slo_shed"
-	case errors.Is(err, r8e.ErrTimeout):
-		return "timeout"
-	case errors.Is(err, r8e.ErrTimeBudgetExceeded):
-		return "time_budget_exceeded"
-	case errors.Is(err, r8e.ErrConcurrencyBudgetExceeded):
-		return "concurrency_budget_exceeded"
-	case errors.Is(err, r8e.ErrRetriesExhausted):
-		return "retries_exhausted"
-	case errors.Is(err, r8e.ErrPanic):
-		return "panic_recovered"
-	default:
-		return "error"
+	if code := r8e.ErrorCode(err); code != "" {
+		return code
 	}
+
+	return "error"
 }

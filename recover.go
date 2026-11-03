@@ -25,10 +25,17 @@ func (e *PanicError) Error() string {
 	return fmt.Sprintf("recovered panic: %v", e.Value)
 }
 
-// Is reports true for [ErrPanic], enabling errors.Is matching while
-// preserving the ability to obtain the original Value and Stack via errors.As.
+// Is reports true for [ErrPanic]. errors.Is already reaches ErrPanic through
+// [PanicError.Unwrap]; Is is kept for callers who call it directly. The
+// original Value and Stack stay reachable via errors.As.
 func (*PanicError) Is(target error) bool {
 	return target == ErrPanic
+}
+
+// Unwrap returns [ErrPanic], so that [ErrorCode] reaches the sentinel and
+// reports "panic_recovered" for a recovered panic, wrapped or not.
+func (*PanicError) Unwrap() error {
+	return ErrPanic
 }
 
 // DoRecover executes fn and catches any panic, returning it as a *[PanicError]
