@@ -370,6 +370,7 @@ func TestDoRetryHonorRetryAfterStopsOnTheLastAttempt(t *testing.T) {
 			assert.Equal(t, tt.maxAttempts, calls)
 			require.NotErrorIs(t, err, ErrRetriesExhausted)
 			assert.Equal(t, want, err)
+			assert.Empty(t, ErrorCode(err), "a plain downstream error carries no r8e code")
 		})
 	}
 }
