@@ -383,7 +383,9 @@ Hooks `OnCoolingDown()` (metric `CoolingDown`) and `OnCooldownArmed(d)`; health
 `Cooldown.SetMaxCooldown`, which errors on a cap <= 0). `WithCooldown` +
 `WithSharedCooldown` panics with `r8e.ErrSharedCooldownConflict` (like a shared
 bulkhead, a shared cooldown excludes the own one); `r8econf.GetPolicy` returns
-that error instead, and `r8e.ValidateOptions(opts...)` checks any option set.
+that error instead, and `r8e.ValidateOptions(opts...)` reports the conflicts
+and range errors `NewPolicy` would panic on (not a value whose type does not
+match `T`).
 
 ### Rate Limiter
 

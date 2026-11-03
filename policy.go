@@ -916,9 +916,12 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 }
 
 // ValidateOptions reports the misconfiguration [NewPolicy] would panic with
-// for opts (a conflict between patterns, an out-of-range [Burst]), or nil.
-// It lets code that combines options from several sources, such as
-// r8econf.GetPolicy, return the conflict as an error instead of a panic.
+// for opts (a conflict between patterns, an out-of-range [Burst], a
+// non-positive [MaxCooldown]), or nil. It lets code that combines options from
+// several sources, such as r8econf.GetPolicy, return the conflict as an error
+// instead of a panic. It cannot see a value whose type does not match the
+// policy's T (a [WithFallback], [WithFallbackFunc], [WithCache] or chaos value
+// of another type): NewPolicy still panics on those.
 func ValidateOptions(opts ...Option) error {
 	var setup policySetup
 	for _, opt := range opts {
@@ -1016,6 +1019,19 @@ func checkSetupInvariants(setup *policySetup) error {
 
 		if err := cfg.validate(); err != nil {
 			return err
+		}
+	}
+
+	if setup.cooldown {
+		// Apply the cooldown options to a probe config: a non-positive cap is
+		// caught here, before any pattern is built, on both paths.
+		cfg := cooldownConfig{limit: defaultMaxCooldown}
+		for _, opt := range setup.cooldownOpts {
+			opt(&cfg)
+		}
+
+		if cfg.limit <= 0 {
+			return ErrCooldownNonPositiveMax
 		}
 	}
 

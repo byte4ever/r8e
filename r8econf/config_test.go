@@ -134,6 +134,12 @@ func TestGetPolicySharedCooldownConflict(t *testing.T) {
 	require.ErrorIs(t, err, r8e.ErrSharedCooldownConflict)
 	assert.ErrorContains(t, err, `"search"`)
 	assert.Nil(t, policy)
+
+	require.NotPanics(t, func() {
+		policy, err = GetPolicy[string](store, "search", r8e.WithCooldown(r8e.MaxCooldown(0)))
+	})
+	require.ErrorIs(t, err, r8e.ErrCooldownNonPositiveMax, "a code cap overriding the config one")
+	assert.Nil(t, policy)
 }
 
 func TestGetPolicyNotInConfig(t *testing.T) {

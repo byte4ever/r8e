@@ -392,9 +392,10 @@ func TestWithCooldownStopsARetryArmedFromOutside(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		quota := NewCooldown()
+		budget := NewConcurrencyBudget(MinConcurrency(1))
 		other := NewPolicy[string]("", WithSharedCooldown(quota))
 		retrying := NewPolicy[string]("", WithSharedCooldown(quota),
-			WithRetry(3, ConstantBackoff(time.Second)))
+			WithRetry(3, ConstantBackoff(time.Second)), WithSharedConcurrencyBudget(budget))
 
 		var calls atomic.Int64
 
@@ -418,6 +419,7 @@ func TestWithCooldownStopsARetryArmedFromOutside(t *testing.T) {
 		err = <-done
 		assert.Equal(t, errNoQuota, err, "the last error, as is")
 		assert.Equal(t, int64(1), calls.Load(), "no retry left while armed")
+		assert.Zero(t, budget.InUse(), "the stopped retry took no concurrency permit")
 	})
 }
 
@@ -472,12 +474,41 @@ func TestCooldownConcurrentUse(t *testing.T) {
 	assert.True(t, cd.Armed())
 }
 
-// ValidateOptions reports the conflict NewPolicy would panic with.
+// ValidateOptions reports the conflicts and range errors NewPolicy would
+// panic with.
 func TestValidateOptions(t *testing.T) {
 	t.Parallel()
 
 	require.NoError(t, ValidateOptions(WithCooldown()))
 	require.ErrorIs(t, ValidateOptions(WithSharedCooldown(NewCooldown()), WithCooldown()), ErrSharedCooldownConflict)
+
+	for _, d := range []time.Duration{0, -time.Second} {
+		require.ErrorIs(t, ValidateOptions(WithCooldown(MaxCooldown(d))), ErrCooldownNonPositiveMax, d)
+	}
+}
+
+// Outside a Policy, DoRetry does not gate the first attempt: a cooldown armed
+// beforehand stops only the retries.
+func TestDoRetryDoesNotGateTheFirstAttempt(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		cd := NewCooldown()
+		_, armed := cd.observe(RetryAfterError(errQuotaHit, time.Minute))
+		require.True(t, armed)
+
+		var calls atomic.Int64
+
+		v, err := DoRetry[string](t.Context(), func(context.Context) (string, error) {
+			calls.Add(1)
+
+			return "ok", nil
+		}, RetryParams{MaxAttempts: 3, Strategy: ConstantBackoff(0), Clock: RealClock{}, Cooldown: cd})
+
+		require.NoError(t, err)
+		assert.Equal(t, "ok", v)
+		assert.Equal(t, int64(1), calls.Load())
+	})
 }
 
 // Refused calls never reach the breaker: it counts only the server's own
