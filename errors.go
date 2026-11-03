@@ -77,6 +77,17 @@ var (
 		msg:      "time budget exceeded",
 		envelope: true,
 	}
+	// ErrAttemptTimeout wraps the error of a retry attempt that the attempt
+	// deadline set by [PerAttemptTimeout] cut. It keeps the attempt's own error
+	// in the chain and adds nothing to it, so errors.Is(err,
+	// context.DeadlineExceeded) holds only when that error matches
+	// context.DeadlineExceeded itself: the context's error does, and so does a
+	// downstream timeout error that matches it, such as net/http's
+	// response-header timeout. An attempt ended first by the caller's
+	// deadline or cancellation, a time budget or [WithTimeout] does not carry
+	// it. It is not an envelope: [ErrorCode] reports "attempt_timeout" for it,
+	// ahead of any r8e sentinel in the attempt's own error.
+	ErrAttemptTimeout error = resilienceError{code: "attempt_timeout", msg: "attempt timeout"}
 	// ErrRetriesExhausted is returned when all retry attempts have been used.
 	ErrRetriesExhausted error = resilienceError{
 		code:     "retries_exhausted",
