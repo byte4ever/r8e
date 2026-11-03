@@ -870,8 +870,8 @@ func validateSetup(setup *policySetup) {
 	}
 }
 
-// checkSetupInvariants returns the first cross-pattern misconfiguration in
-// setup, or nil if it is self-consistent. It is the single source of truth for
+// checkSetupInvariants returns the first misconfiguration in setup, or nil if
+// it is self-consistent: a cross-pattern conflict, or an out-of-range [Burst]. It is the single source of truth for
 // these rules: [validateSetup] panics with it (the options path) and
 // [BuildOptions] returns it (the config path), so an invariant added here is
 // enforced by both paths and the config path can never panic on one the options

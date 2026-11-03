@@ -3,6 +3,7 @@ package r8e
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -316,15 +317,41 @@ func TestPolicyReconfigureRateAndBurstTogether(t *testing.T) {
 	t.Parallel()
 
 	clk := newRateLimitClock(time.Now())
-	policy := NewPolicy[string]("", WithRateLimit(100, Burst(100)), WithClock(clk))
+	policy := NewPolicy[string]("", WithRateLimit(100, Burst(5)), WithClock(clk))
+	rl := policy.rateLimiter
 
 	require.NoError(t, policy.Reconfigure(PolicyConfig{
 		RateLimit:      f64Ptr(0.5),
-		RateLimitBurst: intPtr(450),
+		RateLimitBurst: intPtr(2),
 	}))
 
-	assert.Equal(t, 100, admitted(t, policy.rateLimiter))
-	assert.InDelta(t, 0.5, policy.rateLimiter.CurrentRate(), 1e-9)
+	assert.Equal(t, 2, admitted(t, rl), "the smaller burst clamps the full bucket")
+	assert.InDelta(t, 0.5, rl.CurrentRate(), 1e-9)
+
+	require.NoError(t, policy.Reconfigure(PolicyConfig{
+		RateLimit:      f64Ptr(1000),
+		RateLimitBurst: intPtr(50),
+	}))
+
+	clk.advance(time.Hour)
+	assert.Equal(t, 50, admitted(t, rl), "the larger burst applies with the new rate")
+}
+
+// A NaN rate admits nothing, Burst or not: it never fills the bucket.
+func TestRateLimiterNaNRateAdmitsNothing(t *testing.T) {
+	t.Parallel()
+
+	clk := newRateLimitClock(time.Now())
+	rl := NewRateLimiter(10, clk, &Hooks{}, Burst(3))
+
+	require.Equal(t, 3, admitted(t, rl))
+
+	rl.Reconfigure(math.NaN())
+	clk.advance(time.Millisecond)
+	assert.Equal(t, 0, admitted(t, rl))
+
+	clk.advance(time.Hour)
+	assert.Equal(t, 0, admitted(t, rl))
 }
 
 // A rejected reload changes nothing, not even the fields that were valid.
@@ -367,11 +394,10 @@ func TestPolicyReconfigureRateLimitBurstRejected(t *testing.T) {
 
 		err := policy.Reconfigure(PolicyConfig{RateLimitBurst: intPtr(2)})
 		require.ErrorIs(t, err, ErrPatternAbsent)
-		assert.ErrorContains(t, err, "rate_limit")
+		assert.ErrorContains(t, err, `"rate_limit"`)
 	})
 
-	// A reload retunes a burst, it cannot add one: a rolled-back file would
-	// otherwise leave the live policy with a bucket the file no longer has.
+	// A reload retunes a burst, it cannot add one.
 	t.Run("rate limiter built without Burst", func(t *testing.T) {
 		t.Parallel()
 

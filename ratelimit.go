@@ -374,8 +374,9 @@ func newAIMDState(cfg *aimdConfig, baseRate float64, nowNano int64) *aimdState {
 // Reconfigure changes the token-refill rate (tokens per second) at runtime.
 // The bucket capacity is recomputed (one second of tokens, at least one token
 // for a positive rate) unless [Burst] set it, and the current token count is
-// clamped to the new capacity. A rate of zero or less empties the bucket,
-// Burst or not. Safe for concurrent use with Allow and RecordOutcome.
+// clamped to the new capacity. A rate of zero or less, or NaN, empties the
+// bucket, Burst or not; a later positive rate brings the Burst capacity back
+// with an empty bucket. Safe for concurrent use with Allow and RecordOutcome.
 func (rl *RateLimiter) Reconfigure(rate float64) {
 	rl.rateMu.Lock()
 	defer rl.rateMu.Unlock()
@@ -384,8 +385,11 @@ func (rl *RateLimiter) Reconfigure(rate float64) {
 }
 
 // applyReload applies a config reload to the rate limiter: a new rate, a new
-// burst, or both, under one rateMu section, so no Allow sees the new rate with
-// the old burst. A nil field is left unchanged. The caller has checked burst
+// burst, or both, under one rateMu section, so no other writer (Reconfigure,
+// the AIMD step) runs between the burst and the rate change. The lock-free
+// refill reads the rate and the capacity separately: one refill window may add
+// tokens at the new rate capped at the old capacity, and the post-CAS clamp
+// keeps the bucket within the capacity. A nil field is left unchanged. The caller has checked burst
 // with validBurst and that the limiter was built with [Burst].
 func (rl *RateLimiter) applyReload(rate *float64, burst *int) {
 	rl.rateMu.Lock()
@@ -419,10 +423,10 @@ func validBurst(n int) bool {
 
 // capacityFor returns the bucket size for a refill rate, in fixed-point
 // tokens: the [Burst] size when one is set, else the size derived from the
-// rate. A rate of zero or less keeps an empty bucket either way. The caller
-// holds rl.rateMu, or is building rl.
+// rate. A rate of zero or less, or NaN, keeps an empty bucket either way. The
+// caller holds rl.rateMu, or is building rl.
 func (rl *RateLimiter) capacityFor(rate float64) int64 {
-	if rate <= 0 {
+	if !(rate > 0) { // also true for NaN, which admits nothing
 		return 0
 	}
 
@@ -471,9 +475,9 @@ func (rl *RateLimiter) clampTokens(capacity int64) {
 // tokens: one second of refill, and at least one token for any positive rate.
 // A call costs a whole token, so a smaller bucket would never admit a call
 // below 1 req/s, and an AIMD rate pushed under 1 req/s could never recover. A
-// rate of zero or less keeps an empty bucket: it admits nothing.
+// rate of zero or less, or NaN, keeps an empty bucket: it admits nothing.
 func bucketCapacity(rate float64) int64 {
-	if rate <= 0 {
+	if !(rate > 0) { // also true for NaN
 		return 0
 	}
 
