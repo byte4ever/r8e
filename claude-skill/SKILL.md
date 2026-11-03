@@ -407,6 +407,23 @@ hot-reloadable. Observability: `OnBulkheadQueued` / `OnBulkheadTimeout` hooks,
 `Bulkhead.Acquire(ctx) error` (takes a ctx — may block on the wait) + `Release()`
 + `Queued()`.
 
+**Shared bulkhead** (`r8e.WithSharedBulkhead(*Bulkhead)`, code-only): one
+`NewBulkhead` attached to several policies caps their calls in flight together
+(same chain slot as `WithBulkhead`, so retries and backoff hold the slot). Each
+policy reports its own calls to its own hooks and counters; the gauges,
+`bulkhead_full` and `bulkhead_overloaded` describe the same bulkhead in every
+policy, so aggregate them with max, not sum. It keeps the clock given to
+`NewBulkhead` (a policy's `WithClock` does not reach it). Not re-entrant: an
+operation under one sharing policy must not call, directly or indirectly, any
+policy on the same bulkhead, itself included (fine below capacity; once outer
+calls hold every slot the inner call gets what any caller of a full bulkhead
+gets, see `Bulkhead.Acquire`; the bulkhead stays full while those calls last,
+and the callers of every sharing policy are refused or wait). Unlike the shared
+retry/concurrency budgets (last option wins, any policy's `Reconfigure` retunes
+them for all), combining it with `WithBulkhead` or `WithAdaptiveConcurrency`
+panics with `r8e.ErrSharedBulkheadConflict`, and a policy `Reconfigure` carrying
+any bulkhead setting returns that error (retune with `Bulkhead.Reconfigure`).
+
 **Controlled-delay queue (CoDel + adaptive LIFO)** (opt-in): `r8e.BulkheadCoDel(target, interval)`
 disciplines the wait queue by observed dwell (RFC 8289 / folly), instead of (or
 alongside) the fixed max-wait. It watches the standing queue delay (oldest

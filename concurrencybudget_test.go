@@ -536,6 +536,14 @@ func TestWithSharedConcurrencyBudget(t *testing.T) {
 		)
 	})
 
+	// Nor does it remove a budget an earlier option set.
+	layered := NewPolicy[string]("",
+		WithRetry(2, ConstantBackoff(0)),
+		WithConcurrencyBudget(),
+		WithSharedConcurrencyBudget(nil),
+	)
+	assert.NotNil(t, layered.concurrencyBudget, "the earlier budget is kept")
+
 	// A real shared budget gates retries on both policies.
 	budget := NewConcurrencyBudget(MaxRatio(0.1), MinConcurrency(0))
 	down := errors.New("down")

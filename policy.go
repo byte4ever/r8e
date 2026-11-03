@@ -34,8 +34,11 @@ type (
 		coalescer         *Coalescer[T]
 		registry          *Registry
 		metrics           *policyMetrics
-		// clock drives the latency window (and is the same clock injected into
-		// every pattern); held so Do can time each call deterministically.
+		// clock drives the latency window and is injected into the patterns
+		// the policy builds, with two exceptions: the deadlines of WithTimeout
+		// and PerAttemptTimeout are context deadlines on wall time, and a
+		// bulkhead attached with WithSharedBulkhead keeps its own clock. Held
+		// so Do can time each call deterministically.
 		clock Clock
 		// latency records each Do() duration into a sliding-window DDSketch for
 		// the p50/p95/p99 figures in Metrics. Always present (zero-config).
@@ -66,6 +69,9 @@ type (
 		// affectsReadiness gates Kubernetes readiness when this policy is
 		// critically unhealthy (see WithReadinessImpact). False by default.
 		affectsReadiness bool
+		// bulkheadIsShared reports that bulkhead came from WithSharedBulkhead,
+		// so Reconfigure leaves its settings to Bulkhead.Reconfigure.
+		bulkheadIsShared bool
 	}
 
 	// retryRuntime is the hot-swappable retry configuration read per call.
@@ -111,6 +117,7 @@ type (
 		circuitBreaker    *circuitBreakerDesc
 		rateLimit         *rateLimitDesc
 		bulkhead          *bulkheadDesc
+		sharedBulkhead    *Bulkhead
 		adaptive          *adaptiveDesc
 		throttle          *throttleDesc
 		slo               *sloDesc
@@ -247,7 +254,11 @@ func (p *Policy[T]) Do(
 // With* functions — all return Option
 // ---------------------------------------------------------------------------.
 
-// WithClock sets the clock used by all resilience patterns within this policy.
+// WithClock sets the clock the resilience patterns this policy builds read,
+// with two exceptions. The deadline of [WithTimeout] (fixed or adaptive) and
+// of [PerAttemptTimeout] is a context deadline, measured on wall time. A
+// bulkhead attached with [WithSharedBulkhead] keeps the clock given to
+// [NewBulkhead].
 func WithClock(c Clock) Option {
 	return optionFunc(func(s *policySetup) {
 		s.clock = c
@@ -365,16 +376,21 @@ func WithRetryBudget(opts ...RetryBudgetOption) Option {
 // policies share one bucket so their retries are throttled in concert. Like
 // WithRetryBudget it requires WithRetry. A nil budget is ignored. The budget may
 // be a child in a tree (see [Parent]), in which case this policy's retries also
-// roll up into the parent's aggregate budget.
+// roll up into the parent's aggregate budget. Unlike [WithSharedBulkhead], it
+// does not exclude [WithRetryBudget] (the last of the two wins), and
+// [Policy.Reconfigure] on any policy sharing the budget retunes it for all of
+// them.
 func WithSharedRetryBudget(budget *RetryBudget) Option {
 	return optionFunc(func(s *policySetup) {
-		s.retryBudget = budget
+		if budget != nil {
+			s.retryBudget = budget
+		}
 	})
 }
 
 // WithConcurrencyBudget adds a concurrency budget that caps how many retries and
 // hedges may be in flight at once, as a fraction of live traffic with a floor
-// (see [ConcurrencyBudget] and the [MaxRate] and [MinConcurrency] options). It is
+// (see [ConcurrencyBudget] and the [MaxRatio] and [MinConcurrency] options). It is
 // the concurrency-dimension complement of [WithRetryBudget] (which throttles the
 // retry RATE over time): the two compose. It requires [WithRetry] or [WithHedge];
 // a policy configured with a budget but neither panics in NewPolicy. To bound
@@ -389,10 +405,14 @@ func WithConcurrencyBudget(opts ...ConcurrencyBudgetOption) Option {
 // WithSharedConcurrencyBudget attaches an existing ConcurrencyBudget, letting
 // several policies share one ceiling so their retries and hedges are bounded
 // process-wide. Like WithConcurrencyBudget it requires WithRetry or WithHedge. A
-// nil budget is ignored.
+// nil budget is ignored. Unlike [WithSharedBulkhead], it does not exclude
+// [WithConcurrencyBudget] (the last of the two wins), and [Policy.Reconfigure]
+// on any policy sharing the budget retunes it for all of them.
 func WithSharedConcurrencyBudget(budget *ConcurrencyBudget) Option {
 	return optionFunc(func(s *policySetup) {
-		s.concurrencyBudget = budget
+		if budget != nil {
+			s.concurrencyBudget = budget
+		}
 	})
 }
 
@@ -431,6 +451,47 @@ func WithRateLimit(rate float64, opts ...RateLimitOption) Option {
 func WithBulkhead(maxConcurrent int, opts ...BulkheadOption) Option {
 	return optionFunc(func(s *policySetup) {
 		s.bulkhead = &bulkheadDesc{maxConcurrent: maxConcurrent, opts: opts}
+	})
+}
+
+// WithSharedBulkhead attaches an existing [Bulkhead], letting several policies
+// share one ceiling: at most its capacity of calls are in flight across all of
+// them, for example every route of one API, each with its own policy. It takes
+// the same place in the chain as [WithBulkhead], so a slot covers the whole
+// call, retries and backoff included. Build it with [NewBulkhead]; its options
+// (max wait, queue depth, CoDel) apply to every policy.
+//
+// Each policy reports the calls it makes: its own hooks receive the bulkhead
+// events, and its metrics and health show the shared bulkhead's state. Those
+// gauges and the bulkhead health conditions describe the same bulkhead in
+// every policy, so aggregate them across policies with max, not sum.
+//
+// The shared bulkhead keeps the clock given to [NewBulkhead]: its max wait and
+// CoDel dwell run on that clock, and the policy's [WithClock] does not replace
+// it, since one bulkhead cannot follow the clocks of several policies.
+//
+// The bulkhead is not re-entrant. An operation run through a policy attached
+// to a shared bulkhead must not call, directly or indirectly, any policy
+// attached to the same bulkhead, the calling policy itself included: the inner
+// call needs a second slot while the outer call holds one. Below capacity the
+// inner call still gets a slot, so the fault shows only under load. Once such
+// outer calls hold every slot, the inner call gets what any caller of a full
+// bulkhead gets (see [Bulkhead.Acquire]): it fails, or it waits for a slot
+// that only an outer call can free. The bulkhead stays full while those calls
+// last, and the callers of every sharing policy are refused or wait.
+//
+// Unlike [WithSharedRetryBudget] and [WithSharedConcurrencyBudget], it excludes
+// the policy's own limiter. It cannot be combined with [WithBulkhead] or
+// [WithAdaptiveConcurrency] ([NewPolicy] panics with
+// [ErrSharedBulkheadConflict]), and [Policy.Reconfigure] refuses any bulkhead
+// setting for it (size, max wait, queue depth or CoDel): call
+// [Bulkhead.Reconfigure] on the shared bulkhead, which retunes it for every
+// policy at once. Code-only. A nil bulkhead is ignored.
+func WithSharedBulkhead(bh *Bulkhead) Option {
+	return optionFunc(func(s *policySetup) {
+		if bh != nil {
+			s.sharedBulkhead = bh
+		}
 	})
 }
 
@@ -767,7 +828,12 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 
 	if setup.bulkhead != nil {
 		bulkhead = NewBulkhead(setup.bulkhead.maxConcurrent, clock, &hooks, setup.bulkhead.opts...)
-		entries = append(entries, newBulkheadEntry[T](bulkhead))
+		entries = append(entries, newBulkheadEntry[T](bulkhead, &hooks))
+	}
+
+	if setup.sharedBulkhead != nil {
+		bulkhead = setup.sharedBulkhead
+		entries = append(entries, newBulkheadEntry[T](bulkhead, &hooks))
 	}
 
 	if setup.adaptive != nil {
@@ -838,6 +904,7 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 		circuitBreaker:    circuitBreaker,
 		rateLimiter:       rateLimiter,
 		bulkhead:          bulkhead,
+		bulkheadIsShared:  setup.sharedBulkhead != nil,
 		adaptive:          adaptive,
 		throttler:         throttler,
 		slo:               slo,
@@ -925,6 +992,14 @@ func checkSetupInvariants(setup *policySetup) error {
 		if setup.timeout == nil && setup.cache.refreshAheadEnabled() {
 			return ErrRefreshAheadWithoutTimeout
 		}
+	}
+
+	// A shared bulkhead drives the same slot as a policy's own bulkhead or
+	// adaptive limiter. Checked before the bulkhead/adaptive conflict, so any
+	// combination of WithSharedBulkhead with WithBulkhead and/or
+	// WithAdaptiveConcurrency reports this conflict.
+	if setup.sharedBulkhead != nil && (setup.bulkhead != nil || setup.adaptive != nil) {
+		return ErrSharedBulkheadConflict
 	}
 
 	// The bulkhead and the adaptive limiter both drive the concurrency slot;
@@ -1164,13 +1239,16 @@ func newRateLimiterEntry[T any](rl *RateLimiter) PatternEntry[T] {
 	)
 }
 
-func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
+// newBulkheadEntry builds the bulkhead middleware. Its events go to hooks, the
+// policy's own, so a bulkhead shared across policies reports each policy's
+// calls to that policy.
+func newBulkheadEntry[T any](bh *Bulkhead, hooks *Hooks) PatternEntry[T] {
 	return PatternEntry[T]{
 		Priority: priorityBulkhead,
 		Name:     "bulkhead",
 		MW: func(next func(context.Context) (T, error)) func(context.Context) (T, error) {
 			return func(ctx context.Context) (T, error) {
-				if err := bh.Acquire(ctx); err != nil {
+				if err := bh.acquireFor(ctx, hooks); err != nil {
 					var zero T
 
 					// Returned as-is: IsLocalRejection compares it by
@@ -1179,7 +1257,7 @@ func newBulkheadEntry[T any](bh *Bulkhead) PatternEntry[T] {
 					return zero, err //nolint:wrapcheck // bulkhead error returned as-is
 				}
 
-				defer bh.Release()
+				defer bh.releaseFor(hooks)
 
 				return next(ctx)
 			}
