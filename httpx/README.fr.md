@@ -32,7 +32,7 @@ l'utilisateur.
 | `Classifier` | `func(statusCode int) ErrorClass` — associe les codes de statut aux classes d'erreur |
 | `NewResponseClient` / `ResponseClassifier` | `func(resp *http.Response, body []byte) error` — classe à partir du statut, des en-têtes et du corps |
 | `ErrorClass` | Enum : `Success`, `Transient`, `Permanent` |
-| `StatusError` | Type d'erreur portant le `*http.Response` original pour inspection |
+| `StatusError` | Type d'erreur portant le `*http.Response` original pour inspection (ajouté par `NewClient` ; un `ResponseClassifier` le renvoie lui-même) |
 
 ## Flux de requete
 
@@ -113,7 +113,9 @@ func main() {
 
 ## Gestion des erreurs
 
-Sur les chemins d'erreur, le `*http.Response` est accessible via `errors.As` :
+Avec `NewClient`, sur les chemins d'erreur, le `*http.Response` est accessible via
+`errors.As` (avec `NewResponseClient`, seulement si le classifier renvoie un
+`StatusError`) :
 
 ```go
 var statusErr *httpx.StatusError
@@ -141,13 +143,17 @@ déploiement. `NewResponseClient` prend un `ResponseClassifier` à la place d'un
 
 ```go
 classify := func(resp *http.Response, body []byte) error {
+    statusErr := &httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}
+
     switch {
-    case resp.StatusCode/100 == 2:
+    case resp.StatusCode < 300:
         return nil
     case resp.StatusCode == http.StatusForbidden && bytes.Contains(body, []byte("token_expired")):
         return errTokenExpired // transitoire : retenté
+    case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+        return statusErr // transitoire, et Retry-After est respecté
     default:
-        return r8e.Permanent(fmt.Errorf("status %d", resp.StatusCode))
+        return r8e.Permanent(statusErr)
     }
 }
 
@@ -161,10 +167,18 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   tentative. Cette erreur est classée comme partout dans r8e :
   `r8e.Permanent(err)` arrête le retry, `r8e.RetryAfterError(err, d)` porte un
   délai, et toute autre erreur est transitoire.
-- Pour une réponse non-2xx, `body` contient les `httpx.MaxClassifiedBody`
-  premiers octets (64 Kio), et `resp.Body` relit tout le corps depuis le début.
-- Pour une réponse 2xx, `body` vaut `nil` et le corps n'est pas lu : un succès
-  en streaming reste en streaming.
+- `Do` renvoie cette erreur telle quelle. Contrairement à `NewClient`, ce chemin
+  n'ajoute pas de `StatusError` et ne lit pas l'en-tête `Retry-After`. Pour
+  retrouver les deux, renvoyez
+  `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}`, comme dans
+  l'exemple.
+- Pour un statut de 300 ou plus, `body` contient les `httpx.MaxClassifiedBody`
+  premiers octets (64 Kio), et l'appelant relit tout le corps depuis le début.
+- En dessous de 300, `body` vaut `nil` et le corps n'est pas lu : un succès en
+  streaming ou une connexion upgradée (101) reste telle quelle.
+- `body` est la seule vue du classifier sur le corps : pendant l'appel,
+  `resp.Body` vaut `http.NoBody`, et le classifier ne peut pas consommer le
+  corps que reçoit l'appelant.
 - Quand l'erreur n'est pas permanente, un retry peut suivre : le corps est vidé
   puis fermé pour réutiliser la connexion. Une erreur permanente, ou `nil`,
   laisse le corps lisible.

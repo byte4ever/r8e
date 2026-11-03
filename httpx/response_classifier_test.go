@@ -1,14 +1,17 @@
 package httpx_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -29,11 +32,22 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-// trackedBody is a response body that records whether it was closed.
+// trackedBody is a response body that counts its reads and records whether it
+// was closed.
 type trackedBody struct {
-	io.Reader
-
+	r      io.Reader
+	reads  atomic.Int64
 	closed atomic.Bool
+}
+
+func newTrackedBody(content string) *trackedBody {
+	return &trackedBody{r: strings.NewReader(content)}
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	b.reads.Add(1)
+
+	return b.r.Read(p)
 }
 
 func (b *trackedBody) Close() error {
@@ -62,7 +76,7 @@ func TestResponseClassifierReadsTheBody(t *testing.T) {
 
 	classify := func(resp *http.Response, body []byte) error {
 		switch {
-		case resp.StatusCode/100 == 2:
+		case resp.StatusCode < http.StatusMultipleChoices:
 			return nil
 		case bytes.Contains(body, []byte("token")):
 			return errTokenExpired
@@ -106,8 +120,8 @@ func TestResponseClassifierReadsTheBody(t *testing.T) {
 	}
 }
 
-// A non-2xx body is handed to the classifier up to MaxClassifiedBody, and the
-// caller still reads the whole body from the start.
+// For a status of 300 or above, the body is handed to the classifier up to
+// MaxClassifiedBody, and the caller still reads the whole body from the start.
 func TestResponseClassifierPutsTheBodyBack(t *testing.T) {
 	t.Parallel()
 
@@ -152,7 +166,7 @@ func TestResponseClassifierPutsTheBodyBack(t *testing.T) {
 func TestResponseClassifierLeavesA2xxBodyUnread(t *testing.T) {
 	t.Parallel()
 
-	body := &trackedBody{Reader: strings.NewReader("streamed")}
+	body := newTrackedBody("streamed")
 
 	hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return respond(http.StatusOK, body), nil
@@ -168,46 +182,220 @@ func TestResponseClassifierLeavesA2xxBodyUnread(t *testing.T) {
 
 	resp, err := cl.Do(t.Context(), getRequest(t))
 	require.NoError(t, err)
+	assert.Zero(t, body.reads.Load(), "Do does not read a 2xx body")
 
 	got, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
-	assert.True(t, sawNil)
+	assert.True(t, sawNil, "the classifier gets no body for a 2xx")
 	assert.Equal(t, "streamed", string(got))
 	assert.False(t, body.closed.Load())
 }
 
 // A retriable outcome drains and closes the body so the connection can be
-// reused; a permanent one leaves it open for the caller.
+// reused, for a 2xx as for an error status; a permanent one leaves the body
+// whole and open for the caller.
 func TestResponseClassifierClosesARetriableBody(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
 		err        error
+		status     int
 		wantClosed bool
 	}{
-		"retriable": {err: errTokenExpired, wantClosed: true},
-		"permanent": {err: r8e.Permanent(errMoved), wantClosed: false},
+		"retriable error status": {status: http.StatusForbidden, err: errTokenExpired, wantClosed: true},
+		"retriable 2xx":          {status: http.StatusOK, err: errTokenExpired, wantClosed: true},
+		"permanent":              {status: http.StatusForbidden, err: r8e.Permanent(errMoved)},
 	}
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			body := &trackedBody{Reader: strings.NewReader("error body")}
+			body := newTrackedBody("error body")
 
 			hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-				return respond(http.StatusForbidden, body), nil
+				return respond(tt.status, body), nil
 			})}
 
 			cl := httpx.NewResponseClient("", hc, func(*http.Response, []byte) error { return tt.err })
 
-			_, err := cl.Do(t.Context(), getRequest(t))
+			resp, err := cl.Do(t.Context(), getRequest(t))
 			require.ErrorIs(t, err, tt.err)
+			assert.Equal(t, tt.wantClosed, body.closed.Load(), "body closed")
 
-			assert.Equal(t, tt.wantClosed, body.closed.Load())
+			if tt.wantClosed {
+				return
+			}
+
+			require.NotNil(t, resp)
+
+			got, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "error body", string(got), "a permanent error leaves the body whole")
 		})
 	}
+}
+
+// The classifier sees the body only through its body argument: reading or
+// closing resp.Body during the call does not touch the body the caller gets.
+func TestResponseClassifierHidesTheBody(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]int{
+		"2xx":          http.StatusOK,
+		"error status": http.StatusNotFound,
+	}
+
+	for name, status := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return respond(status, io.NopCloser(strings.NewReader("payload"))), nil
+			})}
+
+			var stolen int
+
+			cl := httpx.NewResponseClient("", hc, func(resp *http.Response, _ []byte) error {
+				data, _ := io.ReadAll(resp.Body)
+				stolen = len(data)
+				_ = resp.Body.Close()
+
+				return nil
+			})
+
+			resp, err := cl.Do(t.Context(), getRequest(t))
+			require.NoError(t, err)
+
+			got, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assert.Zero(t, stolen, "resp.Body is empty during the call")
+			assert.Equal(t, "payload", string(got), "the caller reads the whole body")
+		})
+	}
+}
+
+// A classifier that returns a StatusError gets the Retry-After hint back, and
+// the caller finds the StatusError with errors.As.
+func TestResponseClassifierStatusErrorKeepsRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var attempts atomic.Int64
+
+		hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts.Add(1)
+
+			resp := respond(http.StatusServiceUnavailable, io.NopCloser(strings.NewReader("busy")))
+			resp.Header.Set("Retry-After", "2")
+
+			return resp, nil
+		})}
+
+		cl := httpx.NewResponseClient("", hc, func(resp *http.Response, _ []byte) error {
+			return &httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}
+		}, r8e.WithRetry(2, r8e.ConstantBackoff(time.Millisecond)))
+
+		start := time.Now()
+
+		_, err := cl.Do(t.Context(), getRequest(t))
+
+		var statusErr *httpx.StatusError
+
+		require.ErrorAs(t, err, &statusErr)
+		assert.Equal(t, http.StatusServiceUnavailable, statusErr.StatusCode)
+		assert.Equal(t, int64(2), attempts.Load())
+		waited := time.Since(start)
+		assert.GreaterOrEqual(t, waited, 2*time.Second, "the hint replaces the 1ms backoff")
+		assert.Less(t, waited, 3*time.Second)
+	})
+}
+
+// A 101 upgrade is not read: Do returns at once and the caller writes on the
+// upgraded connection.
+func TestResponseClassifierLeavesAnUpgradeAlone(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+
+		defer conn.Close()
+
+		// The server gives up after 3s, so a client that waits on the
+		// upgraded connection fails the test below instead of hanging it.
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = rw.Flush()
+
+		line, err := rw.ReadString('\n')
+		if err != nil {
+			return
+		}
+
+		_, _ = rw.WriteString("echo:" + line)
+		_ = rw.Flush()
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "echo")
+
+	var sawNil atomic.Bool
+
+	cl := httpx.NewResponseClient("", srv.Client(), func(_ *http.Response, body []byte) error {
+		sawNil.Store(body == nil)
+
+		return nil
+	})
+
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		resp, err := cl.Do(ctx, req)
+		done <- result{resp: resp, err: err}
+	}()
+
+	var res result
+
+	select {
+	case res = <-done:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Do waits on the upgraded connection")
+	}
+
+	resp, err := res.resp, res.err
+	require.NoError(t, err)
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+	conn, ok := resp.Body.(io.ReadWriteCloser)
+	require.True(t, ok, "the upgraded body can still be written to")
+
+	defer conn.Close()
+
+	_, err = io.WriteString(conn, "ping\n")
+	require.NoError(t, err)
+
+	got, err := bufio.NewReader(conn).ReadString('\n')
+	require.NoError(t, err)
+
+	assert.Equal(t, "echo:ping\n", got)
+	assert.True(t, sawNil.Load(), "the classifier gets no body for a 1xx")
 }
 
 // errReader fails every read.
@@ -215,8 +403,8 @@ type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
-// A failure reading a non-2xx body is transient and the classifier is not
-// called: the retry tries again.
+// A failure reading the body of an error status is transient and the
+// classifier is not called: the retry tries again.
 func TestResponseClassifierBodyReadErrorIsTransient(t *testing.T) {
 	t.Parallel()
 
@@ -236,7 +424,7 @@ func TestResponseClassifierBodyReadErrorIsTransient(t *testing.T) {
 	cl := httpx.NewResponseClient("", hc, func(resp *http.Response, _ []byte) error {
 		classified.Add(1)
 
-		if resp.StatusCode/100 != 2 {
+		if resp.StatusCode >= http.StatusMultipleChoices {
 			return r8e.Permanent(errMoved)
 		}
 
@@ -265,8 +453,9 @@ func TestResponseClassifierBodyReadErrorCause(t *testing.T) {
 		return nil
 	})
 
-	_, err := cl.Do(context.Background(), getRequest(t))
+	_, err := cl.Do(t.Context(), getRequest(t))
 
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.ErrorContains(t, err, "read response body")
 	assert.False(t, r8e.IsPermanent(err))
 }

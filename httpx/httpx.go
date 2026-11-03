@@ -1,10 +1,7 @@
 package httpx
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -23,30 +20,6 @@ type (
 	// logic without modifying the adapter.
 	Classifier func(statusCode int) ErrorClass
 
-	// ResponseClassifier classifies a response from its status, headers and
-	// body, for APIs that answer the same status for opposite cases (a 403
-	// for a token to renew or for a moved resource, a 404 for an unknown
-	// object or for a route missing during a rollout). It returns nil for a
-	// success, or the error the attempt fails with. That error is classified
-	// as anywhere in r8e: [r8e.Permanent] stops the retry,
-	// [r8e.RetryAfterError] carries a delay hint, and any other error is
-	// transient.
-	//
-	// For a non-2xx response, body holds its first [MaxClassifiedBody]
-	// bytes, and resp.Body still reads the whole body from the start. For a
-	// 2xx response, body is nil and the body is not read, so a streamed
-	// success stays streamed.
-	//
-	// Pattern: Strategy — caller injects classification logic without
-	// modifying the adapter.
-	ResponseClassifier func(resp *http.Response, body []byte) error
-
-	// readCloser pairs a reader with the closer of the body it reads from.
-	readCloser struct {
-		io.Reader
-		io.Closer
-	}
-
 	// StatusError is returned when the Classifier marks a
 	// status code as Transient or Permanent. The original
 	// response remains accessible for header inspection.
@@ -59,10 +32,12 @@ type (
 	}
 
 	// Client wraps an http.Client with an r8e resilience
-	// policy and HTTP status code classification.
+	// policy and a classification of each response: by
+	// status code ([NewClient]) or by the whole response
+	// ([NewResponseClient]).
 	//
 	// Pattern: Adapter — bridges net/http and r8e's
-	// resilience policy by translating HTTP status codes
+	// resilience policy by translating HTTP responses
 	// into r8e error classification.
 	Client struct {
 		httpClient *http.Client
@@ -83,10 +58,6 @@ const (
 	// Permanent means the error is non-retriable
 	// (e.g. 400).
 	Permanent
-
-	// MaxClassifiedBody is how many bytes of a non-2xx response body a
-	// [ResponseClassifier] receives.
-	MaxClassifiedBody = 64 << 10
 )
 
 // Compile-time check that StatusError supplies a retry-after
@@ -161,34 +132,14 @@ func NewClient(
 	}
 }
 
-// NewResponseClient creates a Client that classifies each response with rc,
-// which sees the status, the headers and, for a non-2xx response, the start
-// of the body (see [ResponseClassifier]). It is the variant of [NewClient]
-// for APIs whose status code alone does not tell a retriable failure from a
-// final one.
-//
-// When rc's error is not [r8e.Permanent], a retry may follow, so the body is
-// drained and closed to let the connection be reused. A permanent error, or
-// a nil one, leaves the body readable from the start. A failure reading the
-// body is transient, and rc is not called.
-func NewResponseClient(
-	name string,
-	hc *http.Client,
-	rc ResponseClassifier,
-	opts ...r8e.Option,
-) *Client {
-	return &Client{
-		httpClient:     hc,
-		policy:         r8e.NewPolicy[*http.Response](name, opts...),
-		respClassifier: rc,
-	}
-}
-
 // Do executes the HTTP request through the resilience
 // policy. Like http.Client.Do, it may return both a
-// non-nil response and a non-nil error. When the
-// Classifier returns Transient or Permanent, the response
-// is wrapped in a StatusError accessible via errors.As.
+// non-nil response and a non-nil error. For a Client
+// built by NewClient, when the Classifier returns
+// Transient or Permanent, the response is wrapped in a
+// StatusError accessible via errors.As. For a Client
+// built by NewResponseClient, the error is the
+// ResponseClassifier's own, with no StatusError added.
 //
 // Each attempt rewinds the request body via req.GetBody, so a retried
 // request with a body (POST/PUT) replays correctly. Requests built with
@@ -228,9 +179,7 @@ func (c *Client) Do(
 			case Transient:
 				// Drain and close body so the underlying
 				// TCP connection can be reused on retry.
-				//nolint:errcheck // best-effort drain
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
+				releaseBody(resp)
 
 				return resp, r8e.Transient(
 					&StatusError{
@@ -253,48 +202,4 @@ func (c *Client) Do(
 			}
 		},
 	)
-}
-
-// classifyResponse runs rc on resp (see [ResponseClassifier]) and returns the
-// error the attempt fails with, nil for a success. A non-2xx body is read up to
-// MaxClassifiedBody and put back in front of the rest, so the caller still
-// reads it whole. When the outcome may be retried, the body is drained and
-// closed, as for a Transient status.
-func classifyResponse(resp *http.Response, rc ResponseClassifier) error {
-	if resp.StatusCode/100 == 2 {
-		return settleBody(resp, rc(resp, nil))
-	}
-
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, MaxClassifiedBody))
-	if readErr != nil {
-		drainAndClose(resp)
-
-		return fmt.Errorf("httpx: read response body: %w", readErr)
-	}
-
-	resp.Body = readCloser{
-		Reader: io.MultiReader(bytes.NewReader(body), resp.Body),
-		Closer: resp.Body,
-	}
-
-	return settleBody(resp, rc(resp, body))
-}
-
-// settleBody drains and closes resp's body when err is non-nil and may be
-// retried, so the connection can be reused, and returns err unchanged.
-//
-//nolint:wrapcheck // the classifier's error is returned as-is
-func settleBody(resp *http.Response, err error) error {
-	if err != nil && !r8e.IsPermanent(err) {
-		drainAndClose(resp)
-	}
-
-	return err
-}
-
-// drainAndClose reads resp's body to the end and closes it, best effort.
-func drainAndClose(resp *http.Response) {
-	//nolint:errcheck // best-effort drain
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }

@@ -854,10 +854,14 @@ When the status alone is ambiguous (same 403/404 for a retriable and a final
 case), use `httpx.NewResponseClient(name, hc, rc, opts...)` with
 `rc func(resp *http.Response, body []byte) error`: nil = success; the returned
 error is classified as usual (`r8e.Permanent` stops, `r8e.RetryAfterError`
-hints, anything else is transient). Non-2xx: `body` = first
-`httpx.MaxClassifiedBody` (64 KiB) bytes and `resp.Body` still reads the whole
-body; 2xx: `body` is nil and the body is not read. A non-permanent error drains
-and closes the body; a body read failure is transient and skips `rc`.
+hints, anything else is transient). The error comes back as is: no
+`StatusError`, no `Retry-After` header read, unless `rc` returns
+`&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}` itself.
+Status >= 300: `body` = first `httpx.MaxClassifiedBody` (64 KiB) bytes and the
+caller still reads the whole body; below 300 (2xx, 101 upgrade): `body` is nil
+and the body is not read. During the call `resp.Body` is `http.NoBody`: `body`
+is rc's only view. A non-permanent error drains and closes the body; a body
+read failure is transient and skips `rc`.
 
 ## Presets
 

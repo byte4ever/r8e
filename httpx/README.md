@@ -29,7 +29,7 @@ and a user-provided HTTP status code classifier.
 | `Classifier` | `func(statusCode int) ErrorClass` — maps status codes to error classes |
 | `NewResponseClient` / `ResponseClassifier` | `func(resp *http.Response, body []byte) error` — classifies from the status, headers and body |
 | `ErrorClass` | Enum: `Success`, `Transient`, `Permanent` |
-| `StatusError` | Error type carrying the original `*http.Response` for inspection |
+| `StatusError` | Error type carrying the original `*http.Response` for inspection (added by `NewClient`; a `ResponseClassifier` returns it itself) |
 
 ## Request flow
 
@@ -110,7 +110,8 @@ func main() {
 
 ## Error handling
 
-On error paths, the `*http.Response` is accessible via `errors.As`:
+With `NewClient`, on error paths, the `*http.Response` is accessible via `errors.As`
+(with `NewResponseClient`, only when the classifier returns a `StatusError`):
 
 ```go
 var statusErr *httpx.StatusError
@@ -137,13 +138,17 @@ takes a `ResponseClassifier` instead of a `Classifier`:
 
 ```go
 classify := func(resp *http.Response, body []byte) error {
+    statusErr := &httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}
+
     switch {
-    case resp.StatusCode/100 == 2:
+    case resp.StatusCode < 300:
         return nil
     case resp.StatusCode == http.StatusForbidden && bytes.Contains(body, []byte("token_expired")):
         return errTokenExpired // transient: retried
+    case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+        return statusErr // transient, and Retry-After is honored
     default:
-        return r8e.Permanent(fmt.Errorf("status %d", resp.StatusCode))
+        return r8e.Permanent(statusErr)
     }
 }
 
@@ -157,10 +162,18 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   with. That error is classified as anywhere in r8e: `r8e.Permanent(err)` stops
   the retry, `r8e.RetryAfterError(err, d)` carries a delay hint, and any other
   error is transient.
-- For a non-2xx response, `body` holds the first `httpx.MaxClassifiedBody`
-  bytes (64 KiB), and `resp.Body` still reads the whole body from the start.
-- For a 2xx response, `body` is `nil` and the body is not read, so a streamed
-  success stays streamed.
+- `Do` returns that error as is. Unlike `NewClient`, this path adds no
+  `StatusError` and reads no `Retry-After` header. Return
+  `&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}`, as in the
+  example, to get both back.
+- For a status of 300 or above, `body` holds the first
+  `httpx.MaxClassifiedBody` bytes (64 KiB), and the caller still reads the
+  whole body from the start.
+- Below 300, `body` is `nil` and the body is not read, so a streamed success or
+  an upgraded (101) connection stays as it is.
+- `body` is the classifier's only view of the body: during the call,
+  `resp.Body` is `http.NoBody`, so the classifier cannot consume the body the
+  caller gets.
 - When the error is not permanent, a retry may follow: the body is drained and
   closed so the connection is reused. A permanent error, or `nil`, leaves the
   body readable.

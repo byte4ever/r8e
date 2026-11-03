@@ -5,7 +5,7 @@
 // policy and a user-provided status code classifier that maps
 // HTTP response codes to transient or permanent errors.
 // NewResponseClient takes a ResponseClassifier instead, which
-// also sees the start of a non-2xx body.
+// also sees the start of the body for a status of 300 or above.
 //
 // Each retry attempt replays the request body via req.GetBody, so a
 // retried request carrying a body (POST/PUT) resends it correctly; a
