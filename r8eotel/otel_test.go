@@ -266,6 +266,29 @@ func TestRegisterReportsAttemptTimeouts(t *testing.T) {
 	assert.Equal(t, "svc", policyAttr)
 }
 
+// The cooling_down counter reports CoolingDown, not the Throttled field next
+// to it.
+func TestRegisterReportsCoolingDown(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	source := fixedSnapshot{{Name: "svc", CoolingDown: 17, Throttled: 19}}
+
+	registration, err := r8eotel.Register(meter, source)
+	require.NoError(t, err)
+
+	defer func() { require.NoError(t, registration.Unregister()) }()
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	got, policyAttr := collectInt64(t, rm, "r8e.policy.cooling_down")
+	assert.Equal(t, int64(17), got)
+	assert.Equal(t, "svc", policyAttr)
+}
+
 // TestRegisterEmitsAllInstruments guards every instrument name: a typo or a
 // dropped instrument would make the corresponding metric disappear.
 func TestRegisterEmitsAllInstruments(t *testing.T) {

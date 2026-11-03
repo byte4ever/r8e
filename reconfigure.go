@@ -549,5 +549,5 @@ func (p *Policy[T]) cooldownReconfigureAction(raw string) (func(), error) {
 		return nil, fmt.Errorf("r8e: reconfigure: %w", err)
 	}
 
-	return func() { p.cooldown.SetMaxCooldown(limit) }, nil
+	return func() { p.cooldown.setLimit(limit) }, nil
 }

@@ -24,4 +24,14 @@ would stay open after the server's deadline had passed.
 - The armed cooldown makes a policy degraded, never critical: a 429 on a shared
   dependency must not take every instance out of rotation at once.
 - With a retry, the retry loop arms the cooldown from each attempt; without
-  one, the entry middleware arms it from the call. This keeps one arm per hint.
+  one, the entry middleware arms it from the call. One function decides which,
+  so each hint arms the cooldown once.
+- The retry loop checks the cooldown after each failed attempt, before the
+  last-attempt exit, and again before a retry leaves, so a cooldown armed by
+  another call during the backoff also stops it. The last error comes back as
+  is, never wrapped with `ErrRetriesExhausted`.
+- A shared cooldown excludes the policy's own, as a shared bulkhead does, and a
+  policy reload does not change its cap: one route's reload must not retune the
+  quota of the others. The shared retry and concurrency budgets keep their
+  rule (last option wins, any policy's reload retunes them). `r8econf.GetPolicy`
+  reports the conflict as an error.

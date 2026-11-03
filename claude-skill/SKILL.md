@@ -371,14 +371,19 @@ r8e.WithSharedCooldown(r8e.NewCooldown(opts...)) // one cooldown for several pol
 Refuses calls locally with `r8e.ErrCoolingDown` (a local rejection) until the
 deadline of a server's Retry-After hint. Any failed attempt whose error carries
 a `RetryAfterProvider` arms it (capped by `MaxCooldown`, narrowed by
-`CooldownIf`); later hints only extend it; a success does not disarm it. Chain
-slot: after Coalesce, before Timeout and the breaker, so the breaker never sees
-a refusal. Inside `WithRetry`, a retry due while armed is not made: the loop
-returns the last error as is. Hooks `OnCoolingDown()` (metric `CoolingDown`) and
-`OnCooldownArmed(d)`; health `cooling_down` is degraded, never critical. Config
-`cooldown` = the cap (reloadable for an own cooldown; a shared one changes with
-`Cooldown.SetMaxCooldown`). `WithCooldown` + `WithSharedCooldown` panics with
-`r8e.ErrSharedCooldownConflict`.
+`CooldownIf`, whose fn must be safe for concurrent use); later hints only
+extend it; a success does not disarm it. Chain slot: after Coalesce, before
+Timeout and the breaker, so the breaker never sees a refusal. Inside
+`WithRetry`, no retry leaves while armed, whoever armed it (checked before the
+backoff and before the next attempt): the loop returns the last error as is,
+never wrapped with `ErrRetriesExhausted`. `WithCooldown` reads the policy clock.
+Hooks `OnCoolingDown()` (metric `CoolingDown`) and `OnCooldownArmed(d)`; health
+`cooling_down` is degraded, never critical. Config `cooldown` = the cap
+(reloadable for an own cooldown; a shared one changes with
+`Cooldown.SetMaxCooldown`, which errors on a cap <= 0). `WithCooldown` +
+`WithSharedCooldown` panics with `r8e.ErrSharedCooldownConflict` (like a shared
+bulkhead, a shared cooldown excludes the own one); `r8econf.GetPolicy` returns
+that error instead, and `r8e.ValidateOptions(opts...)` checks any option set.
 
 ### Rate Limiter
 

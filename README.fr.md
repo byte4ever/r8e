@@ -387,18 +387,21 @@ p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
 - Toute tentative en échec dont l'erreur porte un `RetryAfterProvider` (un
   `StatusError` httpx sur un 429/503, `r8e.RetryAfterError(err, d)`, …) arme le
   cooldown jusqu'à maintenant plus son délai. `CooldownIf(fn)` restreint le
-  déclencheur, par exemple aux seuls 429. `MaxCooldown(d)` plafonne un délai
-  (une heure par défaut ; un plafond non positif panique avec
-  `ErrCooldownNonPositiveMax`).
+  déclencheur, par exemple aux seuls 429 ; `fn` tourne sur chaque goroutine
+  appelante et doit donc supporter l'accès concurrent. `MaxCooldown(d)` plafonne
+  un délai (une heure par défaut ; avec un plafond non positif, `NewCooldown` et
+  `NewPolicy` paniquent avec `ErrCooldownNonPositiveMax`).
 - Un délai plus tardif ne fait que repousser la deadline, jamais la rapprocher,
   et un succès ne désarme pas le cooldown.
 - Tant qu'il est armé, un appel échoue tout de suite avec `ErrCoolingDown` et
   aucune tentative ne part. `IsLocalRejection` le reconnaît.
 - Deux points de contrôle tiennent le breaker à l'écart des refus. Le cooldown
   se place à l'entrée de la chaîne, après le coalescing et avant le timeout et
-  le breaker : un appel refusé n'atteint jamais le breaker. Dans `WithRetry`, un
-  retry prévu pendant que le cooldown est armé n'a pas lieu : la boucle renvoie
-  la dernière erreur telle quelle (comme `HonorRetryAfter`), et le breaker
+  le breaker : un appel refusé n'atteint jamais le breaker. Dans `WithRetry`,
+  aucun retry ne part tant que le cooldown est armé, quel que soit l'appel qui
+  l'a armé : la boucle le vérifie avant le backoff, puis de nouveau avant la
+  tentative suivante. Elle renvoie alors la dernière erreur telle quelle, jamais
+  enveloppée dans `ErrRetriesExhausted` (comme `HonorRetryAfter`), et le breaker
   compte une seule fois la vraie erreur du serveur.
 - Hooks : `OnCoolingDown()` pour un appel refusé (compté dans la métrique
   `CoolingDown`, `r8e.policy.cooling_down` dans r8eotel) et
@@ -407,12 +410,17 @@ p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
   pour qu'un 429 sur une dépendance partagée ne sorte pas toutes les instances
   de la rotation d'un coup.
 - `WithSharedCooldown` et `WithCooldown` ne se combinent pas
-  (`ErrSharedCooldownConflict`). Chaque politique qui partage le cooldown
-  rapporte ses propres refus.
+  (`ErrSharedCooldownConflict`) : comme un bulkhead partagé, un cooldown partagé
+  exclut celui de la politique. `r8econf.GetPolicy` renvoie cette erreur, au
+  lieu de paniquer, pour un `cooldown` de config à côté d'un `WithSharedCooldown`
+  en code. Chaque politique qui partage le cooldown rapporte ses propres refus.
+- `WithCooldown` lit l'horloge de la politique (`WithClock`) ; `CooldownClock`
+  fixe l'horloge d'un cooldown construit avec `NewCooldown`.
 - Config : `cooldown` (le plafond, par exemple `"1h"`) active `WithCooldown` ;
   un rechargement change le plafond du cooldown propre à la politique. Un
   cooldown partagé se pose en code uniquement ; changez son plafond avec
-  `Cooldown.SetMaxCooldown`.
+  `Cooldown.SetMaxCooldown`, qui renvoie `ErrCooldownNonPositiveMax` pour un
+  plafond non positif.
 
 ### Rate Limiter
 

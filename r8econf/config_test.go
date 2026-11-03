@@ -115,6 +115,27 @@ func TestGetPolicyWithCodeOverride(t *testing.T) {
 	assert.Equal(t, "payment", result)
 }
 
+// A config cooldown next to a code WithSharedCooldown is a conflict GetPolicy
+// returns, not a panic.
+func TestGetPolicySharedCooldownConflict(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "policies.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"policies": {"search": {"cooldown": "1h"}}}`), 0o600))
+
+	store, err := Load(path)
+	require.NoError(t, err)
+
+	var policy *r8e.Policy[string]
+
+	require.NotPanics(t, func() {
+		policy, err = GetPolicy[string](store, "search", r8e.WithSharedCooldown(r8e.NewCooldown()))
+	})
+	require.ErrorIs(t, err, r8e.ErrSharedCooldownConflict)
+	assert.ErrorContains(t, err, `"search"`)
+	assert.Nil(t, policy)
+}
+
 func TestGetPolicyNotInConfig(t *testing.T) {
 	store, err := Load("../testdata/valid.json")
 	require.NoError(t, err)

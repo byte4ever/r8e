@@ -11,8 +11,11 @@ asked the caller to wait (a Retry-After hint).
 _Avoid_: Retry-After barrier, quota gate, backoff window
 
 **Local rejection**:
-A call refused by one of r8e's own guards (breaker, rate limiter,
-bulkhead, cooldown) before anything reaches the downstream.
+A call refused before reaching the downstream by a guard that protects the
+client's own capacity or a server's stated limit: the rate limiter, the
+bulkhead and its queue, the adaptive concurrency limiter, the cooldown. A
+refusal by the breaker, the throttler or the SLO governor is not one: it
+reports on the downstream's health.
 _Avoid_: Shed call, client-side failure
 
 **Neutral outcome**:

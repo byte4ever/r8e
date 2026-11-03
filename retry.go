@@ -30,8 +30,11 @@ type (
 		Budget      *RetryBudget
 		Concurrency *ConcurrencyBudget
 		// Cooldown, when set, is armed by each failed attempt's Retry-After
-		// hint, and stops the loop when a retry would be due while it is
-		// armed (see WithCooldown).
+		// hint, and stops the loop, returning the last error as is, whenever
+		// it is armed after a failed attempt or before a retry leaves,
+		// whoever armed it (see WithCooldown). The first attempt is not
+		// gated: outside a Policy, check Cooldown.Armed before calling
+		// DoRetry.
 		Cooldown    *Cooldown
 		Opts        []RetryOption
 		MaxAttempts int
@@ -123,6 +126,13 @@ func DoRetry[T any](
 	)
 
 	for attempt := range maxAttempts {
+		// A cooldown armed during the backoff, by another call or another
+		// policy sharing it, stops the retry before it leaves: the last error
+		// comes back as is.
+		if attempt > 0 && params.Cooldown.Armed() {
+			return zero, lastErr //nolint:wrapcheck // the server's error, as with HonorRetryAfter
+		}
+
 		// A retry attempt (attempt > 0) must claim a concurrency-budget permit
 		// before it runs, so a burst of simultaneous retries cannot pile load
 		// onto a struggling downstream. The first attempt is the baseline and is
@@ -187,15 +197,17 @@ func DoRetry[T any](
 			return zero, err
 		}
 
+		// While the cooldown is armed no attempt may leave: stop and return
+		// the server's error as is. Like the HonorRetryAfter check, it runs
+		// before the last-attempt exit, so a hint on the last attempt is not
+		// wrapped with ErrRetriesExhausted either.
+		if params.Cooldown.Armed() {
+			return zero, err
+		}
+
 		// If this is the last attempt, don't sleep or emit hook.
 		if attempt == maxAttempts-1 {
 			break
-		}
-
-		// While the cooldown is armed no attempt may leave: stop and return
-		// the server's error as is, as HonorRetryAfter does.
-		if params.Cooldown.Armed() {
-			return zero, err
 		}
 
 		// If the budget is exhausted, stop retrying and return the real

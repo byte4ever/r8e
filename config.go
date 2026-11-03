@@ -548,9 +548,7 @@ func adaptiveOptionsFromConfig(cfg *AdaptiveConfig) []AdaptiveOption {
 // adaptive-throttler options. Shared by [BuildOptions] and [Policy.Reconfigure].
 // It returns an error only when the window string fails to parse.
 //
-// distinct config type to a distinct option type; no shared abstraction without generics.
-//
-//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
+//nolint:dupl // mirrors adaptiveTimeoutOptionsFromConfig for a distinct type; no generic abstraction
 func throttleOptionsFromConfig(
 	cfg *AdaptiveThrottleConfig,
 ) ([]ThrottleOption, error) {
@@ -722,9 +720,7 @@ func timeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]TimeoutOption, erro
 // [AdaptiveTimeout] options. Shared by [BuildOptions] and [Policy.Reconfigure]. It
 // returns an error only when the floor string fails to parse.
 //
-// config type to a distinct option type; no shared abstraction without generics.
-//
-//nolint:dupl // structurally mirrors throttleOptionsFromConfig but maps a distinct
+//nolint:dupl // mirrors throttleOptionsFromConfig for a distinct type; no generic abstraction
 func adaptiveTimeoutOptionsFromConfig(cfg *AdaptiveTimeoutConfig) ([]AdaptiveTimeoutOption, error) {
 	var opts []AdaptiveTimeoutOption
 
@@ -773,9 +769,7 @@ func hedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]HedgeOption, error) {
 // [AdaptiveHedge] options. Shared by [BuildOptions] and [Policy.Reconfigure]. It
 // returns an error only when the floor string fails to parse.
 //
-// distinct config type to a distinct option type; no shared abstraction without generics.
-//
-//nolint:dupl // structurally mirrors adaptiveTimeoutOptionsFromConfig but maps a
+//nolint:dupl // mirrors adaptiveTimeoutOptionsFromConfig for a distinct type; no generic abstraction
 func adaptiveHedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]AdaptiveHedgeOption, error) {
 	var opts []AdaptiveHedgeOption
 

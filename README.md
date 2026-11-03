@@ -384,28 +384,37 @@ p := r8e.NewPolicy[User]("users", r8e.WithCooldown())
 - Any failed attempt whose error carries a `RetryAfterProvider` (an httpx
   `StatusError` on a 429/503, `r8e.RetryAfterError(err, d)`, …) arms the cooldown
   until now plus its hint. `CooldownIf(fn)` narrows the trigger, for example to
-  429 only. `MaxCooldown(d)` caps one hint (default one hour; a non-positive cap
-  panics with `ErrCooldownNonPositiveMax`).
+  429 only; `fn` runs on every calling goroutine, so it must be safe for
+  concurrent use. `MaxCooldown(d)` caps one hint (default one hour; a
+  non-positive cap makes `NewCooldown` and `NewPolicy` panic with
+  `ErrCooldownNonPositiveMax`).
 - A later hint only extends the deadline, never shortens it, and a success does
   not disarm it.
 - While it is armed, a call fails at once with `ErrCoolingDown` and no attempt
   leaves. `IsLocalRejection` recognises it.
 - Two checkpoints keep the breaker clear of the refusals. The cooldown sits at
   the entry of the chain, after coalescing and before the timeout and the
-  breaker, so a refused call never reaches the breaker. Inside `WithRetry`, a
-  retry due while the cooldown is armed is not made: the loop returns the last
-  error as is (as `HonorRetryAfter` does), so the breaker counts the server's
-  real error, once.
+  breaker, so a refused call never reaches the breaker. Inside `WithRetry`, no
+  retry leaves while the cooldown is armed, whoever armed it: the loop checks it
+  before the backoff and again before the next attempt. It then returns the last
+  error as is, never wrapped with `ErrRetriesExhausted` (as `HonorRetryAfter`
+  does), so the breaker counts the server's real error, once.
 - Hooks: `OnCoolingDown()` for a refused call (counted in the `CoolingDown`
   metric, `r8e.policy.cooling_down` in r8eotel) and `OnCooldownArmed(d)` when a
   hint arms or extends it. Health: an armed cooldown makes the policy degraded
   (`cooling_down`), never critical, so a 429 on a shared dependency does not
   take every instance out of rotation at once.
 - `WithSharedCooldown` and `WithCooldown` cannot be combined
-  (`ErrSharedCooldownConflict`). Each sharing policy reports its own refusals.
+  (`ErrSharedCooldownConflict`): like a shared bulkhead, a shared cooldown
+  excludes the policy's own. `r8econf.GetPolicy` returns that error, rather than
+  panic, for a config `cooldown` next to a code `WithSharedCooldown`. Each
+  sharing policy reports its own refusals.
+- `WithCooldown` reads the policy's clock (`WithClock`); `CooldownClock` sets the
+  clock of a cooldown built with `NewCooldown`.
 - Config: `cooldown` (the cap, for example `"1h"`) enables `WithCooldown`; a
   reload changes the cap of a policy's own cooldown. A shared cooldown is
-  code-only; change its cap with `Cooldown.SetMaxCooldown`.
+  code-only; change its cap with `Cooldown.SetMaxCooldown`, which returns
+  `ErrCooldownNonPositiveMax` for a non-positive cap.
 
 ### Rate Limiter
 

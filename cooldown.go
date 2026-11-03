@@ -50,8 +50,8 @@ type (
 const defaultMaxCooldown = time.Hour
 
 // MaxCooldown caps how long one hint keeps the cooldown armed. Default: one
-// hour. A non-positive d panics in [NewCooldown], [WithCooldown] and
-// [NewPolicy].
+// hour. A non-positive d makes [NewCooldown] and [NewPolicy] panic with
+// [ErrCooldownNonPositiveMax].
 func MaxCooldown(d time.Duration) CooldownOption {
 	return func(cfg *cooldownConfig) {
 		cfg.limit = d
@@ -60,18 +60,23 @@ func MaxCooldown(d time.Duration) CooldownOption {
 
 // CooldownIf restricts which errors arm the cooldown, for example to a 429:
 // an error arms it only when fn returns true and the error carries a
-// Retry-After hint. A nil fn keeps the default, every hinted error.
+// Retry-After hint. A nil fn keeps the default, every hinted error. fn is
+// called from every goroutine running a policy that uses the cooldown (every
+// sharing policy for a shared one), so it must be safe for concurrent use.
 func CooldownIf(fn func(error) bool) CooldownOption {
 	return func(cfg *cooldownConfig) {
 		cfg.trigger = fn
 	}
 }
 
-// CooldownClock sets the clock a standalone [Cooldown] reads. [WithCooldown]
-// uses the policy's clock. Default: [RealClock].
+// CooldownClock sets the clock a cooldown built with [NewCooldown] reads; a
+// nil c is ignored. Default: [RealClock]. [WithCooldown] always reads the
+// policy's clock (see [WithClock]), whatever CooldownClock it is given.
 func CooldownClock(c Clock) CooldownOption {
 	return func(cfg *cooldownConfig) {
-		cfg.clock = c
+		if c != nil {
+			cfg.clock = c
+		}
 	}
 }
 
@@ -108,12 +113,20 @@ func (c *Cooldown) Armed() bool {
 }
 
 // SetMaxCooldown replaces the cap applied to later hints; a deadline already
-// set is kept. A non-positive d is ignored.
-func (c *Cooldown) SetMaxCooldown(limit time.Duration) {
+// set is kept. A non-positive limit is rejected with
+// [ErrCooldownNonPositiveMax] and leaves the cap unchanged.
+func (c *Cooldown) SetMaxCooldown(limit time.Duration) error {
 	if limit <= 0 {
-		return
+		return ErrCooldownNonPositiveMax
 	}
 
+	c.setLimit(limit)
+
+	return nil
+}
+
+// setLimit replaces the cap; limit is already known to be positive.
+func (c *Cooldown) setLimit(limit time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -153,10 +166,10 @@ func (c *Cooldown) observe(err error) (time.Duration, bool) {
 	return armedFor, true
 }
 
-// newCooldownEntry builds the cooldown middleware for a policy without a
-// retry: it refuses a call while the cooldown is armed (see cooldownGate) and
+// newArmingCooldownEntry builds the cooldown middleware for a policy without
+// a retry: it refuses a call while the cooldown is armed (see cooldownGate) and
 // arms the cooldown from the call's error.
-func newCooldownEntry[T any](cd *Cooldown, hooks *Hooks) PatternEntry[T] {
+func newArmingCooldownEntry[T any](cd *Cooldown, hooks *Hooks) PatternEntry[T] {
 	return cooldownGate[T](cd, hooks, func(err error) {
 		if armedFor, armed := cd.observe(err); armed {
 			hooks.emitCooldownArmed(armedFor)
@@ -164,10 +177,10 @@ func newCooldownEntry[T any](cd *Cooldown, hooks *Hooks) PatternEntry[T] {
 	})
 }
 
-// newCooldownGateEntry builds the cooldown middleware for a policy with a
-// retry: it only refuses calls, since the retry loop arms the cooldown from
+// newRefusingCooldownEntry builds the cooldown middleware for a policy with
+// a retry: it only refuses calls, since the retry loop arms the cooldown from
 // each attempt (see DoRetry).
-func newCooldownGateEntry[T any](cd *Cooldown, hooks *Hooks) PatternEntry[T] {
+func newRefusingCooldownEntry[T any](cd *Cooldown, hooks *Hooks) PatternEntry[T] {
 	return cooldownGate[T](cd, hooks, func(error) {})
 }
 
