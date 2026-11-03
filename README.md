@@ -191,7 +191,7 @@ func main() {
 
 ### Timeout
 
-Cancel slow calls after a deadline. If the function doesn't complete in time, `r8e.ErrTimeout` is returned. The timeout is r8e's only when it falls strictly before the caller's own deadline: if the caller's deadline comes first or on the same instant, `Do` returns the caller's context error and `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the caller's context ends; the function keeps running until it returns, so it must synchronise whatever it shares with the caller.
+Cancel slow calls after a deadline. If the function doesn't complete in time, `r8e.ErrTimeout` is returned. The timeout is r8e's only when it falls strictly before the caller's own deadline: if the caller's deadline comes first or on the same instant, `Do` returns the caller's context error and `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the caller's context ends; the function keeps running until it returns, so it must synchronise whatever it shares with the caller. Who ended the call is decided when the timeout fires, as with a time budget set with `PropagateDeadline`: a caller that cancelled before keeps the call, and one that cancels or reaches its own, later deadline afterwards does not take it back. A downstream that stops on the propagated deadline by itself (a socket or client deadline) and returns its own error at that instant still gets `ErrTimeout` and one `OnTimeout`. A success that reaches `Do` before it sees the timeout stays a success.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
