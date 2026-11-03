@@ -64,12 +64,12 @@ go run ./examples/04-timeout/
 ## Sortie attendue
 
 ```
-=== Appel rapide (se termine dans le délai imparti) ===
+=== Fast call (completes within timeout) ===
   result: "fast response", err: <nil>
 
-=== Appel lent (dépasse le timeout de 200ms) ===
-  err: timeout (expiration comme attendu)
+=== Slow call (exceeds 200ms timeout) ===
+  err: timeout (timed out as expected)
 
-=== Annulation du contexte parent ===
-  err: context canceled (annulation par le parent, pas un timeout)
+=== Parent context cancelled ===
+  err: context canceled (parent cancelled, not timeout)
 ```

@@ -59,8 +59,9 @@ health reporting, and configuration hot-reload.
 | **Retry Budget** | Adaptive token bucket that throttles retries when failures dominate, preventing retry storms |
 | **Concurrency Budget** | Caps concurrent retries/hedges as a fraction of live traffic (with a floor), bounding storm parallelism |
 | **Circuit Breaker** | Fast-fail when a dependency is down, auto-recover via half-open probe |
+| **Cooldown** | Refuse calls locally until the deadline a server's `Retry-After` gave, shareable across policies |
 | **Rate Limiter** | Token-bucket throughput control (reject or blocking mode) |
-| **Bulkhead** | Semaphore-based concurrency limiting (fixed limit) |
+| **Bulkhead** | Semaphore-based concurrency limiting (fixed limit), shareable across policies |
 | **Adaptive Concurrency** | Self-tuning concurrency limit from observed latency (Netflix Gradient2) |
 | **Adaptive Throttle** | Probabilistic client-side load shedding by the live accept/request ratio (Google SRE), before the breaker trips |
 | **SLO Burn-Rate Governor** | Probabilistic load shedding driven by how fast an SLO error budget is burning (multiwindow burn rate), sheds sheddable work first to protect the budget for critical traffic |
@@ -72,7 +73,7 @@ health reporting, and configuration hot-reload.
 | **Recover** | Catch panics from the user function and return them as `*PanicError`; lets retry, fallback, or circuit breaker handle them instead of crashing |
 | **Chaos Injection** | Probabilistically inject faults, latency, fake outcomes, or behaviors at the core of the chain to exercise your own resilience config (Polly-v8 / Simmy style), gated per call for safe canary chaos |
 
-Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, `Clock` for deterministic tests.
+Plus: automatic pattern ordering, JSON config, presets, health & readiness, hooks, stable error codes (`ErrorCode`), an HTTP adapter ([`httpx`](httpx)) that classifies a response by its status or its body, `Clock` for deterministic tests.
 
 ## Why r8e? Feature comparison
 
@@ -1644,6 +1645,8 @@ if err != nil {
     log.Fatal(err)
 }
 ```
+
+`GetPolicy` checks the merged options before it builds the policy: a misconfiguration `NewPolicy` would panic on, such as a config `cooldown` next to a code `WithSharedCooldown`, comes back as an error. Code that merges options from several sources itself can run the same check with `r8e.ValidateOptions(opts...)`; a value whose type does not match the policy's `T` still panics in `NewPolicy`.
 
 Supported backoff strategies in config: `"constant"`, `"exponential"`, `"linear"`, `"exponential_jitter"`.
 

@@ -58,8 +58,9 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Retry Budget** | Token bucket adaptatif qui throttle les retries quand les échecs dominent, évitant les retry storms |
 | **Budget de concurrence** | Plafonne les retries/hedges concurrents comme fraction du trafic courant (avec un plancher), bornant le parallélisme des storms |
 | **Circuit Breaker** | Échoue rapidement quand une dépendance est en panne, récupération automatique via sonde half-open |
+| **Cooldown** | Refuse les appels en local jusqu'à la deadline donnée par le `Retry-After` du serveur, partageable entre politiques |
 | **Rate Limiter** | Contrôle de débit par token bucket (mode rejet ou blocage) |
-| **Bulkhead** | Limitation de concurrence par sémaphore (limite fixe) |
+| **Bulkhead** | Limitation de concurrence par sémaphore (limite fixe), partageable entre politiques |
 | **Concurrence adaptative** | Limite de concurrence auto-ajustée depuis la latence observée (Gradient2 de Netflix) |
 | **Throttle adaptatif** | Délestage probabiliste côté client selon le ratio accepts/requests observé (Google SRE), avant que le breaker ne déclenche |
 | **Gouverneur de burn-rate SLO** | Délestage probabiliste piloté par la vitesse de consommation de l'error budget d'un SLO (burn rate multi-fenêtre) ; déleste d'abord le trafic sheddable pour préserver le budget du trafic critique |
@@ -71,7 +72,7 @@ métriques intégrées, reporting de santé optionnel et hot-reload de configura
 | **Recover** | Intercepte les panics de la fonction utilisateur et les retourne en tant que `*PanicError` ; retry, fallback ou circuit breaker peuvent alors les gérer au lieu de crasher |
 | **Injection de chaos** | Injecte de façon probabiliste des fautes, de la latence, de faux résultats ou des comportements au cœur de la chaîne pour éprouver votre propre config de résilience (façon Polly v8 / Simmy), gating par appel pour un chaos canary sûr |
 
-Plus : ordonnancement automatique des patterns, configuration JSON, presets, santé et readiness, hooks, `Clock` pour des tests déterministes.
+Plus : ordonnancement automatique des patterns, configuration JSON, presets, santé et readiness, hooks, codes d'erreur stables (`ErrorCode`), un adapter HTTP ([`httpx`](httpx)) qui classe une réponse par son statut ou son corps, `Clock` pour des tests déterministes.
 
 ## Pourquoi r8e ? Comparaison de fonctionnalités
 
@@ -1691,6 +1692,8 @@ if err != nil {
     log.Fatal(err)
 }
 ```
+
+`GetPolicy` vérifie les options fusionnées avant de construire la policy : une erreur de configuration sur laquelle `NewPolicy` paniquerait, par exemple un `cooldown` en config à côté d'un `WithSharedCooldown` en code, revient sous forme d'erreur. Un code qui fusionne lui-même des options de plusieurs sources peut lancer la même vérification avec `r8e.ValidateOptions(opts...)` ; une valeur dont le type ne correspond pas au `T` de la policy fait toujours paniquer `NewPolicy`.
 
 Stratégies de backoff supportées en config : `"constant"`, `"exponential"`, `"linear"`, `"exponential_jitter"`.
 
