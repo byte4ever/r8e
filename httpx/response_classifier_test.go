@@ -454,7 +454,7 @@ func TestRetriableUpgradeIsNotDrained(t *testing.T) {
 
 				require.ErrorAs(t, err, &statusErr)
 				assert.Equal(t, http.StatusSwitchingProtocols, statusErr.StatusCode)
-				assert.False(t, r8e.IsPermanent(err))
+				assert.True(t, r8e.IsTransient(err))
 			},
 		},
 	}
@@ -533,5 +533,5 @@ func TestResponseClassifierBodyReadErrorCause(t *testing.T) {
 
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	assert.ErrorContains(t, err, "read response body")
-	assert.False(t, r8e.IsPermanent(err))
+	assert.True(t, r8e.IsTransient(err))
 }
