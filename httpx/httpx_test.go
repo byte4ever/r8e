@@ -297,6 +297,9 @@ func TestDoRetryReplaysRequestBody(t *testing.T) {
 	}
 }
 
+// errRewind is the failure TestDoGetBodyErrorPropagates injects in GetBody.
+var errRewind = errors.New("getbody boom")
+
 // TestDoGetBodyErrorPropagates verifies a GetBody failure surfaces as an error
 // rather than silently sending an empty body on the retried request.
 func TestDoGetBodyErrorPropagates(t *testing.T) {
@@ -326,11 +329,12 @@ func TestDoGetBodyErrorPropagates(t *testing.T) {
 	require.NoError(t, err)
 
 	req.GetBody = func() (io.ReadCloser, error) {
-		return nil, errors.New("getbody boom")
+		return nil, errRewind
 	}
 
 	_, err = cl.Do(context.Background(), req)
-	require.ErrorContains(t, err, "getbody boom")
+	require.ErrorIs(t, err, errRewind)
+	assert.ErrorContains(t, err, "rewind request body")
 }
 
 // TestDoUnknownClassPassesThrough verifies an out-of-range ErrorClass from a

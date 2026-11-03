@@ -173,7 +173,8 @@ Config-expressible via `respect_inbound_deadline` (requires `time_budget`, else
 (gRPC propagates automatically), the `httpx` package carries it on the wire as a
 relative, clock-skew-safe header: `httpx.InjectDeadline(req, clock)` (egress, pair
 with `PropagateDeadline`) and `httpx.ExtractDeadline(ctx, req)` (ingress, pair with
-`RespectInboundDeadline`).
+`RespectInboundDeadline`). On an httpx `Client`, `PropagateDeadline` also cuts a
+body read after `Do` (see the httpx section).
 
 ### Retry
 
@@ -445,6 +446,23 @@ hot-reloadable. Observability: `OnBulkheadQueued` / `OnBulkheadTimeout` hooks,
 `BulkheadTimeouts` counter, `BulkheadQueued` gauge. Standalone admission API is
 `Bulkhead.Acquire(ctx) error` (takes a ctx — may block on the wait) + `Release()`
 + `Queued()`.
+
+**Shared bulkhead** (`r8e.WithSharedBulkhead(*Bulkhead)`, code-only): one
+`NewBulkhead` attached to several policies caps their calls in flight together
+(same chain slot as `WithBulkhead`, so retries and backoff hold the slot). Each
+policy reports its own calls to its own hooks and counters; the gauges,
+`bulkhead_full` and `bulkhead_overloaded` describe the same bulkhead in every
+policy, so aggregate them with max, not sum. It keeps the clock given to
+`NewBulkhead` (a policy's `WithClock` does not reach it). Not re-entrant: an
+operation under one sharing policy must not call, directly or indirectly, any
+policy on the same bulkhead, itself included (fine below capacity; once outer
+calls hold every slot the inner call gets what any caller of a full bulkhead
+gets, see `Bulkhead.Acquire`; the bulkhead stays full while those calls last,
+and the callers of every sharing policy are refused or wait). Unlike the shared
+retry/concurrency budgets (last option wins, any policy's `Reconfigure` retunes
+them for all), combining it with `WithBulkhead` or `WithAdaptiveConcurrency`
+panics with `r8e.ErrSharedBulkheadConflict`, and a policy `Reconfigure` carrying
+any bulkhead setting returns that error (retune with `Bulkhead.Reconfigure`).
 
 **Controlled-delay queue (CoDel + adaptive LIFO)** (opt-in): `r8e.BulkheadCoDel(target, interval)`
 disciplines the wait queue by observed dwell (RFC 8289 / folly), instead of (or
@@ -894,18 +912,51 @@ classifier := func(code int) httpx.ErrorClass {
 }
 
 client := httpx.NewClient("api", http.DefaultClient, classifier,
-    r8e.WithTimeout(2*time.Second),
     r8e.WithRetry(3, r8e.ExponentialBackoff(100*time.Millisecond)),
     r8e.WithCircuitBreaker(),
 )
 
+// Bound the call with a deadline on ctx, not r8e.WithTimeout: WithTimeout,
+// WithHedge, PerAttemptTimeout and WithTimeBudget+PropagateDeadline end the
+// attempt's context when they return, so the caller reads only the buffered
+// start of the body after Do, then context.Canceled (the
+// StandardHTTPClient/AggressiveHTTPClient presets include WithTimeout).
 resp, err := client.Do(ctx, req)
 // Transient: body drained+closed for connection reuse during retries
-// Permanent: body preserved but caller must close it
+// Permanent: body preserved but caller must close it (under WithRetry resp
+// is nil: reach it via StatusError.Response)
 // Access status: var se *httpx.StatusError; errors.As(err, &se)
 // StatusError.RetryAfter() parses the Retry-After header; retry honors it
 // automatically (over the configured backoff) on 429/503.
 ```
+
+When the status alone is ambiguous (same 403/404 for a retriable and a final
+case), use `httpx.NewResponseClient(name, hc, classify, opts...)` with
+`classify func(resp *http.Response, body []byte) error`: nil = success; the returned
+error is classified as usual (`r8e.Permanent` stops, `r8e.RetryAfterError`
+hints, anything else is transient). The adapter adds nothing to the error: no
+`StatusError`, no `Retry-After` header read, unless `classify` returns
+`&httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}` itself; the
+policy may still wrap it (`ErrRetriesExhausted`), so match with
+`errors.Is`/`errors.As`, never `==`.
+Status >= 300: `body` = first `httpx.MaxClassifiedBody` (64 KiB) bytes, put
+back so the caller reads the body from its first byte; below 300 (2xx, 101 upgrade): `body` is nil
+and the body is not read. During the call `resp.Body` is `http.NoBody`: `body`
+is classify's only view, and must not be modified (the caller reads the same
+bytes). The body stays open only on nil or on a permanent error carrying a
+`StatusError` for `resp` (under `WithRetry`, `Do` returns a nil response on any
+error, so reach it with `errors.As`); any other error drains and closes it (a
+101 is only closed); a body read failure is transient and skips `classify`. `classify` runs inside the attempt: maybe on
+another goroutine, concurrently with itself (hedge, concurrent `Do`), and after
+`Do` returned (`WithTimeout` cut) — keep it stateless or synchronised. Never
+build an httpx `Client` with `WithCoalesce` or `WithCache` (every sharing caller
+would get the same `*http.Response` and body stream) or with a static
+`WithFallback` (it drops the `StatusError` keeping a permanent body open, which
+leaks the connection); use `WithFallbackFunc` and close
+`StatusError.Response.Body`. The open body is read on the attempt's context:
+under `WithTimeout`, `WithHedge`, `PerAttemptTimeout` or `WithTimeBudget` +
+`PropagateDeadline` only its buffered start survives `Do`, then
+`context.Canceled`; bound the call with a deadline on the ctx passed to `Do` instead.
 
 ## Presets
 

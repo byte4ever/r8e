@@ -517,6 +517,14 @@ func TestWithSharedRetryBudgetNilIsIgnored(t *testing.T) {
 	)
 
 	assert.Nil(t, p.retryBudget)
+
+	// Nor does it remove a budget an earlier option set.
+	layered := NewPolicy[string]("",
+		WithRetry(2, ConstantBackoff(0)),
+		WithRetryBudget(),
+		WithSharedRetryBudget(nil),
+	)
+	assert.NotNil(t, layered.retryBudget, "the earlier budget is kept")
 }
 
 func TestPolicyRetryBudgetHealthAndMetrics(t *testing.T) {
