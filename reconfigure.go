@@ -87,14 +87,13 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 
 	actions = append(actions, hedgeActions...)
 
-	if cfg.RateLimit != nil {
-		if p.rateLimiter == nil {
-			return absentPatternError("rate_limit")
+	if cfg.RateLimit != nil || cfg.RateLimitBurst != nil {
+		action, err := p.rateLimitReconfigureAction(&cfg)
+		if err != nil {
+			return err
 		}
 
-		rate := *cfg.RateLimit
-
-		actions = append(actions, func() { p.rateLimiter.Reconfigure(rate) })
+		actions = append(actions, action)
 	}
 
 	if cfg.AIMD != nil {
@@ -216,6 +215,41 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 	}
 
 	return nil
+}
+
+// rateLimitReconfigureAction validates the rate and burst of a config overlay
+// and returns one action that applies both under the rate limiter's lock. It
+// errors when the policy has no rate limiter, when the overlay sets a burst on
+// a rate limiter built without [Burst] (a reload retunes a burst, it cannot
+// add one), or when the burst is out of range.
+func (p *Policy[T]) rateLimitReconfigureAction(cfg *PolicyConfig) (func(), error) {
+	if p.rateLimiter == nil {
+		return nil, absentPatternError("rate_limit")
+	}
+
+	var rate *float64
+
+	if cfg.RateLimit != nil {
+		value := *cfg.RateLimit
+		rate = &value
+	}
+
+	var burst *int
+
+	if cfg.RateLimitBurst != nil {
+		if !p.rateLimiter.cfg.burstSet {
+			return nil, absentPatternError("rate_limit_burst")
+		}
+
+		value := *cfg.RateLimitBurst
+		if !validBurst(value) {
+			return nil, fmt.Errorf("r8e: reconfigure: %w", ErrRateLimitBurstOutOfRange)
+		}
+
+		burst = &value
+	}
+
+	return func() { p.rateLimiter.applyReload(rate, burst) }, nil
 }
 
 // aimdReconfigureAction validates an AIMD config overlay and returns the action

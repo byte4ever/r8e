@@ -16,6 +16,8 @@ import (
 type (
 	rateLimitConfig struct {
 		aimd     *aimdConfig
+		burst    int
+		burstSet bool
 		blocking bool
 	}
 
@@ -35,9 +37,10 @@ type (
 	// additive-increase / multiplicative-decrease controller that backs the rate
 	// off under server-signalled overload and recovers it afterwards.
 	//
-	// The acquire/refill hot path is lock-free. The writers of the rate and the
-	// bucket capacity ([RateLimiter.Reconfigure] and the AIMD step) are
-	// serialised by rateMu, so the capacity always matches the rate that won.
+	// The acquire/refill hot path is lock-free. The writers of the rate, the
+	// burst and the bucket capacity ([RateLimiter.Reconfigure], the config
+	// reload of a policy and the AIMD step) are serialised by rateMu, so the
+	// capacity always matches the rate and burst that won.
 	// The AIMD step takes rateMu, then the controller's own mutex; nothing takes
 	// them in the other order, and no user code (classifier, hook) runs under
 	// either.
@@ -50,8 +53,12 @@ type (
 		capacity atomic.Int64
 		tokens   atomic.Int64
 		lastNano atomic.Int64
-		// rateMu serialises the writers of rate and capacity: Reconfigure and the
-		// AIMD step. Allow and refill never take it.
+		// burst is the bucket size set by [Burst], in whole tokens, or 0 when
+		// the capacity derives from the rate. Guarded by rateMu.
+		burst int64
+		// rateMu serialises the writers of rate, burst and capacity:
+		// Reconfigure, the config reload and the AIMD step. Allow and refill
+		// never take it.
 		rateMu sync.Mutex
 	}
 
@@ -118,6 +125,11 @@ const (
 	defaultAIMDInterval  = time.Second
 	defaultAIMDRateFloor = 10 // minRate default = ceiling / this
 	defaultAIMDStepRatio = 20 // additive step default = ceiling / this
+
+	// MaxBurst is the largest bucket [Burst] accepts, in tokens: the most a
+	// fixed-point token count can hold, or the largest int on a 32-bit
+	// platform.
+	MaxBurst = int(min(math.MaxInt64/fixedPointScale, math.MaxInt))
 )
 
 // Load returns the stored value.
@@ -135,6 +147,27 @@ func (a *atomicFloat64) Store(value float64) {
 func RateLimitBlocking() RateLimitOption {
 	return func(cfg *rateLimitConfig) {
 		cfg.blocking = true
+	}
+}
+
+// Burst sets the bucket capacity to n tokens, apart from the rate. Without it
+// the bucket holds one second of tokens, and at least one. The bucket starts
+// full, so n is also the number of calls that can leave at once on start-up.
+// [RateLimiter.Reconfigure] and the [AIMD] step change the rate, never a
+// capacity set by Burst, with one exception: a rate of zero or less empties
+// the bucket, Burst or not, and a later positive rate brings the Burst
+// capacity back with an empty bucket. n must be between 1 and [MaxBurst]: any
+// other value makes [NewRateLimiter], and so [NewPolicy], panic with
+// [ErrRateLimitBurstOutOfRange].
+//
+// A bucket holds a quota only over its refill window. Against a quota of 450
+// calls per sliding hour, Burst(450) at 0.125 req/s lets up to 900 calls through
+// in an hour: 450 at once, then 450 more as the bucket refills. Burst(1) at the
+// same rate never exceeds 451.
+func Burst(n int) RateLimitOption {
+	return func(cfg *rateLimitConfig) {
+		cfg.burst = n
+		cfg.burstSet = true
 	}
 }
 
@@ -279,8 +312,9 @@ func (c *aimdConfig) resolve(base float64) {
 
 // NewRateLimiter creates a rate limiter that allows rate tokens per second.
 // For a positive rate, the bucket holds one second of tokens, and at least one
-// token, so a rate below 1 req/s admits one call every 1/rate seconds. A rate
-// of zero or less admits no call.
+// token, so a rate below 1 req/s admits one call every 1/rate seconds; [Burst]
+// sets another capacity. A rate of zero or less admits no call. It panics with
+// [ErrRateLimitBurstOutOfRange] when a [Burst] is out of range.
 func NewRateLimiter(
 	rate float64,
 	clock Clock,
@@ -292,13 +326,18 @@ func NewRateLimiter(
 		o(&cfg)
 	}
 
-	capacity := bucketCapacity(rate)
+	if err := cfg.validate(); err != nil {
+		panic(err)
+	}
 
 	rl := &RateLimiter{
 		clock: clock,
 		hooks: hooks,
 		cfg:   cfg,
+		burst: int64(cfg.burst),
 	}
+
+	capacity := rl.capacityFor(rate)
 
 	rl.rate.Store(rate)
 	rl.capacity.Store(capacity)
@@ -334,9 +373,10 @@ func newAIMDState(cfg *aimdConfig, baseRate float64, nowNano int64) *aimdState {
 
 // Reconfigure changes the token-refill rate (tokens per second) at runtime.
 // The bucket capacity is recomputed (one second of tokens, at least one token
-// for a positive rate, none for a rate of zero or less), and the current token
-// count is clamped to the new capacity. Safe for concurrent use with Allow and
-// RecordOutcome.
+// for a positive rate) unless [Burst] set it, and the current token count is
+// clamped to the new capacity. A rate of zero or less, or NaN, empties the
+// bucket, Burst or not; a later positive rate brings the Burst capacity back
+// with an empty bucket. Safe for concurrent use with Allow and RecordOutcome.
 func (rl *RateLimiter) Reconfigure(rate float64) {
 	rl.rateMu.Lock()
 	defer rl.rateMu.Unlock()
@@ -344,8 +384,61 @@ func (rl *RateLimiter) Reconfigure(rate float64) {
 	rl.storeRateLocked(rate)
 }
 
+// applyReload applies a config reload to the rate limiter: a new rate, a new
+// burst, or both, under one rateMu section, so no other writer (Reconfigure,
+// the AIMD step) runs between the burst and the rate change. The lock-free
+// refill reads the rate and the capacity separately: one refill window may add
+// tokens at the new rate capped at the old capacity, and the post-CAS clamp
+// keeps the bucket within the capacity. A nil field is left unchanged. The caller has checked burst
+// with validBurst and that the limiter was built with [Burst].
+func (rl *RateLimiter) applyReload(rate *float64, burst *int) {
+	rl.rateMu.Lock()
+	defer rl.rateMu.Unlock()
+
+	if burst != nil {
+		rl.burst = int64(*burst)
+	}
+
+	newRate := rl.rate.Load()
+	if rate != nil {
+		newRate = *rate
+	}
+
+	rl.storeRateLocked(newRate)
+}
+
+// validate reports a [Burst] out of range.
+func (c *rateLimitConfig) validate() error {
+	if c.burstSet && !validBurst(c.burst) {
+		return ErrRateLimitBurstOutOfRange
+	}
+
+	return nil
+}
+
+// validBurst reports whether n is a bucket size [Burst] accepts.
+func validBurst(n int) bool {
+	return n >= 1 && n <= MaxBurst
+}
+
+// capacityFor returns the bucket size for a refill rate, in fixed-point
+// tokens: the [Burst] size when one is set, else the size derived from the
+// rate. A rate of zero or less, or NaN, keeps an empty bucket either way. The
+// caller holds rl.rateMu, or is building rl.
+func (rl *RateLimiter) capacityFor(rate float64) int64 {
+	if !(rate > 0) { // also true for NaN, which admits nothing
+		return 0
+	}
+
+	if rl.burst > 0 {
+		return rl.burst * fixedPointScale
+	}
+
+	return bucketCapacity(rate)
+}
+
 // storeRateLocked publishes a new refill rate: it updates the rate and the
-// derived capacity, then clamps the live token count down to the new capacity
+// capacity (see capacityFor), then clamps the live token count down to the new capacity
 // (a smaller rate must not leave a backlog larger than the new bucket can
 // hold). Growing the rate leaves the current tokens untouched — the larger
 // bucket simply fills over time. The cells are atomic, so the lock-free
@@ -353,7 +446,7 @@ func (rl *RateLimiter) Reconfigure(rate float64) {
 // holds rl.rateMu, so two writers cannot interleave their stores and leave a
 // capacity that does not match the rate.
 func (rl *RateLimiter) storeRateLocked(rate float64) {
-	newCapacity := bucketCapacity(rate)
+	newCapacity := rl.capacityFor(rate)
 
 	rl.rate.Store(rate)
 	rl.capacity.Store(newCapacity)
@@ -382,9 +475,9 @@ func (rl *RateLimiter) clampTokens(capacity int64) {
 // tokens: one second of refill, and at least one token for any positive rate.
 // A call costs a whole token, so a smaller bucket would never admit a call
 // below 1 req/s, and an AIMD rate pushed under 1 req/s could never recover. A
-// rate of zero or less keeps an empty bucket: it admits nothing.
+// rate of zero or less, or NaN, keeps an empty bucket: it admits nothing.
 func bucketCapacity(rate float64) int64 {
-	if rate <= 0 {
+	if !(rate > 0) { // also true for NaN
 		return 0
 	}
 
@@ -416,21 +509,29 @@ func (rl *RateLimiter) refill() {
 		// already in our fixed-point representation (since scale = 1e9 =
 		// nanos/sec).
 		rate := rl.rate.Load()
-		addTokens := int64(float64(elapsedNano) * rate)
+		capacity := rl.capacity.Load()
+
+		// A long idle period at a high rate can exceed the int64 range: cap
+		// the addition at the capacity before converting it.
+		addFloat := float64(elapsedNano) * rate
+
+		addTokens := capacity
+		if addFloat < float64(capacity) {
+			addTokens = int64(addFloat)
+		}
 
 		if addTokens <= 0 {
 			return
 		}
 
-		capacity := rl.capacity.Load()
-
-		// Add tokens atomically, capping at capacity.
+		// Add tokens atomically, capping at capacity. The comparison never
+		// overflows, even for a bucket of MaxBurst tokens.
 		for {
 			oldTokens := rl.tokens.Load()
 
-			newTokens := oldTokens + addTokens
-			if newTokens > capacity {
-				newTokens = capacity
+			newTokens := capacity
+			if addTokens < capacity-oldTokens {
+				newTokens = oldTokens + addTokens
 			}
 
 			if rl.tokens.CompareAndSwap(oldTokens, newTokens) {

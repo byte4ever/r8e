@@ -364,6 +364,17 @@ policy = r8e.NewPolicy[string]("rl-blocking",
 )
 ```
 
+**Taille du bucket (`Burst`).** `Burst(n)` fixe la capacité du bucket à `n` jetons, indépendamment du débit. Le bucket démarre plein : sans `Burst`, à 100 req/s, 100 appels partent d'un coup au démarrage. Avec `WithRateLimit(100, r8e.Burst(1))`, ils sont espacés dès le premier appel. `Reconfigure` et l'ajustement AIMD changent le débit, jamais une capacité fixée par `Burst`. `n` doit être compris entre 1 et `r8e.MaxBurst`, sinon `NewPolicy` panique avec `ErrRateLimitBurstOutOfRange`. Un débit nul ou négatif vide quand même le bucket, `Burst` ou pas ; un débit positif ramène ensuite la capacité de `Burst`, avec un bucket vide. En JSON, le champ s'appelle `rate_limit_burst` (il exige `rate_limit`). Un rechargement peut changer le burst d'une policy construite avec un burst, mais ne peut pas en ajouter à une policy construite sans (`ErrPatternAbsent`). Un rechargement sans ce champ garde le bucket actuel, comme pour tout champ absent : retirer `rate_limit_burst` du fichier garde le burst jusqu'à la reconstruction de la policy. Un débit NaN, comme un débit nul ou négatif, ne laisse passer aucun appel.
+
+Un bucket ne respecte un quota que sur sa fenêtre de recharge. Face à un quota de 450 appels par heure glissante, `WithRateLimit(0.125, r8e.Burst(450))` peut laisser passer jusqu'à 900 appels en une heure : 450 d'un coup, puis 450 autres pendant que le bucket se remplit. `Burst(1)` au même débit ne dépasse jamais 451.
+
+```go
+// Quota de 450 appels par heure glissante : un jeton, rechargé toutes les 8 secondes
+policy = r8e.NewPolicy[string]("quota",
+    r8e.WithRateLimit(0.125, r8e.Burst(1), r8e.RateLimitBlocking()),
+)
+```
+
 **Débit adaptatif (AIMD).** Par défaut le débit de recharge est fixe. `AIMD(...)`
 en fait une valeur de départ et un plafond ajustés par **additive-increase /
 multiplicative-decrease** — la loi de contrôle de congestion derrière TCP. Après

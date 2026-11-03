@@ -870,8 +870,8 @@ func validateSetup(setup *policySetup) {
 	}
 }
 
-// checkSetupInvariants returns the first cross-pattern misconfiguration in
-// setup, or nil if it is self-consistent. It is the single source of truth for
+// checkSetupInvariants returns the first misconfiguration in setup, or nil if
+// it is self-consistent: a cross-pattern conflict, or an out-of-range [Burst]. It is the single source of truth for
 // these rules: [validateSetup] panics with it (the options path) and
 // [BuildOptions] returns it (the config path), so an invariant added here is
 // enforced by both paths and the config path can never panic on one the options
@@ -932,6 +932,19 @@ func checkSetupInvariants(setup *policySetup) error {
 	// A time budget only gates retry and hedge; with neither it would do nothing.
 	if setup.timeBudget != nil && setup.retry == nil && setup.hedge == nil {
 		return ErrTimeBudgetWithoutConsumer
+	}
+
+	if setup.rateLimit != nil {
+		// Apply the rate-limit options to a probe config: a Burst out of range
+		// is caught here, before any pattern is built, on both paths.
+		var cfg rateLimitConfig
+		for _, opt := range setup.rateLimit.opts {
+			opt(&cfg)
+		}
+
+		if err := cfg.validate(); err != nil {
+			return err
+		}
 	}
 
 	return nil

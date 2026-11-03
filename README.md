@@ -361,6 +361,17 @@ policy = r8e.NewPolicy[string]("rl-blocking",
 )
 ```
 
+**Bucket size (`Burst`).** `Burst(n)` sets the bucket capacity to `n` tokens, apart from the rate. The bucket starts full, so without it 100 calls leave at once on start-up at 100 req/s; `WithRateLimit(100, r8e.Burst(1))` spaces them out from the first call. `Reconfigure` and the AIMD step change the rate, never a capacity set by `Burst`. `n` must be between 1 and `r8e.MaxBurst`, or `NewPolicy` panics with `ErrRateLimitBurstOutOfRange`. A rate of zero or less still empties the bucket, `Burst` or not; a later positive rate brings the `Burst` capacity back, with an empty bucket. In JSON the field is `rate_limit_burst` (requires `rate_limit`). A reload can change the burst of a policy built with one, but cannot add one to a policy built without it (`ErrPatternAbsent`). A reload without the field keeps the current bucket, like any absent field: removing `rate_limit_burst` from the file keeps the burst until the policy is rebuilt. A NaN rate, like a rate of zero or less, admits nothing.
+
+A bucket holds a quota only over its refill window. Against a quota of 450 calls per sliding hour, `WithRateLimit(0.125, r8e.Burst(450))` can let up to 900 calls through in an hour: 450 at once, then 450 more as the bucket refills. `Burst(1)` at the same rate never goes past 451.
+
+```go
+// Quota of 450 calls per sliding hour: one token, refilled every 8 seconds
+policy = r8e.NewPolicy[string]("quota",
+    r8e.WithRateLimit(0.125, r8e.Burst(1), r8e.RateLimitBlocking()),
+)
+```
+
 **Adaptive rate (AIMD).** By default the refill rate is fixed. `AIMD(...)` turns
 it into a starting and ceiling value tuned by **additive-increase /
 multiplicative-decrease** — the congestion-control law behind TCP. After each

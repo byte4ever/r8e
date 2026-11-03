@@ -158,3 +158,40 @@ func TestRateLimiterRateAdaptedHookMayReconfigure(t *testing.T) {
 
 	assert.InDelta(t, 60.0, rl.CurrentRate(), 1e-9)
 }
+
+// A burst reload racing a rate change and an AIMD step leaves a capacity that
+// matches the rate and burst that won.
+func TestRateLimiterBurstReloadRacesRateWriters(t *testing.T) {
+	t.Parallel()
+	requireRacePs(t)
+
+	const rounds = 5_000
+
+	clk := newRateLimitClock(time.Now())
+	rl := NewRateLimiter(10, clk, &Hooks{}, Burst(5), AIMD(AIMDInterval(time.Nanosecond)))
+
+	small, large := 2, 50
+
+	for i := range rounds {
+		burst := &small
+		if i%2 == 0 {
+			burst = &large
+		}
+
+		race(
+			func() { rl.applyReload(nil, burst) },
+			func() {
+				rl.Reconfigure(float64(10 + i%7))
+				clk.advance(time.Millisecond)
+				rl.RecordOutcome(ErrRateLimited)
+			},
+		)
+
+		rl.rateMu.Lock()
+		want := rl.capacityFor(rl.rate.Load())
+		got := rl.capacity.Load()
+		rl.rateMu.Unlock()
+
+		require.Equal(t, want, got, "round %d", i)
+	}
+}
