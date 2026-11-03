@@ -382,6 +382,27 @@ func TestErrorCode(t *testing.T) {
 	}
 }
 
+// isOnlyTimeout matches ErrTimeout through an Is method only, as a caller's own
+// error type might.
+type isOnlyTimeout struct{}
+
+func (isOnlyTimeout) Error() string { return "upstream timeout" }
+
+func (isOnlyTimeout) Is(target error) bool { return target == r8e.ErrTimeout }
+
+// ErrorCode reaches a sentinel through Unwrap only: an error that matches one
+// through its own Is method carries no code, wrapped or not.
+func TestErrorCodeIgnoresIsOnlyMatches(t *testing.T) {
+	t.Parallel()
+
+	require.ErrorIs(t, isOnlyTimeout{}, r8e.ErrTimeout)
+
+	assert.Empty(t, r8e.ErrorCode(isOnlyTimeout{}))
+	assert.Empty(t, r8e.ErrorCode(fmt.Errorf("call: %w", isOnlyTimeout{})))
+	assert.Equal(t, "retries_exhausted",
+		r8e.ErrorCode(fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted, isOnlyTimeout{})))
+}
+
 // Every envelope yields to every cause it carries, so a sentinel added to the
 // core reports its own code under retries or a budget with no list to update.
 func TestErrorCodeEnvelopesYieldToTheirCause(t *testing.T) {

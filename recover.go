@@ -2,7 +2,6 @@ package r8e
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime/debug"
 )
@@ -32,13 +31,10 @@ func (*PanicError) Is(target error) bool {
 	return target == ErrPanic
 }
 
-// sentinel makes a PanicError stand for [ErrPanic] in [ErrorCode].
-func (*PanicError) sentinel() resilienceError {
-	var sentinel resilienceError
-
-	errors.As(ErrPanic, &sentinel)
-
-	return sentinel
+// Unwrap returns [ErrPanic], so that [ErrorCode] reaches the sentinel and
+// reports "panic_recovered" for a recovered panic, wrapped or not.
+func (*PanicError) Unwrap() error {
+	return ErrPanic
 }
 
 // DoRecover executes fn and catches any panic, returning it as a *[PanicError]

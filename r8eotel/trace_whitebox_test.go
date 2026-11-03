@@ -34,6 +34,7 @@ func TestRejectionReason(t *testing.T) {
 		"panic_recovered": {&r8e.PanicError{Value: "boom"}, "panic_recovered"},
 		"chaos_injected":  {r8e.ErrChaosInjected, "chaos_injected"},
 		"plain_error":     {errors.New("something else"), "error"},
+		"is_only_match":   {isOnlyTimeout{}, "error"},
 	}
 
 	for name, tc := range cases {
@@ -52,3 +53,11 @@ func TestRejectionReasonWrapped(t *testing.T) {
 	wrapped := errors.Join(errors.New("outer"), r8e.ErrRetriesExhausted)
 	assert.Equal(t, "retries_exhausted", rejectionReason(wrapped))
 }
+
+// isOnlyTimeout matches r8e.ErrTimeout through an Is method only: it carries
+// no sentinel code, so its label is the generic one.
+type isOnlyTimeout struct{}
+
+func (isOnlyTimeout) Error() string { return "upstream timeout" }
+
+func (isOnlyTimeout) Is(target error) bool { return target == r8e.ErrTimeout }

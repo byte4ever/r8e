@@ -72,7 +72,9 @@ The root span carries `r8e.policy`, `r8e.attempts`, and (on error)
 `circuit_ramping` for a call shed during ramp recovery, `retries_exhausted`,
 `timeout`, `chaos_injected`, …), or `error` for an error that carries no r8e
 sentinel. A retry or budget envelope yields to the cause it wraps: a panic
-retried to exhaustion is labelled `panic_recovered`, not `retries_exhausted`. Each child carries `r8e.attempt.number`.
+retried to exhaustion is labelled `panic_recovered`, not `retries_exhausted`.
+An error type of your own that matches a sentinel only through its `Is` method
+is labelled `error`; wrap the sentinel with `%w` to get its code. Each child carries `r8e.attempt.number`.
 `TracedPolicy[T]` forwards every `Policy[T]` method (`Do`, `Name`, `Reconfigure`,
 `Metrics`, `HealthStatus`). See [`examples/02-tracing`](examples/02-tracing).
 

@@ -26,13 +26,6 @@ type (
 		msg      string
 		envelope bool
 	}
-
-	// sentinelCarrier is an error that stands for an r8e sentinel in
-	// [ErrorCode]'s walk: a resilienceError, or a type such as [PanicError]
-	// that matches a sentinel through its Is method.
-	sentinelCarrier interface {
-		sentinel() resilienceError
-	}
 )
 
 // Sentinel resilience errors.
@@ -338,8 +331,12 @@ func (e resilienceError) Error() string { return e.msg }
 // or a chaos fault wrapped in ErrRetriesExhausted reports its own code. An
 // error that carries only envelopes reports the outermost one. ErrorCode
 // returns "" when err carries no r8e sentinel, nil included.
+//
+// ErrorCode reaches a sentinel through Unwrap, never through an Is method. An
+// error type of your own that matches a sentinel only through its Is method
+// carries no code: wrap the sentinel with %w instead.
 func ErrorCode(err error) string {
-	envelope := ""
+	outermost := ""
 	cause := ""
 
 	walkSentinels(err, func(sentinel resilienceError) bool {
@@ -349,8 +346,8 @@ func ErrorCode(err error) string {
 			return true
 		}
 
-		if envelope == "" {
-			envelope = sentinel.code
+		if outermost == "" {
+			outermost = sentinel.code
 		}
 
 		return false
@@ -360,7 +357,7 @@ func ErrorCode(err error) string {
 		return cause
 	}
 
-	return envelope
+	return outermost
 }
 
 // walkSentinels calls visit on each r8e sentinel in err's tree, in the
@@ -371,12 +368,10 @@ func walkSentinels(err error, visit func(resilienceError) bool) bool {
 		return false
 	}
 
-	if carrier, ok := err.(sentinelCarrier); ok && visit(carrier.sentinel()) {
-		return true
-	}
-
 	//nolint:errorlint // walks the tree node by node, as errors.As does
 	switch wrapper := err.(type) {
+	case resilienceError:
+		return visit(wrapper)
 	case interface{ Unwrap() error }:
 		return walkSentinels(wrapper.Unwrap(), visit)
 	case interface{ Unwrap() []error }:
@@ -391,9 +386,6 @@ func walkSentinels(err error, visit func(resilienceError) bool) bool {
 		return false
 	}
 }
-
-// sentinel returns e itself: a resilienceError is its own sentinel.
-func (e resilienceError) sentinel() resilienceError { return e }
 
 // Transient wraps err to mark it as a transient (retriable) error.
 // The wrapper's message is err's message, unchanged. The mark states intent
