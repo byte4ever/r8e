@@ -22,13 +22,15 @@ Per-category checks for the policy's overload controls. Each check is phrased so
       cancel)? With no `CircuitBreakerClassifier`, each counts as a failure, and
       a run of `FailureThreshold` of them opens the breaker on a healthy
       dependency.
-- [ ] Does the policy have a rate limiter, bulkhead or adaptive concurrency? They
-      run INSIDE the breaker, so their rejections (`ErrRateLimited`,
+- [ ] Does the policy have a rate limiter, bulkhead or adaptive concurrency?
+      They run INSIDE the breaker, so their rejections (`ErrRateLimited`,
       `ErrBulkheadFull`, `ErrBulkheadTimeout`, `ErrCoDelShed`,
       `ErrConcurrencyLimited`) reach it as failures though the call never left
-      the process. A burst past the bulkhead's size opens the breaker on a
-      healthy dependency unless the classifier makes them neutral
-      (`IsLocalRejection(err)`).
+      the process. (A cooldown runs outside its own policy's breaker: its
+      `ErrCoolingDown` reaches only an outer policy's breaker, from a nested
+      policy, where `IsLocalRejection` matches it bare.) A burst past the
+      bulkhead's size opens the breaker on a healthy dependency unless the
+      classifier makes them neutral (`IsLocalRejection(err)`).
 - [ ] How does the classifier match them? `IsLocalRejection` compares by
       identity: it matches the sentinels exactly as the guards return them.
       `errors.Is(err, ErrBulkheadFull)` (and the like) also matches a WRAPPED
@@ -55,9 +57,10 @@ Per-category checks for the policy's overload controls. Each check is phrased so
       ends as neutral caller cancellations: it never opens the breaker, and
       `SlowCallRate` never sees it either.
 - [ ] With local rejections neutral and a call that ignores `ctx`: hung calls
-      keep their bulkhead slots after `WithTimeout` returned, so the bulkhead's
-      rejections are the only sign left that the dependency hangs, and they are
-      neutral. The breaker never opens.
+      keep their bulkhead slots after `WithTimeout` returned (not with
+      `WithHedge`, which frees them on the cut), so the bulkhead's rejections are
+      the only sign left that the dependency hangs, and they are neutral. The
+      breaker never opens.
 
 ## Half-open probes (a probe that never returns)
 
@@ -113,6 +116,28 @@ Per-category checks for the policy's overload controls. Each check is phrased so
       shed standing-queue latency instead of unbounded queuing?
 - [ ] With NO bulkhead, can in-flight requests pile up and exhaust the caller's
       goroutines / connection pool when the downstream slows?
+- [ ] `WithBulkhead` with `WithHedge` and `WithTimeout`: the hedge returns on the
+      cut without waiting for its attempts, so the slot is freed while the call
+      runs on. If calls can outlive their timeout (ctx ignored, or slow to stop),
+      in-flight work exceeds the cap. A bulkhead around `Do` or in an outer
+      policy frees its slot when `Do` returns too.
+
+## Shared bulkhead (several policies, one limit)
+
+- [ ] Do several policies (one per route of the same API) share one pool or
+      concurrency quota? Each with its own `WithBulkhead(n)`, the caps add up
+      above the limit. One `WithSharedBulkhead(NewBulkhead(limit))` caps them
+      together.
+- [ ] Is `WithSharedBulkhead` combined with `WithBulkhead` or
+      `WithAdaptiveConcurrency` on one policy? → build panic
+      `ErrSharedBulkheadConflict`.
+- [ ] Re-entrance: does a function run under a sharing policy call, directly or
+      indirectly, any policy on the same bulkhead (itself included)? Below
+      capacity it works; once outer calls hold every slot, the inner call is
+      refused or waits for a slot only an outer call can free, and every sharing
+      policy's callers are refused or wait while it lasts.
+- [ ] Does a test or a policy rely on `WithClock` for the shared bulkhead's max
+      wait or CoDel dwell? It keeps the clock given to `NewBulkhead`.
 
 ## Adaptive concurrency & mutual exclusion
 
@@ -129,6 +154,37 @@ Per-category checks for the policy's overload controls. Each check is phrased so
 - [ ] Blocking vs reject: is `RateLimitBlocking()` chosen when the call can wait,
       or fast-reject (`ErrRateLimited`) chosen when it must fail fast? Does the
       mode match?
+- [ ] Is the quota a window (N per minute / hour, sliding)? The bucket starts full
+      and holds one second of tokens by default (at least one), or `Burst(n)`:
+      up to burst + rate × window calls leave in one window. `Burst(450)` at
+      0.125/s lets 900 through in one hour against a 450/h quota; `Burst(1)` keeps
+      the window. (`Burst` outside `[1, MaxBurst]` panics
+      `ErrRateLimitBurstOutOfRange`; config `rate_limit_burst` needs
+      `rate_limit`, else `ErrBurstWithoutRateLimit`.)
+
+## Cooldown (the server's Retry-After as a guard)
+
+- [ ] Does the dependency answer a quota with `429` + `Retry-After`? How long are
+      the hints, and does it count refused calls against the quota? With no
+      `WithCooldown` / `WithSharedCooldown`, every call after the first `429`
+      still goes out and gets its own `429` until the hint passes (or until a
+      breaker that counts the `429` opens, for its `RecoveryTimeout`, whatever
+      the hint).
+- [ ] Do several routes / policies share that quota? A `WithCooldown` per policy
+      stops only the route that got the hint; one
+      `WithSharedCooldown(NewCooldown(…))` stops them all.
+- [ ] What arms it? By default any failed attempt whose error carries a
+      `RetryAfterProvider`, a `503` with `Retry-After` from one instance behind
+      a load balancer included: the whole policy (every sharing policy) then
+      stops for that hint. Is `CooldownIf` narrowed to the quota's `429`, and is
+      its fn safe for concurrent use?
+- [ ] `MaxCooldown` (default 1 h) vs the hints: a cap below them resumes calls
+      before the server's time (each new hint re-arms it); a cap far above lets
+      one bogus hint stop the client that long. A later hint only extends the
+      deadline; a success does not disarm it.
+- [ ] `WithCooldown` and `WithSharedCooldown` on one policy? → build panic
+      `ErrSharedCooldownConflict` (`r8econf.GetPolicy` returns it when the config
+      sets `cooldown`).
 
 ## Throttle / SLO shedding & sheddability
 
@@ -153,3 +209,9 @@ Per-category checks for the policy's overload controls. Each check is phrased so
   breaker AND no shedding → metastable amplification under brownout, no recovery.
 - `WithBulkhead` and `WithAdaptiveConcurrency` configured together → build panic
   `ErrConcurrencyLimiterConflict`.
+- A shared guard combined with the policy's own: `WithSharedBulkhead` with
+  `WithBulkhead` / `WithAdaptiveConcurrency` (`ErrSharedBulkheadConflict`), or
+  `WithSharedCooldown` with `WithCooldown` (`ErrSharedCooldownConflict`) →
+  build panic.
+- A function under a policy on a shared bulkhead visibly calling a policy on the
+  same bulkhead → the bulkhead wedges under load for every sharing policy.

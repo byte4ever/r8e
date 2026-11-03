@@ -69,16 +69,19 @@ deadline/budget knobs are sized for the service**: presence/absence of a hard
 deadline (`WithTimeout`) bounding the call; `WithTimeout` sized vs downstream
 p50/p99 (too tight → false timeouts; too loose → no real protection, blows the
 upstream SLA); the retry×attempt-timeout worst-case latency vs the budget;
-`WithTimeBudget` capping the retry+hedge SUM vs a per-attempt `PerAttemptTimeout`;
-deadline propagation (`PropagateDeadline` + `httpx.InjectDeadline`) for fan-out;
-`RespectInboundDeadline` for ingress; deadline attribution (whether
-`WithTimeout`, `PerAttemptTimeout` and a budget end strictly before the callers'
-deadline; one that does not arms no timer, so a hang ends with the caller's
-context error and no `OnTimeout`); `AdaptiveTimeout` for variable latency;
-the hedge DELAY sized vs p50/p95 (`AdaptiveHedge`); and the required-companion
-timeout rules whose absence panics `NewPolicy` (`WithCoalesce` and
-`RefreshAhead` REQUIRE `WithTimeout`; `WithTimeBudget` requires a retry/hedge
-consumer; `PropagateDeadline`/`RespectInboundDeadline` require `WithTimeBudget`).
+`WithTimeBudget` capping the retry+hedge SUM vs a per-attempt
+`PerAttemptTimeout`; deadline propagation (`PropagateDeadline` +
+`httpx.InjectDeadline`) for fan-out; `RespectInboundDeadline` for ingress;
+deadline attribution (whether `WithTimeout`, `PerAttemptTimeout` and a budget
+end strictly before the callers' deadline; one that does not arms no timer, so a
+hang ends with the caller's context error and no `OnTimeout`); the error a call
+ends with at an r8e deadline (`ErrTimeout`, `ErrAttemptTimeout`,
+`ErrTimeBudgetExceeded` and what each wraps) wherever something matches on it;
+`AdaptiveTimeout` for variable latency; the hedge DELAY sized vs p50/p95
+(`AdaptiveHedge`); and the required-companion timeout rules whose absence panics
+`NewPolicy` (`WithCoalesce` and `RefreshAhead` REQUIRE `WithTimeout`;
+`WithTimeBudget` requires a retry/hedge consumer;
+`PropagateDeadline`/`RespectInboundDeadline` require `WithTimeBudget`).
 
 OUT OF SCOPE — do NOT score these; note at most once as NOTED "out of scope —
 defer to <axis>":
@@ -139,7 +142,24 @@ here; do not dismiss an observation as "probably not serious."
   SLA-bound path with no `WithTimeBudget` lets the SUM run past the budget even if
   each attempt is fine.
 - Per-attempt vs total: is the deadline a per-attempt `PerAttemptTimeout` (each
-  attempt gets the full window) or a total cap? They bound different things.
+  attempt gets the full window) or a total cap? They bound different things. Is
+  `PerAttemptTimeout` strictly shorter than `WithTimeout` and the budget? One
+  they end first never cuts an attempt.
+- Cooperative budget: without `PropagateDeadline`, the budget's gate compares
+  the next backoff alone with what is left, so an attempt can start with little
+  of the budget left and run up to `WithTimeout`. With `WithTimeout` ≤ budget,
+  `PropagateDeadline` changes nothing and the timeout cuts with `ErrTimeout`.
+- Error shape at an r8e deadline, wherever a `RetryIf`, classifier,
+  `FallbackFunc`, alert or caller matches on it: at a binding `WithTimeout`, an
+  error the fn returns once the timeout has passed is `ErrTimeout` (not the
+  fn's own client or socket timeout error); a `PerAttemptTimeout` cut carries
+  `ErrAttemptTimeout` and matches `context.DeadlineExceeded` only when the
+  attempt's own error does; `ErrTimeBudgetExceeded` wraps the cut attempt's
+  error only when it was the last attempt allowed (otherwise
+  `context.DeadlineExceeded`); earlier attempts' errors reach only `OnRetry`.
+- httpx body read after `Do`: `WithTimeout`, `WithHedge`, `PerAttemptTimeout`
+  and a `PropagateDeadline` budget cut the body when `Do` returns (scored by the
+  call axis; note it).
 - `AdaptiveTimeout` where latency is variable: a static ceiling on a service with
   a wide/unknown latency distribution leaves the timeout either always too tight
   or always too loose.
@@ -179,7 +199,8 @@ deadline (unbounded chain on a critical path), worst-case retry chain exceeding
 the SLA, a `WithTimeout` so loose a single slow call blows the SLA, a hedge delay
 below p50 doubling load, a required-companion timeout missing so `NewPolicy`
 panics at boot, an r8e deadline that never binds because the callers' comes
-first.
+first, a handler or fallback keyed on an error shape the deadline never
+produces.
 
 ### Phase 3 — Scoring
 

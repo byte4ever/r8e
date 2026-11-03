@@ -34,6 +34,23 @@ doubt between two levels, the one with a concrete propagation path wins.
    non-degradable or critical path. On a DEGRADABLE read where a breaker IS present
    and the chain falls back acceptably, an absent bulkhead is IMPORTANT #2, not
    this BLOCKING: the breaker opening plus the fallback bound the pile-up.
+4. **A shared guard combined with the policy's own.** `WithSharedBulkhead(bh)`
+   with `WithBulkhead(32)` or `WithAdaptiveConcurrency(…)`, or
+   `WithSharedCooldown(cd)` with `WithCooldown()` (in code, or a config
+   `cooldown` next to a code `WithSharedCooldown`). Propagation: `NewPolicy`
+   panics `ErrSharedBulkheadConflict` / `ErrSharedCooldownConflict`
+   (`r8econf.GetPolicy` returns the error). Symptom: the service cannot start,
+   or the policy is never built. Remediation: keep the shared guard alone in its
+   slot; `r8e.ValidateOptions` reports the conflict before `NewPolicy`.
+5. **Re-entrant shared bulkhead.** The function run under a policy on a shared
+   bulkhead visibly calls another policy on the same bulkhead (one route of an
+   API client calling another route of the same client). Propagation: below
+   capacity the inner call gets a slot; under load the outer calls hold every
+   slot, the inner calls are refused or wait for a slot only an outer call can
+   free. Symptom: every sharing policy refuses or queues its callers while those
+   calls last. Remediation: do not share the bulkhead across the nested call
+   (separate bulkheads, or call the downstream directly). When the call graph is
+   UNKNOWN but nesting is plausible, IMPORTANT #14.
 
 ## IMPORTANT — justified concern, may be accepted with explicit documented risk
 
@@ -107,6 +124,54 @@ doubt between two levels, the one with a concrete propagation path wins.
    taken, the next call counts them as a failed probe and reopens the breaker,
    and with `RecoveryBackoffMultiplier` the recovery timeout grows on every
    cycle. Remediation: `d` above the worst admission-to-report span.
+10. **No cooldown on a quota with long `Retry-After`.** The context states that
+    the dependency answers a quota with `429` and hints of minutes or more, or
+    that refused calls count against the quota, and the policy has no
+    `WithCooldown` / `WithSharedCooldown`. Propagation: every call after the
+    first `429` still goes out and gets its own `429` until the hint passes; a
+    breaker that counts the `429` opens only for its `RecoveryTimeout`, then
+    probes again, inside the hint when the hint is longer. Symptom: the client
+    keeps the quota exhausted by its own refused calls (or gets banned, when the
+    context says the server does that). Remediation:
+    `WithCooldown(MaxCooldown(cap), CooldownIf(is429))`. Scope: with short hints
+    (seconds), nothing counted, and a breaker that counts the `429` or a retry
+    that does not re-send hinted errors, an absent cooldown is NOTED #9.
+11. **Per-policy guard on a limit several policies share.** The context states
+    that several routes / policies share one pool or concurrency quota (or one
+    rate quota answering `Retry-After`), and each carries its own
+    `WithBulkhead(n)` (or its own `WithCooldown`). Propagation: the per-policy
+    caps add up above the shared limit, so a burst across routes exhausts the
+    pool; or one route's hint stops only that route while the others keep
+    sending into the quota. Remediation: one `WithSharedBulkhead(NewBulkhead(
+    limit))` / one `WithSharedCooldown(NewCooldown(…))` attached to every
+    policy. Scope: requires the sharing to be stated.
+12. **Cooldown armed by the wrong errors.** `WithCooldown()` with no `CooldownIf`
+    on a dependency that also sends `Retry-After` on responses that are not the
+    quota (a `503` from one overloaded instance behind a load balancer).
+    Propagation: one instance's hint stops the whole policy (every sharing
+    policy) for that hint, up to `MaxCooldown`, while the other instances are
+    healthy. Remediation: `CooldownIf` narrowed to the quota's `429` (safe for
+    concurrent use). Scope: requires those other hints to be stated; otherwise
+    nothing.
+13. **Bulkhead that does not cap calls outliving their timeout.** `WithBulkhead(n)`
+    sized to a hard downstream cap (a connection pool, a concurrency quota),
+    with `WithHedge` and `WithTimeout`, on a call that ignores `ctx` or whose
+    `ctx` handling is UNKNOWN. Propagation: the hedge returns on the cut without
+    waiting for its attempts, the bulkhead frees the slot, the call runs on; new
+    calls take the slot; in-flight work exceeds `n` and the downstream cap.
+    Remediation: drop `WithHedge` from that policy, or a call that stops on its
+    `ctx`. Scope: when the call honors `ctx`, NOTED #10.
+14. **Shared bulkhead whose call graph is unknown.** A `WithSharedBulkhead`
+    policy whose function goes through a client that may call another policy on
+    the same bulkhead, not shown. The finding is "confirm no policy on this
+    bulkhead is called from inside it" (BLOCKING #5 when shown).
+15. **Rate-limit bucket above a windowed quota.** The context states a quota per
+    window (450 per hour, sliding), and the bucket lets more through in one
+    window: `WithRateLimit(0.125, Burst(450))` → up to 900 calls in one hour.
+    Propagation: the quota is breached on the first burst after idle; the
+    server refuses (or bans). Remediation: `Burst(1)`, or a burst that keeps
+    burst + rate × window under the quota. Scope: requires the window to be
+    stated; a per-second rate limit with the default bucket is not a finding.
 
 ## NOTED — observation for awareness, no action required
 
@@ -128,6 +193,18 @@ doubt between two levels, the one with a concrete propagation path wins.
 7. No `HalfOpenProbeLease`, and whether the call honors `ctx` is UNKNOWN below
    the artifact's boundary — note "confirm the call honors `ctx`, or add the
    lease"; the call axis scores the `ctx` itself.
+8. `MaxCooldown` left at its 1 h default, or not traced to the stated hints: a
+   cap below the hints resumes calls early (each new hint re-arms), a cap far
+   above lets one bogus hint stop the client that long. Flag the sizing.
+9. No cooldown, and the `Retry-After` hints are short (seconds), refused calls
+   are not counted, and a breaker counts the `429` (or the retry does not re-send
+   hinted errors): a few calls per replica go into the hint before the breaker
+   opens. Note `WithCooldown` as an option; no demonstrated harm.
+10. `WithBulkhead` with `WithHedge` and `WithTimeout`, on a call that honors
+    `ctx`: the slot is freed on the cut, but the call stops on its context right
+    after. Note that the bulkhead does not cap calls past their timeout.
+11. A shared bulkhead keeps the clock given to `NewBulkhead`; a test that drives
+    the policy's `WithClock` does not drive its max wait or CoDel dwell.
 
 ## Anti-calibration (do NOT do this)
 
@@ -141,6 +218,11 @@ doubt between two levels, the one with a concrete propagation path wins.
 - Calling an absent `HalfOpenProbeLease` BLOCKING, or a finding at all when the
   call honors `ctx` under `WithTimeout`: it is an opt-in safety net, and the
   `ctx` defect behind a hung probe is the call axis's.
+- Calling an absent cooldown IMPORTANT when the hints are short and the
+  context states nothing about quota counting or long hints: it is NOTED #9.
+- Counting `ErrCoolingDown` against this policy's own breaker: the cooldown
+  runs outside it, so the breaker never sees its refusals. Only an outer
+  policy's breaker can (IMPORTANT #7 when the nested refusal is passed on bare).
 - Calling an absent or loose `CircuitBreakerClassifier` BLOCKING: the spurious
   trip needs a run of consecutive errors the artifact cannot demonstrate — it is
   IMPORTANT #5 at most (and a classifier that hides a nested policy's

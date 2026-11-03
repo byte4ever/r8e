@@ -5,7 +5,8 @@ description: >-
   degraded VALUE a policy substitutes and the cached/coalesced result it serves.
   Judges fallback value safety (fabricated write success, nil-deref values,
   sentinel discrimination), cache/coalesce key correctness (collisions, empty
-  keys), ttl vs change interval, stale-if-error, negative cache, and refresh-ahead.
+  keys), ttl vs change interval, stale-if-error, negative cache, refresh-ahead,
+  and the base context of the detached coalesced call and reload.
   Use to review whether the degraded values and cached results a policy returns are
   SAFE and CORRECT. REJECT by default.
 ---
@@ -82,6 +83,12 @@ This reviewer judges ONLY the **degraded-value and cached-result layer**:
 - `WithCoalesce` key correctness (collapsing DISTINCT requests is a correctness
   bug) and its `WithTimeout` requirement (a correctness companion). Miss stampede
   on a hot key with no coalescing.
+- The detached calls (the coalesced call, the `RefreshAhead` reload) and
+  `WithBaseContext`: whether they outlive the policy's owner, and whether a base
+  context that ends before every holder stops makes every coalesced miss fail
+  with `context.Canceled`.
+- A cache or coalesce on an httpx `Client`: the shared value is an
+  `*http.Response`, one body stream for every caller.
 
 OUT OF SCOPE — do NOT score these; note at most once as NOTED "out of scope —
 defer to <axis>":
@@ -129,8 +136,10 @@ here; do not dismiss an observation as "probably not serious."
   value is only appropriate for shedding (or only for genuine failure), does the
   func test `errors.Is(err, ErrCircuitOpen/ErrRateLimited/…)` rather than firing
   blindly on every error? (`errors.Is`, which also matches a wrapped sentinel;
-  `IsLocalRejection` matches only five bare sentinels and is for the breaker
-  classifier.)
+  `IsLocalRejection` matches only six bare sentinels and is for the breaker
+  classifier.) With a cooldown: does it handle `ErrCoolingDown`, and the
+  server's error that a retry stopped by the cooldown or by `HonorRetryAfter`
+  returns as is (not `ErrRetriesExhausted`)?
 - `FallbackFunc` keyed on r8e deadline sentinels: does it degrade only on
   `ErrTimeout` / `ErrTimeBudgetExceeded`? A hang that the callers' deadline ends
   first (or on the same instant) returns the caller's context error instead,
@@ -165,6 +174,16 @@ here; do not dismiss an observation as "probably not serious."
   fallback value (only genuine successes)? Confirm the reliance is correct.
 - Miss stampede: is there a hot key with no `WithCoalesce`, so a single miss lets
   N concurrent callers all hit the origin at once?
+- Base context: with `WithCoalesce` or `RefreshAhead`, is there a
+  `WithBaseContext`? Without it, the detached calls outlive the client's
+  shutdown, bounded only by `WithTimeout`. With it, does the context end only
+  when every holder of the policy stops? Once it has ended, every coalesced call
+  that misses the cache fails at once with `context.Canceled`, for every holder,
+  for good (a cache hit, `StaleIfError` or `WithFallback` still answers);
+  reloads stop silently; a policy or cache wrapping this one still caches that
+  `context.Canceled`.
+- httpx `Client` with `WithCache` or `WithCoalesce`: every sharing caller gets
+  the same `*http.Response` and reads the same body stream.
 
 **Minimum threshold: 15 observations** for a non-trivial artifact. If fewer,
 explicitly justify triviality in writing.
@@ -178,15 +197,18 @@ key surface is structurally bounded. Prioritise: fallback fabricates a write
 success (caller believes the effect happened), nil fallback value the caller
 derefs (nil-panic), keyFn collision serving one caller's data to another, ttl too
 long serving stale data as authoritative, `FallbackFunc` firing its degraded value
-on a genuine downstream error it should surface.
+on a genuine downstream error it should surface, a base context that ends while
+holders remain.
 
 ### Phase 3 — Scoring
 
 For each observation and scenario assign BLOCKING / IMPORTANT / NOTED. Scoring
 rests on a demonstrated failure mode, not aesthetic preference or a "best
 practice" invoked without a concrete case. A fallback that fabricates a successful
-result for a failed non-idempotent WRITE, or a cache/coalesce keyFn that COLLIDES
-distinct requests and returns one caller's data to another, is BLOCKING.
+result for a failed non-idempotent WRITE, a cache/coalesce keyFn that COLLIDES
+distinct requests and returns one caller's data to another, a cache or coalesce
+on an httpx `Client` (one response body shared by every caller), or a
+`WithBaseContext` visibly shorter-lived than the policy's holders, is BLOCKING.
 
 ### Phase 4 — Verdict
 

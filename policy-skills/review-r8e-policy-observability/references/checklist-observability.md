@@ -38,7 +38,11 @@ pre-dismiss.
 - [ ] Is `WithHooks(&Hooks{…})` present at all?
 - [ ] For each present mode, is the matching hook wired? Breaker →
       `OnCircuitOpen`; retry → `OnRetry`; hedge → `OnHedge`; fallback →
-      `OnFallbackUsed`; bulkhead → `OnBulkheadRejected`; etc.
+      `OnFallbackUsed`; bulkhead → `OnBulkheadRejected`; cooldown →
+      `OnCoolingDown` (each refusal, counter `CoolingDown`) and
+      `OnCooldownArmed(d)` (when a hint arms it, and for how long; no counter);
+      `PerAttemptTimeout` → `OnAttemptTimeout(attempt)` (counter
+      `AttemptTimeouts`; a cut is not an `OnTimeout`); etc.
 - [ ] A present failure mode with NO hook is blind to its own events — the event
       reaches no log/alert. (NOT "no metrics": metrics counters increment
       automatically. The gap is hooks→logging/alerting.)
@@ -86,6 +90,27 @@ pre-dismiss.
       the pod reports Ready while broken (the opposite miss; IMPORTANT).
 - [ ] Default reminder: an open breaker is REPORTED but does NOT pull the pod
       unless `WithReadinessImpact()` is set. Informational ≠ readiness-gating.
+- [ ] Only a critical condition pulls a gated pod. `cooling_down` (an armed
+      cooldown) is degraded, never critical, like `bulkhead_full` or
+      `retry_budget_exhausted`: does anyone expect readiness to drop while the
+      server's Retry-After holds?
+
+## Shared guards (one bulkhead or budget, several policies)
+- [ ] With `WithSharedBulkhead` (or a shared retry / concurrency budget), every
+      sharing policy reports the same gauges (`BulkheadInUse`, `BulkheadCap`,
+      `BulkheadQueued`, `CoDelLoad`) and the same `bulkhead_full` /
+      `bulkhead_overloaded` conditions. Does a dashboard or alert SUM them across
+      policies (it multiplies the in-use count by the number of policies)?
+      Aggregate with max. Each policy's counters and hooks are its own calls.
+
+## Error text & codes
+- [ ] Does a log query, metric label or alert match `err.Error()` text, or the
+      `permanent:` / `transient:` prefix? Since v0.13.0 `Permanent` and
+      `Transient` add no prefix: such a match never fires. Use `IsPermanent` /
+      `IsTransient`, or `r8e.ErrorCode(err)` for labels.
+- [ ] `r8e.ErrorCode` reaches a sentinel through `Unwrap` only: an error type of
+      the service's own that matches a sentinel through its `Is` method carries
+      no code.
 
 ## OTel wiring
 - [ ] Does the service context mention an OTel / OpenTelemetry / metrics stack?
@@ -94,22 +119,43 @@ pre-dismiss.
 - [ ] Absence in a non-OTel shop is at most NOTED; absence where the context says
       "we run OTel" is a real gap.
 - [ ] `r8eotel.Register` exports `r8e.policy.circuit_neutral_outcomes` and
-      `r8e.policy.circuit_stale_outcomes` with the other counters. With
+      `r8e.policy.circuit_stale_outcomes` with the other counters, and (r8eotel
+      v0.13.0) `r8e.policy.attempt_timeouts` and `r8e.policy.cooling_down`. With
       `RampRecovery`, do dashboards or alerts keyed on `r8e.rejection_reason`
       include `circuit_ramping` (a call shed during ramp recovery)?
+- [ ] `r8e.rejection_reason` is `r8e.ErrorCode(err)` since v0.13.0. Does a
+      dashboard or alert filter on `retries_exhausted` to catch retried panics
+      or chaos faults (now `panic_recovered` / `chaos_injected`)? Does it miss
+      the new `attempt_timeout` and `cooling_down` values?
 
 ## Config-vs-code & hot reload
-- [ ] Which chosen patterns are CODE-ONLY (carry a func/closure): `WithCoalesce`,
-      `WithCache`, `WithChaos`, all classifiers (`RetryIf`, `ThrottleClassifier`,
-      `AIMDClassifier`, `SLOClassifier`, `CircuitBreakerClassifier`),
-      `WithFallbackFunc`, `Parent`/shared-budget links, `ChaosEnabled`?
+- [ ] Which chosen patterns are CODE-ONLY (carry a func/closure or a shared
+      object): `WithCoalesce`, `WithCache`, `WithChaos`, all classifiers
+      (`RetryIf`, `ThrottleClassifier`, `AIMDClassifier`, `SLOClassifier`,
+      `CircuitBreakerClassifier`, `CooldownIf`), `WithFallbackFunc`,
+      `Parent`/`ShieldParent`/shared-budget links, `WithSharedBulkhead`,
+      `WithSharedCooldown`, `WithBaseContext`, `ChaosEnabled`? (Config-expressible
+      since v0.13.0: `cooldown`, the cap of an own cooldown; `rate_limit_burst`;
+      `retry.honor_retry_after`.)
 - [ ] When a `PolicyConfig` JSON is emitted, those patterns are SILENTLY ABSENT —
       is that acknowledged, or will an operator think the JSON is the whole policy?
 - [ ] Do operators expect to RETUNE knobs at runtime without redeploy? If so, are
       the retunable params config-expressible (`r8econf`)?
 - [ ] `Reconfigure` can only retune patterns the policy ALREADY has — it CANNOT
       add or remove a pattern (configuring an absent one → `ErrPatternAbsent`). Is
-      anyone relying on `Reconfigure` to introduce a pattern?
+      anyone relying on `Reconfigure` to introduce a pattern? A
+      `rate_limit_burst` on a policy built without `Burst` is absent too, and
+      removing the field keeps the current burst until a rebuild.
+- [ ] Does the reloaded config carry a bulkhead setting (size, max wait, queue
+      depth, CoDel) for a `WithSharedBulkhead` policy, or a `cooldown` for a
+      `WithSharedCooldown` one? `Reconfigure` is transactional: it returns
+      `ErrSharedBulkheadConflict` / `ErrSharedCooldownConflict` and applies
+      NOTHING of that reload. The shared guard is retuned with
+      `Bulkhead.Reconfigure` / `Cooldown.SetMaxCooldown`, for every sharing
+      policy at once.
+- [ ] `r8econf.GetPolicy` returns a misconfiguration (a conflict with a code
+      option, such as `WithSharedCooldown` next to a config `cooldown`) as an
+      error instead of panicking. Is the error handled?
 
 ## Chaos kill-switch (the second red line)
 - [ ] Is `WithChaos(…)` present?

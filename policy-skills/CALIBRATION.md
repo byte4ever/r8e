@@ -230,6 +230,45 @@ Converged in one round. No fixture configures `NegativeCache`, so the new check
 could not fire: the run shows that the edit moves no verdict, not that the
 check catches its case.
 
+## v1.3.0 — re-pin to r8e v0.13.0 (cooldown, shared bulkhead, httpx response classifier, error codes)
+
+r8e v0.13.0 adds `WithCooldown` / `WithSharedCooldown`, `WithSharedBulkhead`,
+`WithBaseContext`, `ShieldParent`, `HonorRetryAfter`, `ErrAttemptTimeout`, the
+rate-limit `Burst`, `ErrorCode`, `ValidateOptions` and the httpx
+`NewResponseClient`. It changes the Retry-After jitter, the attribution of an
+error returned at the binding timeout, and the r8eotel `rejection_reason`
+labels. Every axis gained content (SKILL.md, checklist, severity rubric), as
+did `api-constraints.md`, the decision matrix and the questionnaire.
+`fixtures/good.md` changed one line: its 429 hint is now bounded (1 to 5 s,
+from a per-client limit, refused calls not counted), so the new cooldown check
+stays NOTED on it. `poor.md` and `mediocre.md` did not change.
+
+Ten blind runs, same method: fresh isolated sub-agents, artifacts under
+neutral names with the expected-verdict header stripped, the r8e API skill at
+v0.13.0. Since every axis changed, `good.md` ran on all six axes; `poor.md` ran
+on overload and retry, the two axes whose content grew most; the
+attribution-inversion test ran on `mediocre.md` with the retry axis.
+
+### Round 1 (converged)
+
+| Test | Expected | Got | OK? |
+|---|---|---|---|
+| good → call | APPROVE | APPROVE | ✅ |
+| good → timeouts | APPROVE | APPROVE (`PerAttemptTimeout` NOTED) | ✅ |
+| good → retry | APPROVE | APPROVE (interface-shaped `RetryIf` NOTED) | ✅ |
+| good → overload | APPROVE | APPROVE (no cooldown, NOTED #9) | ✅ |
+| good → fallback | APPROVE | APPROVE (3 NOTED) | ✅ |
+| good → observability | APPROVE | APPROVE (6 NOTED) | ✅ |
+| poor → overload | REJECT | REJECT (2 BLOCKING: metastable amplification with no breaker; no concurrency cap) | ✅ |
+| poor → retry | REJECT | REJECT (3 BLOCKING: unjittered retry with no budget on a shared gateway; permanent 402/400 retried; hedge × retry with no concurrency budget) | ✅ |
+| mediocre → retry "principal engineer" | CONDITIONAL | CONDITIONAL (2 IMPORTANT: no retry budget on a shared dependency; 404 not classified permanent) | — |
+| mediocre → retry "intern" | CONDITIONAL | CONDITIONAL, the same two IMPORTANT | ✅ **identical** |
+
+Converged in one round: poor → REJECT, mediocre → CONDITIONAL APPROVE, good →
+APPROVE on every axis, attribution-inversion identical. The new cooldown check
+fired on `good.md` at NOTED as intended, and on `poor.md` (overload) at
+IMPORTANT for a 429 nothing reacts to.
+
 ## Spec deployment checklist (Appendix)
 
 - [x] Disposition opens with "Default verdict: REJECT" (every axis + orchestrator)

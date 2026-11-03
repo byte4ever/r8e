@@ -21,10 +21,15 @@ do not pre-dismiss.
       from a genuine downstream error, when the degraded value is only appropriate
       for one of them? A func that returns the degraded value on EVERY error may
       mask a real failure that must surface.
-- [ ] Does the func use `IsLocalRejection` to spot shedding? It matches only five
+- [ ] Does the func use `IsLocalRejection` to spot shedding? It matches only six
       bare sentinels (not `ErrCircuitOpen`, `ErrThrottled`, `ErrSLOShed`, nor a
       wrapped one): it is for the breaker classifier. A fallback uses
       `errors.Is`.
+- [ ] With a cooldown (`WithCooldown` / `WithSharedCooldown`): does a func meant
+      for shedding handle `ErrCoolingDown` (the policy's own refusal while the
+      server's Retry-After holds)? And, under `WithRetry`, the server's error
+      that the loop returns AS IS when the cooldown or `HonorRetryAfter` stops
+      it: a func keyed on `ErrRetriesExhausted` misses it.
 - [ ] Does the func degrade only on `ErrTimeout` / `ErrTimeBudgetExceeded`? A
       call that the callers' deadline ends first, or on the same instant,
       returns the caller's context error (`context.DeadlineExceeded`), not the
@@ -71,9 +76,31 @@ do not pre-dismiss.
       -timeouts, so NOTE it cross-axis.
 - [ ] Is there a HOT key with no `WithCoalesce` so a single miss lets N concurrent
       callers stampede the origin? (Missed protection, not a wrong-result bug.)
+- [ ] Is `WithCache` or `WithCoalesce` on an httpx `Client`? The shared value is
+      an `*http.Response`: every caller gets the same response and the same body
+      stream (one reads it, the others read nothing or interleave).
+
+## Detached calls & base context (WithBaseContext)
+- [ ] With `WithCoalesce` or `RefreshAhead` and no `WithBaseContext`: the
+      detached calls ignore the caller's cancellation and outlive the client's
+      shutdown, bounded only by `WithTimeout`. Does the context say shutdown must
+      stop in-flight work (resources closed under them)?
+- [ ] With `WithBaseContext(ctx)`: does `ctx` end only when EVERY holder of the
+      policy stops (the client's own lifetime), or earlier (a request context, a
+      per-job context on a policy shared across jobs)? Once it has ended, every
+      coalesced call that misses the cache fails at once with `context.Canceled`,
+      for every holder and for good; a cache hit, `StaleIfError` or
+      `WithFallback` still answers; calls with no coalescing key still run.
+- [ ] Is the policy with a base context wrapped by another policy or cache? This
+      policy stores no negative entry once the base has ended, but the wrapper
+      caches the `context.Canceled` it returns.
 
 ## Red lines (any one is BLOCKING on its own)
 - A fallback that fabricates a SUCCESSFUL result for a failed non-idempotent WRITE
   — callers believe the side effect succeeded (a silent incident).
 - A cache or coalesce keyFn that COLLIDES distinct requests — returning one
   caller's data to another (wrong result served as authoritative).
+- `WithCache` or `WithCoalesce` on an httpx `Client` (one `*http.Response` and
+  body stream shared by every caller).
+- `WithBaseContext` given a context visibly shorter-lived than the policy's
+  holders (every coalesced miss fails with `context.Canceled` once it ends).

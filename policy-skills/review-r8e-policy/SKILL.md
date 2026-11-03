@@ -102,9 +102,9 @@ a policy).
 |---|---|
 | a `Do(…)` body / described downstream call (always present) | review-r8e-policy-call (always) |
 | any `WithTimeout` / `WithTimeBudget` / latency numbers / a deadline | review-r8e-policy-timeouts (always baseline) |
-| `WithRetry` / `WithHedge` / a shared dependency / error taxonomy | review-r8e-policy-retry (always baseline) |
-| `WithCircuitBreaker` / `WithBulkhead` / `WithRateLimit` / `WithSLO` / capacity numbers | review-r8e-policy-overload (always baseline) |
-| `WithFallback` / `WithCache` / `WithCoalesce` / degraded-value question | review-r8e-policy-fallback (always baseline) |
+| `WithRetry` / `WithHedge` / a shared dependency / error taxonomy / `Retry-After` | review-r8e-policy-retry (always baseline) |
+| `WithCircuitBreaker` / `WithBulkhead` / `WithSharedBulkhead` / `WithRateLimit` / `WithCooldown` / `WithSLO` / capacity numbers | review-r8e-policy-overload (always baseline) |
+| `WithFallback` / `WithCache` / `WithCoalesce` / `WithBaseContext` / degraded-value question | review-r8e-policy-fallback (always baseline) |
 | `WithHooks` / naming / `WithReadinessImpact` / `r8econf` / OTel | review-r8e-policy-observability (always baseline) |
 
 ### Inclusion rule under uncertainty

@@ -8,7 +8,8 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       round number?
 - [ ] Does the WORST-CASE sum (attempts × per-attempt latency + cumulative
       backoff) fit the call's latency budget / SLA? A 5× ConstantBackoff(200ms)
-      adds ≥800ms of backoff alone — does the budget allow it?
+      adds ≥800ms of backoff alone — does the budget allow it? A Retry-After
+      wait can reach 1.1 × `MaxDelay` (the hint is capped, then spread upward).
 - [ ] Is `PerAttemptTimeout` set, and does it bound each attempt independently of
       the whole-call deadline?
 - [ ] Is `PerAttemptTimeout` STRICTLY shorter than the time the callers' deadline
@@ -40,6 +41,12 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       classes (not invert the test, not miss a class, not over-retry)?
 - [ ] Are any genuinely-transient errors mis-classified Permanent (fast-fails a
       retriable fault)?
+- [ ] With `PerAttemptTimeout`: does a `RetryIf` refuse `context.DeadlineExceeded`
+      (to stop on the caller's deadline)? It then also refuses r8e's own
+      per-attempt cut whenever the attempt's error matches it, so the hung
+      attempt is never retried. Tell them apart with `errors.Is(err,
+      ErrAttemptTimeout)` (the caller's deadline also ends the retry loop on
+      its own).
 
 ## Amplification on shared dependencies
 - [ ] Is the dependency SHARED (third-party / internal hit by every replica)? A
@@ -49,6 +56,13 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       self-amplifying retry storm (every replica piles `maxAttempts`× load).
 - [ ] Multiple policies under one gateway: are budgets nested via `Parent` so a
       storm in one leaf throttles its siblings?
+- [ ] Nested budgets where one route can die on its own and the siblings must
+      keep retrying: is `ShieldParent()` on each child? Without it, the dead
+      route's failures (first attempts included) keep draining the parent. With
+      it, a dead child drains the parent by at most half its own capacity,
+      rounded up; the siblings keep retrying only if the parent stays above half
+      its capacity after that drain. Is the parent sized for it? A flapping
+      child (successes in between) is not bounded.
 - [ ] Is metastable failure possible — retries keep the dependency saturated so it
       never recovers even after the trigger clears?
 
@@ -64,10 +78,26 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
       into an explicit "back off" signal → throttle stampede.
 - [ ] Is the httpx adapter used so 429/503 carry Retry-After AND 4xx classify
       Permanent without hand-written code?
+- [ ] With `httpx.NewResponseClient`: does the classifier return a `StatusError`
+      (or a `RetryAfterError`) for the throttling response? The adapter adds no
+      `StatusError` and reads no `Retry-After` on that path: a plain error drops
+      the hint, so the retry uses its own backoff (and no cooldown arms).
 - [ ] Does `MaxDelay`, or the time left under `WithTimeout` / the time budget, sit
-      BELOW the Retry-After hints? `MaxDelay` caps the hint too, so the retry
-      re-sends early, into the server's explicit "back off". Such errors should
-      not be retried (`RetryIf` on `RetryAfterProvider`) unless the hint fits.
+      BELOW the Retry-After hints? `MaxDelay` caps the hint, then the wait is
+      spread upward by up to 10%: a hint at or below `MaxDelay` is a floor, a
+      hint above it is re-sent early, into the server's explicit "back off".
+      Such errors should not be re-sent early: `HonorRetryAfter()` stops on the
+      hints above `MaxDelay` only (and returns the error as is, so the caller
+      reads the full hint), `RetryIf` on `RetryAfterProvider` stops on every
+      hinted error.
+- [ ] `HonorRetryAfter()` without `MaxDelay`? It has no effect: every hint is
+      waited in full, up to the deadline. Note that its stop still debits a retry
+      budget, where a `RetryIf` refusal leaves it untouched.
+- [ ] With a cooldown in the policy (`WithCooldown` / `WithSharedCooldown`): no
+      retry leaves while it is armed, whoever armed it, and the loop returns the
+      server's last error as is, not `ErrRetriesExhausted`. Does the retry
+      tuning (attempts kept for 429s) or a caller expecting
+      `ErrRetriesExhausted` assume otherwise?
 - [ ] Is a throttling status (`429`) both marked `Permanent` AND expected to be
       honored? `Permanent` stops the retry, so the Retry-After is never used —
       the taxonomy contradicts itself.
@@ -75,9 +105,11 @@ to the *hazard* is an observation to score. Enumerate; do not pre-dismiss.
 ## Cross-axis notes (note once, defer; do NOT score here)
 - [ ] Does the fn call a nested r8e policy? Exhausted attempts wrap its rejection
       (`retries exhausted: bulkhead full`), which the outer breaker counts; a
-      `RetryIf` returning false or an exhausted retry budget passes it on bare,
-      which `IsLocalRejection` makes neutral. Note it, defer the counting to
-      review-r8e-policy-overload.
+      `RetryIf` returning false, an exhausted retry budget, a `HonorRetryAfter`
+      stop or an armed cooldown passes it on bare, which `IsLocalRejection` makes
+      neutral. Note it, defer the counting to review-r8e-policy-overload.
+- [ ] Is a cooldown NEEDED (a quota with long hints, several routes on one
+      quota)? That is the overload axis's; note and defer.
 - [ ] Retrying a WRITE also amplifies the side effect — note it, defer the
       duplicate-side-effect SAFETY verdict to review-r8e-policy-call.
 - [ ] The whole-call TIMEOUT / TimeBudget *sizing* the retries must fit → defer to

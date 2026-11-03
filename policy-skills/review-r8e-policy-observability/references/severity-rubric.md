@@ -44,7 +44,10 @@ When in doubt between two levels, the one with a concrete propagation path wins.
    none of it reaches logs or alerting. (Metrics counters still increment
    automatically — NOTED — but nothing is wired to alert on them.) Acceptable only
    if the team confirms it alerts on the automatic metric counters out of band;
-   otherwise wire the hooks.
+   otherwise wire the hooks. The same holds for the v0.13.0 modes: a cooldown
+   with neither `OnCoolingDown` nor `OnCooldownArmed` (nor an alert on
+   `CoolingDown`), a `PerAttemptTimeout` with neither `OnAttemptTimeout` nor an
+   alert on `AttemptTimeouts` (its cuts are not `OnTimeout`).
 2. **Empty / anonymous name.** `NewPolicy("", …)` or an anonymous `r8e.Do(…)`.
    Propagation: the policy joins no registry → no health identity → an operator
    triaging cannot find its state by name. Remediation: give it a stable,
@@ -85,6 +88,27 @@ When in doubt between two levels, the one with a concrete propagation path wins.
    sees nothing and no counter that anyone watches moves. Acceptable if the team
    confirms it alerts on the automatic counter out of band; otherwise wire the
    hook.
+8. **Alert or label keyed on error text.** The artifact shows a log query,
+   alert or metric label built from `err.Error()`, or matching `"permanent:"` /
+   `"transient:"`. Propagation: since v0.13.0 `Permanent` and `Transient` add no
+   prefix, so the match never fires; free-form error text also explodes label
+   cardinality. Remediation: `IsPermanent` / `IsTransient` for the mark,
+   `r8e.ErrorCode(err)` for labels. Scope: requires the matching code or query
+   in view.
+9. **Reload refused by a shared guard.** The policy uses `WithSharedBulkhead` (or
+   `WithSharedCooldown`), and the context says operators retune it through
+   `r8econf` with a bulkhead setting (or a `cooldown`). Propagation: each
+   reload returns `ErrSharedBulkheadConflict` / `ErrSharedCooldownConflict`;
+   `Reconfigure` is transactional, so NOTHING of that reload applies, the other
+   knobs included. Remediation: drop those fields from the policy's config and
+   retune the shared guard with `Bulkhead.Reconfigure` /
+   `Cooldown.SetMaxCooldown`.
+10. **Shared guard summed across policies.** The artifact shows a dashboard or
+    alert that sums the bulkhead gauges (or the shared budget's state) across
+    the policies sharing it. Propagation: each policy reports the same
+    bulkhead, so the sum is the in-use count times the number of policies; the
+    alert fires early or the capacity reads wrong. Remediation: aggregate with
+    max. Scope: requires the aggregation in view; otherwise NOTED #10.
 
 ## NOTED — observation for awareness, no action required
 
@@ -104,6 +128,21 @@ When in doubt between two levels, the one with a concrete propagation path wins.
 7. An empty name chosen on purpose for a policy built per job or request: it
    keeps the registry bounded, at the cost of health visibility — flag the
    trade-off.
+8. With `r8eotel.Trace`, `r8e.rejection_reason` is `r8e.ErrorCode(err)` since
+   v0.13.0: a retried panic or chaos fault reads `panic_recovered` /
+   `chaos_injected`, not `retries_exhausted`, and `attempt_timeout` /
+   `cooling_down` are new values. Flag dashboards that filter on the old value
+   (IMPORTANT #1 class when an alert on them is shown to miss a mode).
+9. Logs carry `err.Error()` where `r8e.ErrorCode(err)` gives a stable code; an
+   error type of the service's own that matches a sentinel only through `Is`
+   carries no code. Flag it.
+10. A shared bulkhead or budget with no aggregation shown: note "aggregate its
+    gauges with max, not sum".
+11. A cooldown makes the policy degraded (`cooling_down`), never critical: it
+    never pulls a gated pod. Correct by design; flag it only if the context
+    expects readiness to drop on a `Retry-After`.
+12. `r8econf.GetPolicy` returns a misconfiguration as an error since v0.13.0
+    (it used to panic): confirm the caller handles it.
 
 ## Anti-calibration (do NOT do this)
 

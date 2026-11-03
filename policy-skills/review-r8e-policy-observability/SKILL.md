@@ -7,8 +7,8 @@ description: >-
   modes it actually has and is safe for concurrent use, whether the breaker's
   neutral outcomes are visible, the READINESS IMPACT (and the fleet-wide flip
   risk of gating a shared dependency), config-vs-code & hot-reload reach, OTel
-  wiring, and the chaos kill-switch. Use to review whether a policy can be SEEN
-  and OPERATED in production. REJECT by default.
+  wiring and error codes, and the chaos kill-switch. Use to review whether a
+  policy can be SEEN and OPERATED in production. REJECT by default.
 ---
 
 # review-r8e-policy-observability
@@ -84,8 +84,11 @@ config-vs-code reach — which chosen patterns are code-only (`WithCoalesce`,
 `WithCache`, `WithChaos`, classifiers, `WithFallbackFunc`, budget links) and thus
 NOT hot-reloadable / silently absent from emitted `r8econf` JSON, and whether
 operators expect to retune them at runtime (`Reconfigure` cannot add/remove a
-pattern); OTel wiring (`r8eotel.Register` / `r8eotel.Trace`); whether `WithChaos`
-shipped WITHOUT a `ChaosEnabled` kill-switch.
+pattern), and whether a reload carries a setting a shared guard refuses; OTel
+wiring (`r8eotel.Register` / `r8eotel.Trace`) and the `r8e.rejection_reason`
+values dashboards filter on; error codes (`r8e.ErrorCode`) rather than error
+text in logs and labels; whether `WithChaos` shipped WITHOUT a `ChaosEnabled`
+kill-switch.
 
 OUT OF SCOPE — do NOT score these; note at most once as NOTED "out of scope —
 defer to <axis>":
@@ -135,7 +138,9 @@ here; do not dismiss an observation as "probably not serious."
 - Which failure modes does the policy actually HAVE (breaker / retry / hedge /
   fallback / bulkhead / rate-limit / SLO / throttle / cache)?
 - For each present failure mode, is the matching hook wired
-  (`OnCircuitOpen`/`OnRetry`/`OnHedge`/`OnFallbackUsed`/`OnBulkheadRejected`/… )?
+  (`OnCircuitOpen`/`OnRetry`/`OnHedge`/`OnFallbackUsed`/`OnBulkheadRejected`/… ;
+  a cooldown → `OnCoolingDown` / `OnCooldownArmed`; `PerAttemptTimeout` →
+  `OnAttemptTimeout`)?
 - Is `WithHooks` present at all? (Absent → no event surfacing to logs/alerting.)
 - Metrics counters are collected AUTOMATICALLY even without hooks — record this
   (so the gap is hooks→alerting, NOT "no metrics").
@@ -155,18 +160,34 @@ here; do not dismiss an observation as "probably not serious."
 - Conversely: a dedicated dep whose loss should pull the pod is NOT gated →
   the pod stays Ready while broken (a different, opposite miss).
 - Are the health conditions the policy can surface (`ErrCircuitOpen`,
-  `ErrSLOShed`, …) actually reachable by an operator (named registry)?
+  `ErrSLOShed`, …) actually reachable by an operator (named registry)? A cooldown
+  adds `cooling_down`, degraded, never critical: it never pulls a pod.
+- Shared guards (`WithSharedBulkhead`, a shared budget): every sharing policy
+  reports the same gauges and conditions. Are they aggregated with max, not
+  sum?
+- Error text in logs, metric labels or alerts: does anything match
+  `err.Error()`, or the `permanent:` / `transient:` prefix that v0.13.0 removed?
+  `r8e.ErrorCode(err)` gives stable codes.
 - OTel: is `r8eotel.Register(meter, reg)` / `r8eotel.Trace(policy, tp)` present
   where the context says an OTel/metrics stack exists? (`Register` also exports
-  `r8e.policy.circuit_neutral_outcomes` / `circuit_stale_outcomes`; a trace's
-  `r8e.rejection_reason` reports `circuit_ramping` for a call shed during ramp
-  recovery.)
+  `r8e.policy.circuit_neutral_outcomes` / `circuit_stale_outcomes`, and since
+  v0.13.0 `attempt_timeouts` / `cooling_down`. A trace's `r8e.rejection_reason`
+  is `ErrorCode(err)`: `circuit_ramping` for a call shed during ramp recovery;
+  since v0.13.0 a retried panic or chaos fault is `panic_recovered` /
+  `chaos_injected`, no longer `retries_exhausted`, and `attempt_timeout`,
+  `cooling_down` are new values.)
 - Config-expressible params: are the retunable knobs reachable via `r8econf`
   JSON / `Reconfigure` for runtime tuning without redeploy?
 - Code-only patterns present (`WithCoalesce`/`WithCache`/`WithChaos`/classifiers/
   `WithFallbackFunc`/budget links) → silently ABSENT from emitted JSON; say so.
 - `Reconfigure` cannot ADD or REMOVE a pattern — only retune existing ones
-  (configuring an absent pattern → `ErrPatternAbsent`).
+  (configuring an absent pattern → `ErrPatternAbsent`; so is a
+  `rate_limit_burst` on a policy built without `Burst`). It is transactional:
+  a bulkhead setting on a `WithSharedBulkhead` policy
+  (`ErrSharedBulkheadConflict`) or a `cooldown` on a `WithSharedCooldown` one
+  (`ErrSharedCooldownConflict`) fails the whole reload.
+- `r8econf.GetPolicy` returns a misconfiguration (`ValidateOptions`) as an
+  error instead of panicking: is that error handled?
 - `WithChaos` present without a `ChaosEnabled` kill-switch in a production policy.
 - Of the failure modes that MATTER operationally (the ones that page someone),
   which are alertable today and which are silent?
@@ -182,8 +203,10 @@ fewer than 5 are findable, justify in writing that the policy's operability gaps
 are structurally bounded. Prioritise: shared-dep readiness gating (fleet-wide
 `/readyz` flip → mass outage), a present failure mode with no hook (event
 invisible to alerting), an empty/anonymous name (no health identity), a code-only
-pattern an operator tries to retune via JSON (silently absent), chaos shipped with
-no kill-switch (cannot disable an injected fault in prod), a named policy built
+pattern an operator tries to retune via JSON (silently absent), a reload that a
+shared guard refuses, an alert keyed on error text that no longer matches, chaos
+shipped with no kill-switch (cannot disable an injected fault in prod), a named
+policy built
 per request or job growing the registry, a hook racing on shared state, neutral
 outcomes hiding a downstream the callers keep abandoning.
 

@@ -27,7 +27,11 @@ doubt between two levels, the one with a concrete propagation path wins.
    Retry-After` without honoring it (error not a `RetryAfterProvider`).
    Propagation: the server says "back off N seconds," the client retries sooner →
    throttle stampede deepens the overload. Remediation: use httpx `StatusError` so
-   Retry-After is honored automatically.
+   Retry-After is honored automatically. Same class: an
+   `httpx.NewResponseClient` classifier shown returning a plain error for the
+   `429` (the adapter adds no `StatusError` and reads no Retry-After on that
+   path). When the classifier is not shown, IMPORTANT "confirm it returns a
+   `StatusError` for the throttling response".
 
 ## IMPORTANT — justified concern, may be accepted with explicit documented risk
 
@@ -48,11 +52,13 @@ doubt between two levels, the one with a concrete propagation path wins.
 5. **Retry-After cut short by `MaxDelay` or the deadline.** The dependency sends
    `429 Retry-After: 1s` (or more), and `MaxDelay(150ms)` caps the hint, or the
    time left under the deadline is shorter. Propagation: the retry re-sends after
-   150 ms, into an explicit "back off", from every replica at about the same
-   time. Less severe than BLOCKING #4 when a retry budget caps the total, but
-   still a retry against the server's own signal. Remediation: do not retry
-   errors that carry a hint above the cap (`RetryIf` on `RetryAfterProvider`),
-   or raise `MaxDelay` and the budget so the hint fits.
+   150 to 165 ms (the capped hint, spread upward by up to 10%), into an explicit
+   "back off", from every replica at about the same time. Less severe than
+   BLOCKING #4 when a retry budget caps the total, but still a retry against the
+   server's own signal. Remediation: `HonorRetryAfter()` (stops on a hint above
+   `MaxDelay` and returns the error as is), or no retry of hinted errors
+   (`RetryIf` on `RetryAfterProvider`), or raise `MaxDelay` and the budget so the
+   hint fits.
 6. **`PerAttemptTimeout` that never binds.** `PerAttemptTimeout(500ms)` meant to
    cut hung attempts, under callers whose stated deadline is 500 ms or less.
    Propagation: the per-attempt deadline arms no timer; a hung first attempt
@@ -61,6 +67,23 @@ doubt between two levels, the one with a concrete propagation path wins.
    a `PerAttemptTimeout` strictly below the time the callers' deadline leaves,
    with room for the next attempt. Scope: requires the callers' deadline to be
    stated; when it is UNKNOWN, NOTED "confirm".
+7. **A dead route drains the shared parent budget.** Several routes nest their
+   retry budgets under one `Parent`, the context says one route can fail on its
+   own while the others must keep retrying, and the children have no
+   `ShieldParent()` (or the parent is too small to stay above half its capacity
+   after a dead child drains `⌈child MaxTokens / 2⌉`). Propagation: the dead
+   route's failures, first attempts included, keep debiting the parent; the
+   parent falls to half; every sibling loses its retries during that route's
+   outage. Remediation: `ShieldParent()` on the children, and a parent sized for
+   the drain. Scope: when the context wants one route's storm to throttle its
+   siblings, plain `Parent` is the design: not a finding.
+8. **`RetryIf` refuses r8e's own per-attempt cut.** `PerAttemptTimeout(200ms)`
+   with `RetryIf(func(err error) bool { return !errors.Is(err,
+   context.DeadlineExceeded) })`. Propagation: a hung attempt is cut, its error
+   (`ErrAttemptTimeout` around the context's `DeadlineExceeded`) matches, and
+   the retry stops: the per-attempt timeout never buys a second attempt.
+   Remediation: let `errors.Is(err, r8e.ErrAttemptTimeout)` through first; the
+   caller's own deadline ends the loop without help.
 
 ## NOTED — observation for awareness, no action required
 
@@ -71,9 +94,19 @@ doubt between two levels, the one with a concrete propagation path wins.
 3. `maxAttempts` is a round number but the worst-case sum demonstrably fits the
    budget and the dep is over-provisioned — no demonstrated amplification path.
 4. The fn calls a nested r8e policy, so what the retry returns (wrapped after
-   exhausted attempts, bare after a `RetryIf` stop or an exhausted budget)
-   decides what the outer breaker counts — note and defer to
-   review-r8e-policy-overload.
+   exhausted attempts, bare after a `RetryIf` stop, an exhausted budget, a
+   `HonorRetryAfter` stop or an armed cooldown) decides what the outer breaker
+   counts — note and defer to review-r8e-policy-overload.
+5. `HonorRetryAfter()` without `MaxDelay` has no effect (every hint is waited in
+   full, up to the deadline); its stop still debits a retry budget, where a
+   `RetryIf` refusal does not. Flag the inert or budget-costing form.
+6. A cooldown in the policy stops every retry while armed and returns the
+   server's error as is, not `ErrRetriesExhausted`. Flag it where the retry
+   count was sized for 429s; what consumes the bare error is the fallback and
+   observability axes'; whether the cooldown is needed is the overload axis's.
+7. A `ShieldParent` child that flaps (successes between failures) is not
+   bounded: each success that lifts it above half lets the next failure reach
+   the parent. Flag it when the context shows a flapping route.
 
 ## Anti-calibration (do NOT do this)
 

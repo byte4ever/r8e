@@ -2,15 +2,15 @@
 name: review-r8e-policy-overload
 description: >-
   Adversarial review of the overload / shedding controls of an r8e policy —
-  circuit breaker, bulkhead, adaptive concurrency, rate limit, throttle, SLO
-  governor. Judges presence and sizing of these guards against the downstream's
-  capacity and sharing, the brownout (slow-but-200) trip, what the breaker counts
-  (outcome classifier, local rejections), half-open probes that never return
-  (probe lease), healing slow-start, the
-  bulkhead/adaptive-concurrency mutual exclusion, and metastable collapse from
-  retry/hedge amplification on a shared dependency with nothing to fast-fail. Use
-  to review whether the policy can shed and fast-fail under overload. REJECT by
-  default.
+  circuit breaker, bulkhead (own or shared), adaptive concurrency, rate limit,
+  cooldown, throttle, SLO governor. Judges presence and sizing of these guards
+  against the downstream's capacity and sharing, the brownout (slow-but-200)
+  trip, what the breaker counts (outcome classifier, local rejections),
+  half-open probes that never return (probe lease), healing slow-start, the
+  bulkhead/adaptive-concurrency and shared-guard mutual exclusions, and
+  metastable collapse from retry/hedge amplification on a shared dependency with
+  nothing to fast-fail. Use to review whether the policy can shed and fast-fail
+  under overload. REJECT by default.
 ---
 
 # review-r8e-policy-overload
@@ -84,13 +84,25 @@ This reviewer judges ONLY the **overload / shedding controls and their sizing**:
   restart. `HalfOpenProbeLease` as the safety net, and its `d` sized above a
   probe's worst admission-to-report span.
 - `WithBulkhead` presence and sizing vs the downstream pool/capacity;
-  `BulkheadMaxWait` (wait) vs reject under burst; `BulkheadCoDel` queue discipline.
+  `BulkheadMaxWait` (wait) vs reject under burst; `BulkheadCoDel` queue
+  discipline; whether it still caps calls that outlive their timeout (not with
+  `WithHedge` in the policy).
+- `WithSharedBulkhead` across several policies on one capacity limit: presence
+  where per-policy bulkheads sum above it, its exclusion of `WithBulkhead` /
+  `WithAdaptiveConcurrency` (`ErrSharedBulkheadConflict`), and re-entrance (a
+  function under a sharing policy calling a policy on the same bulkhead).
 - `WithAdaptiveConcurrency` (Gradient2) for unknown/variable capacity — AND the
   MUTUAL EXCLUSION: `WithBulkhead` + `WithAdaptiveConcurrency` together panics
   `ErrConcurrencyLimiterConflict`.
-- `WithRateLimit` vs a hard external quota (blocking vs reject semantics);
-  `WithAdaptiveThrottle` (SRE client-side shedding) and the `WithSLO` burn-rate
-  governor; `Sheddability` tiers.
+- `WithRateLimit` vs a hard external quota (blocking vs reject semantics), and
+  its bucket (`Burst`) vs the quota's window; `WithAdaptiveThrottle` (SRE
+  client-side shedding) and the `WithSLO` burn-rate governor; `Sheddability`
+  tiers.
+- `WithCooldown` / `WithSharedCooldown` against a quota that answers with
+  `Retry-After`: presence where the hints are long or refused calls count,
+  sharing across the routes of one quota, the trigger (`CooldownIf`), the cap
+  (`MaxCooldown`), and the own / shared exclusion
+  (`ErrSharedCooldownConflict`).
 - METASTABLE FAILURE: retry/hedge amplification on a shared dependency with NO
   breaker and NO shedding → unrecoverable collapse under brownout; no concurrency
   cap → caller resource exhaustion when the downstream slows.
@@ -159,6 +171,15 @@ here; do not dismiss an observation as "probably not serious."
   worst span from a probe's admission to its report?
 - Bulkhead present at all (any concurrency cap on in-flight work)?
 - Bulkhead size vs downstream pool/capacity: guessed vs traced to a stated pool.
+- Several policies (routes) on one pool or concurrency quota: does each carry its
+  own bulkhead, so the caps add up above the limit, or one `WithSharedBulkhead`?
+  With a shared bulkhead: does a function under one sharing policy call any
+  policy on the same bulkhead (re-entrance)? Is it combined with `WithBulkhead`
+  or `WithAdaptiveConcurrency` (build panic `ErrSharedBulkheadConflict`)?
+- Bulkhead with `WithHedge` and `WithTimeout`: the hedge returns on the cut
+  without waiting for its attempts, so the slot is freed while the call runs on.
+  Can calls outlive their timeout (ignored or UNKNOWN `ctx` handling) where the
+  bulkhead must cap them?
 - Bulkhead wait vs reject under burst (`BulkheadMaxWait` semantics) — does a burst
   queue forever or fast-reject?
 - CoDel queue discipline (`BulkheadCoDel`): standing-queue shedding present where
@@ -168,6 +189,16 @@ here; do not dismiss an observation as "probably not serious."
 - Rate limit vs a hard external quota: present, and sized below the quota?
 - Blocking vs reject rate-limit semantics (`RateLimitBlocking()`): does the chosen
   mode match the call's tolerance for waiting vs failing fast?
+- Rate-limit bucket vs the quota's window: the default bucket holds one second
+  of tokens; `Burst(n)` sets it apart from the rate. Against a sliding-window
+  quota (N per hour), how many calls can leave in one window (burst + rate ×
+  window)?
+- Cooldown: does the dependency answer a quota with `429` + `Retry-After`? How
+  long are the hints, are refused calls counted, do several routes share the
+  quota? Is `WithCooldown` / `WithSharedCooldown` present, and what arms it (any
+  hinted error by default, `CooldownIf` to narrow)? Is `MaxCooldown` (default
+  1 h) sized to the hints? Are `WithCooldown` and `WithSharedCooldown` combined
+  (build panic `ErrSharedCooldownConflict`)?
 - Throttle / SLO shedding (`WithAdaptiveThrottle` / `WithSLO`): client-side shed
   present where the backend signals overload by health/burn-rate?
 - Sheddability tiers: criticality stamped so `Never` traffic is protected and
@@ -191,15 +222,18 @@ re-flooded on close, burst that exhausts the caller's pool with no bulkhead, a
 bulkhead/adaptive-concurrency build panic, a run of business errors, caller
 cancellations or the policy's own bulkhead rejections that opens the breaker on a
 healthy dependency, a nested policy's saturation hidden as a local rejection, a
-hung probe that keeps the breaker half-open.
+hung probe that keeps the breaker half-open, every route still sending into a
+quota's `Retry-After`, per-route bulkheads adding up above one pool, a shared
+bulkhead wedged by a nested call.
 
 ### Phase 3 — Scoring
 
 For each observation and scenario assign BLOCKING / IMPORTANT / NOTED. Scoring
 rests on a demonstrated failure mode, not aesthetic preference or a "best
 practice" invoked without a concrete case. A shared dep retried/hedged with no
-breaker and no shedding (metastable amplification), or a bulkhead +
-adaptive-concurrency build panic, is BLOCKING.
+breaker and no shedding (metastable amplification), a bulkhead +
+adaptive-concurrency build panic, a shared guard combined with the policy's own
+(build panic), or a visibly re-entrant shared bulkhead, is BLOCKING.
 
 ### Phase 4 — Verdict
 

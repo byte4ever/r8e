@@ -167,7 +167,7 @@ FINAL VERDICT: CONDITIONAL APPROVE
 5. The fn is `func(ctx context.Context)` passing ctx to `recommender.Get(ctx,
    userID)` → cancellation/deadline propagate end to end.
 6. Error taxonomy: 4xx other than 429 marked `r8e.Permanent`, 5xx/timeouts
-   transient, 429 carries a Retry-After of at least 1 s and is not retried
+   transient, 429 carries a Retry-After of 1 to 5 s and is not retried
    (`RetryIf`) — classified at the boundary. The call's taxonomy is explicit.
 7. Resource cleanup: typed client call; nothing raw to leak.
 8. Re-execution determinism: a recommendations read is naturally idempotent;
