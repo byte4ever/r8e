@@ -102,7 +102,8 @@ func TokenRatio(r float64) RetryBudgetOption {
 // pressure of all its descendants — it caps the whole subtree, so a storm in one
 // child throttles its siblings too, unless that child is built with
 // [ShieldParent]: its failures then stop reaching the parent while it is
-// exhausted. A nil parent (the default) leaves the budget a root. The link is set at construction and is immutable; passing Parent to
+// exhausted. A nil parent (the default) leaves the budget a root. The link is
+// set at construction and is immutable; passing Parent to
 // [RetryBudget.Reconfigure] has no effect. Works with both [WithRetryBudget] and
 // a [WithSharedRetryBudget] budget built via [NewRetryBudget].
 func Parent(parent *RetryBudget) RetryBudgetOption {
