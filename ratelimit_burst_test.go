@@ -100,18 +100,20 @@ func TestRateLimiterBurstSurvivesRateChanges(t *testing.T) {
 	})
 }
 
-// reconfigureBurst resizes the bucket: a smaller one clamps the tokens at
-// once, a larger one fills over time at the current rate.
-func TestRateLimiterReconfigureBurst(t *testing.T) {
+// A burst reload resizes the bucket: a smaller one clamps the tokens at once,
+// a larger one fills over time at the current rate.
+func TestRateLimiterReloadBurst(t *testing.T) {
 	t.Parallel()
 
 	clk := newRateLimitClock(time.Now())
-	rl := NewRateLimiter(10, clk, &Hooks{})
+	rl := NewRateLimiter(10, clk, &Hooks{}, Burst(10))
 
-	rl.reconfigureBurst(2)
+	two, fifty := 2, 50
+
+	rl.applyReload(nil, &two)
 	assert.Equal(t, 2, admitted(t, rl), "shrinking clamps the full bucket")
 
-	rl.reconfigureBurst(50)
+	rl.applyReload(nil, &fifty)
 	assert.Equal(t, 0, admitted(t, rl), "growing adds no token at once")
 
 	clk.advance(10 * time.Second)
@@ -133,10 +135,59 @@ func TestRateLimiterBurstWithNonPositiveRateAdmitsNothing(t *testing.T) {
 	assert.Equal(t, 0, admitted(t, rl))
 }
 
+// A zero rate empties a Burst bucket; a positive rate brings the Burst
+// capacity back, but not the tokens: the bucket refills over time.
+func TestRateLimiterBurstAfterZeroRate(t *testing.T) {
+	t.Parallel()
+
+	clk := newRateLimitClock(time.Now())
+	rl := NewRateLimiter(100, clk, &Hooks{}, Burst(5))
+
+	rl.Reconfigure(0)
+	rl.Reconfigure(100)
+	assert.Equal(t, 0, admitted(t, rl), "the zero rate emptied the bucket")
+
+	clk.advance(time.Second)
+	assert.Equal(t, 5, admitted(t, rl), "the Burst capacity is back")
+}
+
+// A full bucket of MaxBurst tokens refills without overflowing: it keeps
+// admitting calls after an idle period.
+func TestRateLimiterMaxBurstRefills(t *testing.T) {
+	t.Parallel()
+
+	clk := newRateLimitClock(time.Now())
+	rl := NewRateLimiter(100, clk, &Hooks{}, Burst(MaxBurst))
+
+	for _, idle := range []time.Duration{10 * time.Millisecond, time.Second, time.Hour} {
+		clk.advance(idle)
+		require.NoError(t, rl.Allow(context.Background()), "after %s idle", idle)
+		assert.Positive(t, rl.tokens.Load(), "after %s idle", idle)
+	}
+}
+
+// A long idle period at a high rate adds more tokens than an int64 can hold:
+// the refill caps at the bucket instead of wrapping.
+func TestRateLimiterRefillCapsLongIdleAtHighRate(t *testing.T) {
+	t.Parallel()
+
+	clk := newRateLimitClock(time.Now())
+	rl := NewRateLimiter(1e12, clk, &Hooks{}, Burst(3))
+
+	require.Equal(t, 3, admitted(t, rl))
+
+	clk.advance(1000 * time.Hour)
+	assert.Equal(t, 3, admitted(t, rl))
+}
+
 func TestBurstOutOfRangePanics(t *testing.T) {
 	t.Parallel()
 
-	for _, n := range []int{0, -1, int(MaxBurst) + 1} {
+	// Built at run time, so that MaxBurst+1 wraps to a negative value on a
+	// 32-bit platform instead of failing to compile; out of range either way.
+	maxBurst := MaxBurst
+
+	for _, n := range []int{0, -1, maxBurst + 1} {
 		assert.PanicsWithValue(t, ErrRateLimitBurstOutOfRange, func() {
 			NewRateLimiter(10, RealClock{}, &Hooks{}, Burst(n))
 		}, "Burst(%d) on NewRateLimiter", n)
@@ -147,7 +198,7 @@ func TestBurstOutOfRangePanics(t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		NewRateLimiter(10, RealClock{}, &Hooks{}, Burst(int(MaxBurst)))
+		NewRateLimiter(10, RealClock{}, &Hooks{}, Burst(MaxBurst))
 	})
 }
 
@@ -218,6 +269,23 @@ func TestPolicyReconfigureRateLimitBurst(t *testing.T) {
 	assert.Equal(t, int64(2), burst, "a reload without the field keeps the burst")
 }
 
+// A reload that carries a rate and a burst applies both at once: a full bucket
+// keeps its tokens instead of being clamped to the old burst at the new rate
+// first.
+func TestPolicyReconfigureRateAndBurstTogether(t *testing.T) {
+	t.Parallel()
+
+	policy := NewPolicy[string]("", WithRateLimit(100, Burst(100)))
+
+	require.NoError(t, policy.Reconfigure(PolicyConfig{
+		RateLimit:      f64Ptr(0.5),
+		RateLimitBurst: intPtr(450),
+	}))
+
+	assert.Equal(t, 100, admitted(t, policy.rateLimiter))
+	assert.InDelta(t, 0.5, policy.rateLimiter.CurrentRate(), 1e-9)
+}
+
 // A rejected reload changes nothing, not even the fields that were valid.
 func TestPolicyReconfigureRateLimitBurstRejected(t *testing.T) {
 	t.Parallel()
@@ -240,5 +308,18 @@ func TestPolicyReconfigureRateLimitBurstRejected(t *testing.T) {
 
 		err := policy.Reconfigure(PolicyConfig{RateLimitBurst: intPtr(2)})
 		require.ErrorIs(t, err, ErrPatternAbsent)
+	})
+
+	// A reload retunes a burst, it cannot add one: a rolled-back file would
+	// otherwise leave the live policy with a bucket the file no longer has.
+	t.Run("rate limiter built without Burst", func(t *testing.T) {
+		t.Parallel()
+
+		policy := NewPolicy[string]("", WithRateLimit(100))
+
+		err := policy.Reconfigure(PolicyConfig{RateLimit: f64Ptr(5), RateLimitBurst: intPtr(2)})
+		require.ErrorIs(t, err, ErrPatternAbsent)
+		assert.InDelta(t, 100.0, policy.rateLimiter.CurrentRate(), 1e-9)
+		assert.Equal(t, 100, admitted(t, policy.rateLimiter))
 	})
 }

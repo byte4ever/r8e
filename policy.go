@@ -934,6 +934,19 @@ func checkSetupInvariants(setup *policySetup) error {
 		return ErrTimeBudgetWithoutConsumer
 	}
 
+	if setup.rateLimit != nil {
+		// Apply the rate-limit options to a probe config: a Burst out of range
+		// is caught here, before any pattern is built, on both paths.
+		var cfg rateLimitConfig
+		for _, opt := range setup.rateLimit.opts {
+			opt(&cfg)
+		}
+
+		if err := cfg.validate(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

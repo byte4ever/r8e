@@ -48,8 +48,9 @@ type (
 		// Optional. Example: 100.
 		RateLimit *float64 `json:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`
 		// RateLimitBurst is the bucket capacity of the rate limiter, apart from
-		// the rate (see [Burst]). Requires RateLimit. Optional; hot-reloadable.
-		// Example: 1.
+		// the rate (see [Burst]). Requires RateLimit. Optional. Hot-reloadable
+		// on a policy built with a burst; a reload cannot add one to a policy
+		// built without it ([ErrPatternAbsent]). Example: 1.
 		RateLimitBurst *int `json:"rate_limit_burst,omitempty" yaml:"rate_limit_burst,omitempty"`
 		// AIMD configures additive-increase / multiplicative-decrease adaptation
 		// of the rate limiter (see [AIMD]). Requires RateLimit (the starting and
@@ -783,17 +784,14 @@ func adaptiveHedgeOptionsFromConfig(cfg *AdaptiveHedgeConfig) ([]AdaptiveHedgeOp
 
 // rateLimitOptionsFromConfig converts the rate-limiter fields of a
 // [PolicyConfig] into rate-limiter options: a [Burst] option when
-// rate_limit_burst is set (checked against [MaxBurst]), and the AIMD tunables
-// wrapped in an [AIMD] option when an aimd block is present. Shared by [BuildOptions]; the
+// rate_limit_burst is set (its range is checked with the other setup
+// invariants), and the AIMD tunables wrapped in an [AIMD] option when an aimd
+// block is present. Shared by [BuildOptions]; the
 // caller guarantees pc.RateLimit is set (AIMD without it is rejected there).
 func rateLimitOptionsFromConfig(pc *PolicyConfig) ([]RateLimitOption, error) {
 	var opts []RateLimitOption
 
 	if pc.RateLimitBurst != nil {
-		if !validBurst(*pc.RateLimitBurst) {
-			return nil, ErrRateLimitBurstOutOfRange
-		}
-
 		opts = append(opts, Burst(*pc.RateLimitBurst))
 	}
 
