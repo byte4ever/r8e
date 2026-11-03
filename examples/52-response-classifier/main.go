@@ -46,6 +46,8 @@ import (
 var errRateLimited = errors.New("rate limited")
 
 func main() {
+	ctx := context.Background()
+
 	srv := httptest.NewServer(newAPI())
 	defer srv.Close()
 
@@ -54,13 +56,13 @@ func main() {
 	)
 
 	fmt.Println("=== 403 rate_limited once, then 200 ===")
-	call(client, srv.URL+"/orders/1")
+	call(ctx, client, srv.URL+"/orders/1")
 
 	fmt.Println("\n=== 403 forbidden ===")
-	call(client, srv.URL+"/orders/2")
+	call(ctx, client, srv.URL+"/orders/2")
 
 	fmt.Println("\n=== 403 rate_limited on every attempt ===")
-	call(client, srv.URL+"/orders/3")
+	call(ctx, client, srv.URL+"/orders/3")
 }
 
 // classify tells the two 403 cases apart from the body. A rate-limited 403 is
@@ -81,20 +83,20 @@ func classify(resp *http.Response, body []byte) error {
 }
 
 // call sends one GET through client and prints what the caller gets back.
-func call(client *httpx.Client, url string) {
+func call(ctx context.Context, client *httpx.Client, url string) {
 	// The deadline bounds the whole call, retries included, and the body can
 	// still be read in full after Do.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		fmt.Printf("  build request: %v\n", err)
 
 		return
 	}
 
-	resp, err := client.Do(ctx, req)
+	resp, err := client.Do(callCtx, req)
 	if err == nil {
 		fmt.Printf("  success: status=%d body=%s\n", resp.StatusCode, readAndClose(resp))
 

@@ -309,11 +309,13 @@ func WithRegistry(reg *Registry) Option {
 // As with [DoTimeout], [Policy.Do] returns as soon as the timeout fires or the
 // caller's context ends, without waiting for fn: fn keeps running on its own
 // goroutine until it returns, so it must synchronise whatever it shares with
-// the caller. The patterns inside the timeout keep running with it. A
-// [WithBulkhead] in the same policy is one of them: a call that outlives Do
-// keeps its slot until fn returns, so the bulkhead also caps the calls still
-// running after their timeout. A bulkhead placed around Do, or in an outer
-// policy, frees its slot when Do returns and does not count them.
+// the caller. A [WithBulkhead] in the same policy runs inside the timeout: a
+// call that outlives Do keeps its slot until fn returns, so the bulkhead also
+// caps the calls still running after their timeout. [WithHedge] breaks this:
+// the hedge returns as soon as the timeout ends its context, without waiting
+// for its attempts, so the bulkhead frees the slot while fn still runs. A
+// bulkhead placed around Do, or in an outer policy, frees its slot when Do
+// returns and does not count them either.
 func WithTimeout(timeout time.Duration, opts ...TimeoutOption) Option {
 	var cfg timeoutConfig
 	for _, opt := range opts {
@@ -348,12 +350,13 @@ func WithTimeout(timeout time.Duration, opts ...TimeoutOption) Option {
 // cuts it instead: the call ends in [ErrTimeout], and the error of the
 // previous attempt is not in it. Pass [PropagateDeadline] and give
 // WithTimeout a longer duration than the budget: the budget's deadline then
-// cuts the attempt on time, and the call ends in ErrTimeBudgetExceeded
-// wrapping the cut attempt's error. The budget's deadline binds only when it
-// comes strictly before the timeout's, so PropagateDeadline changes nothing
-// while WithTimeout is equal to the budget or shorter. Neither error carries
-// the earlier attempts' errors: the OnRetry hook receives each of them before
-// its retry.
+// cuts the attempt on time, and the call ends in ErrTimeBudgetExceeded. It
+// wraps the cut attempt's error only when that attempt was the last one
+// allowed; otherwise it wraps [context.DeadlineExceeded]. The budget's
+// deadline binds only when it comes strictly before the timeout's, so
+// PropagateDeadline changes nothing while WithTimeout is equal to the budget
+// or shorter. No error carries the earlier attempts' errors: the OnRetry hook
+// receives each of them before its retry.
 //
 // The budget gates only retry and hedge, so it requires [WithRetry] or
 // [WithHedge]; configured with neither it would do nothing, and [NewPolicy]
@@ -709,7 +712,9 @@ func WithRecover() Option {
 // a channel, makes synctest.Test panic: "deadlock: main bubble goroutine has
 // exited but blocked goroutines remain". Before returning, wait until
 // [Policy.Metrics] reports a CoalesceInFlight of 0, then call synctest.Wait
-// so the goroutine of the shared call can exit.
+// so the goroutine of the shared call can exit. This works only when the
+// shared function returns once its context ends; for one that ignores it, the
+// test must also wait for that function to return.
 func WithCoalesce(keyFn func(context.Context) string) Option {
 	return optionFunc(func(s *policySetup) {
 		s.coalesce = &coalesceDesc{keyFn: keyFn}

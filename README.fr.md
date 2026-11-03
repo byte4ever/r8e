@@ -193,7 +193,7 @@ func main() {
 
 ### Timeout
 
-Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant. Mettez le bulkhead dans la même policy : il tourne à l'intérieur du timeout. Un appel qui survit à `Do` garde donc sa place jusqu'au retour de la fonction, et le bulkhead plafonne aussi les appels qui tournent encore après leur timeout. Un bulkhead placé autour de `Do`, ou dans une policy englobante, libère sa place dès que `Do` rend la main. On décide qui a terminé l'appel quand le timeout tombe, comme pour un budget de temps posé avec `PropagateDeadline` : un appelant qui a annulé avant garde l'appel, et un appelant qui annule ou atteint sa propre deadline plus tard ne le reprend pas. Un service appelé qui s'arrête de lui-même sur la deadline propagée (une deadline de socket ou de client) et renvoie sa propre erreur à cet instant obtient quand même `ErrTimeout` et un seul `OnTimeout`. Un appel en échec que l'appelant a terminé renvoie l'erreur du contexte de l'appelant, même si le service appelé répond par sa propre erreur à cet instant ; une erreur qui revient avant que le contexte de l'appelant signale sa fin reste celle du service appelé. Un succès qui arrive à `Do` avant qu'il voie le timeout reste un succès.
+Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant. Mettez le bulkhead dans la même policy : il tourne à l'intérieur du timeout. Un appel qui survit à `Do` garde donc sa place jusqu'au retour de la fonction, et le bulkhead plafonne aussi les appels qui tournent encore après leur timeout. Ce n'est plus vrai avec `WithHedge` : le hedge rend la main dès que le timeout termine son contexte, sans attendre ses tentatives, et le bulkhead libère la place alors que la fonction tourne encore. Un bulkhead placé autour de `Do`, ou dans une policy englobante, libère sa place dès que `Do` rend la main. On décide qui a terminé l'appel quand le timeout tombe, comme pour un budget de temps posé avec `PropagateDeadline` : un appelant qui a annulé avant garde l'appel, et un appelant qui annule ou atteint sa propre deadline plus tard ne le reprend pas. Un service appelé qui s'arrête de lui-même sur la deadline propagée (une deadline de socket ou de client) et renvoie sa propre erreur à cet instant obtient quand même `ErrTimeout` et un seul `OnTimeout`. Un appel en échec que l'appelant a terminé renvoie l'erreur du contexte de l'appelant, même si le service appelé répond par sa propre erreur à cet instant ; une erreur qui revient avant que le contexte de l'appelant signale sa fin reste celle du service appelé. Un succès qui arrive à `Do` avant qu'il voie le timeout reste un succès.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
@@ -780,12 +780,13 @@ qui la coupe : l'appel se termine en `ErrTimeout`, et l'erreur de la tentative
 précédente n'y figure pas. Utilisez `PropagateDeadline` (plus bas) avec un
 budget de temps, et donnez à `WithTimeout` une durée plus longue que le budget.
 La deadline du budget coupe alors la tentative à la fin du budget, et l'appel
-se termine en `ErrTimeBudgetExceeded`, qui enveloppe l'erreur de la tentative
-coupée. La deadline du budget ne s'applique que si elle tombe strictement avant
-celle du timeout : tant que `WithTimeout` est égal au budget ou plus court,
-`PropagateDeadline` ne change rien. Aucune des deux erreurs ne contient les
-erreurs des tentatives précédentes : le hook `OnRetry` reçoit chacune d'elles
-avant son retry.
+se termine en `ErrTimeBudgetExceeded`. Cette erreur n'enveloppe celle de la
+tentative coupée que si c'était la dernière tentative autorisée ; sinon, elle
+enveloppe `context.DeadlineExceeded`. La deadline du budget ne s'applique que si
+elle tombe strictement avant celle du timeout : tant que `WithTimeout` est égal
+au budget ou plus court, `PropagateDeadline` ne change rien. Aucune erreur ne
+contient celles des tentatives précédentes : le hook `OnRetry` reçoit chacune
+d'elles avant son retry.
 
 ```go
 policy := r8e.NewPolicy[Response]("svc",
@@ -1225,7 +1226,9 @@ bloqué, sur un timer factice ou sur un channel, `synctest.Test` panique avec
 `deadlock: main bubble goroutine has exited but blocked goroutines remain`.
 Avant de sortir, attendez que `Metrics().CoalesceInFlight` vaille 0, puis
 appelez `synctest.Wait()` pour laisser la goroutine de l'appel partagé se
-terminer :
+terminer. La recette ne marche que si la fonction partagée rend la main quand
+son contexte se termine. Si elle l'ignore, attendez aussi qu'elle revienne, par
+exemple sur un channel qu'elle ferme :
 
 ```go
 synctest.Test(t, func(t *testing.T) {

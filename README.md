@@ -191,7 +191,7 @@ func main() {
 
 ### Timeout
 
-Cancel slow calls after a deadline. If the function doesn't complete in time, `r8e.ErrTimeout` is returned. The timeout is r8e's only when it falls strictly before the caller's own deadline: if the caller's deadline comes first or on the same instant, `Do` returns the caller's context error and `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the caller's context ends; the function keeps running until it returns, so it must synchronise whatever it shares with the caller. Put the bulkhead in the same policy: it runs inside the timeout, so a call that outlives `Do` keeps its slot until the function returns, and the bulkhead also caps the calls still running after their timeout. A bulkhead placed around `Do`, or in an outer policy, frees its slot when `Do` returns. Who ended the call is decided when the timeout fires, as with a time budget set with `PropagateDeadline`: a caller that cancelled before keeps the call, and one that cancels or reaches its own, later deadline afterwards does not take it back. A downstream that stops on the propagated deadline by itself (a socket or client deadline) and returns its own error at that instant still gets `ErrTimeout` and one `OnTimeout`. A failed call the caller ended returns the caller's context error, even when the downstream answers with its own error at that instant; an error that comes back before the caller's context reports its end stays the downstream's. A success that reaches `Do` before it sees the timeout stays a success.
+Cancel slow calls after a deadline. If the function doesn't complete in time, `r8e.ErrTimeout` is returned. The timeout is r8e's only when it falls strictly before the caller's own deadline: if the caller's deadline comes first or on the same instant, `Do` returns the caller's context error and `OnTimeout` does not fire. `Do` returns as soon as the timeout fires or the caller's context ends; the function keeps running until it returns, so it must synchronise whatever it shares with the caller. Put the bulkhead in the same policy: it runs inside the timeout, so a call that outlives `Do` keeps its slot until the function returns, and the bulkhead also caps the calls still running after their timeout. Not with `WithHedge`: the hedge returns as soon as the timeout ends its context, without waiting for its attempts, so the bulkhead frees the slot while the function still runs. A bulkhead placed around `Do`, or in an outer policy, frees its slot when `Do` returns. Who ended the call is decided when the timeout fires, as with a time budget set with `PropagateDeadline`: a caller that cancelled before keeps the call, and one that cancels or reaches its own, later deadline afterwards does not take it back. A downstream that stops on the propagated deadline by itself (a socket or client deadline) and returns its own error at that instant still gets `ErrTimeout` and one `OnTimeout`. A failed call the caller ended returns the caller's context error, even when the downstream answers with its own error at that instant; an error that comes back before the caller's context reports its end stays the downstream's. A success that reaches `Do` before it sees the timeout stays a success.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
@@ -769,11 +769,12 @@ the timeout cuts it instead: the call ends in `ErrTimeout`, and the error of
 the previous attempt is not in it. Use `PropagateDeadline` (below) with a time
 budget, and give `WithTimeout` a longer duration than the budget: the budget's
 deadline then cuts the attempt on time, and the call ends in
-`ErrTimeBudgetExceeded` wrapping the cut attempt's error. The budget's deadline
-binds only when it comes strictly before the timeout's, so `PropagateDeadline`
-changes nothing while `WithTimeout` is equal to the budget or shorter. Neither
-error carries the earlier attempts' errors: the `OnRetry` hook receives each of
-them before its retry.
+`ErrTimeBudgetExceeded`. It wraps the cut attempt's error only when that attempt
+was the last one allowed; otherwise it wraps `context.DeadlineExceeded`. The
+budget's deadline binds only when it comes strictly before the timeout's, so
+`PropagateDeadline` changes nothing while `WithTimeout` is equal to the budget
+or shorter. No error carries the earlier attempts' errors: the `OnRetry` hook
+receives each of them before its retry.
 
 ```go
 policy := r8e.NewPolicy[Response]("svc",
@@ -1188,7 +1189,9 @@ A test function that returns while the shared call is blocked, on a fake timer
 or a channel, makes `synctest.Test` panic with `deadlock: main bubble goroutine
 has exited but blocked goroutines remain`. Before returning, wait until
 `Metrics().CoalesceInFlight` is 0, then call `synctest.Wait()` so the goroutine
-of the shared call can exit:
+of the shared call can exit. This works only when the shared function returns
+once its context ends; for one that ignores it, also wait for that function to
+return, for example on a channel it closes:
 
 ```go
 synctest.Test(t, func(t *testing.T) {

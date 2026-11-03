@@ -56,7 +56,8 @@ ended returns the caller's ctx error (an error returned before the caller's ctx
 reports its end stays fn's); a success seen before the timeout stays a success.
 Put the bulkhead in the same policy: it runs inside the timeout, so a call that
 outlives `Do` keeps its slot until fn returns and the bulkhead also caps those
-calls. A bulkhead around `Do` or in an outer policy frees its slot when `Do`
+calls, except with `WithHedge` (the hedge returns on the cut without waiting for
+its attempts, so the slot is freed while fn runs). A bulkhead around `Do` or in an outer policy frees its slot when `Do`
 returns.
 
 **Adaptive timeout (percentile-driven):** `r8e.AdaptiveTimeout(opts...)` (a
@@ -117,7 +118,8 @@ can start with one second left. Cooperative: that attempt runs past the budget.
 With `WithTimeout` about equal to the budget, the timeout cuts it: `ErrTimeout`,
 without the previous attempt's error. Recommend `PropagateDeadline` with a
 `WithTimeout` longer than the budget: the budget cuts on time with
-`ErrTimeBudgetExceeded` wrapping the cut attempt's error. The budget's deadline
+`ErrTimeBudgetExceeded`, which wraps the cut attempt's error only when it was the
+last attempt allowed (otherwise `context.DeadlineExceeded`). The budget's deadline
 binds only strictly before the timeout's, so `PropagateDeadline` changes nothing
 while `WithTimeout` <= budget. Earlier attempts' errors reach only `OnRetry`.
 
@@ -672,7 +674,8 @@ with its owner. Code-only, not changed by Reconfigure (example:
 returns while a shared call is blocked makes `synctest.Test` panic ("deadlock:
 main bubble goroutine has exited but blocked goroutines remain"): first loop
 until `policy.Metrics().CoalesceInFlight == 0` (with `time.Sleep` in the bubble),
-then call `synctest.Wait()`. Two `NewPolicy` panics: a **nil** keyFn
+then call `synctest.Wait()` (this needs the shared fn to return once its ctx
+ends; otherwise also wait for fn itself, e.g. on a channel it closes). Two `NewPolicy` panics: a **nil** keyFn
 → `r8e.ErrCoalesceNilKeyFunc`; **no `WithTimeout`** → `r8e.ErrCoalesceWithoutTimeout`.
 Not a cache (only dedups time-overlapping calls). Usable standalone via
 `r8e.NewCoalescer[T](hooks)` + `c.Do(ctx, key, fn)` (bound `fn` yourself — no
