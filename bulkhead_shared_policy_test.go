@@ -67,6 +67,26 @@ func TestWithSharedBulkheadKeepsItsOwnClock(t *testing.T) {
 	})
 }
 
+// WithClock does not reach WithTimeout: its deadline is a context deadline on
+// wall time, so a frozen policy clock still times the call out after a second.
+func TestWithClockLeavesTheTimeoutOnWallTime(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		p := r8e.NewPolicy[string]("", r8e.WithClock(&manualClock{}), r8e.WithTimeout(time.Second))
+
+		start := time.Now()
+
+		_, err := p.Do(t.Context(), func(ctx context.Context) (string, error) {
+			<-ctx.Done()
+
+			return "", ctx.Err()
+		})
+		require.ErrorIs(t, err, r8e.ErrTimeout)
+		assert.Equal(t, time.Second, time.Since(start))
+	})
+}
+
 // A queued call shed by the controlled-delay discipline of a shared bulkhead is
 // reported to the policy it went through.
 func TestWithSharedBulkheadReportsCoDelShedToThePolicy(t *testing.T) {

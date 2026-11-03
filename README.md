@@ -478,11 +478,14 @@ bulkhead keeps the clock passed to `NewBulkhead`: a policy's `WithClock` does no
 reach its max wait or CoDel dwell.
 
 The bulkhead is not re-entrant. An operation run under one sharing policy must
-not call another policy on the same bulkhead: the inner call needs a second slot
-while the outer call holds the first. With no wait the inner call fails at once
-(`ErrBulkheadFull`), with `BulkheadMaxWait` it fails once the wait ends
-(`ErrBulkheadTimeout`), and with a CoDel-only queue it waits until its context
-ends, forever without a deadline.
+not call, directly or indirectly, any policy on the same bulkhead, the calling
+policy itself included: the inner call needs a second slot while the outer call
+holds the first. Below capacity the inner call still gets a slot, so the fault
+shows only under load. Once such outer calls hold every slot, the inner call
+fails at once with no wait (`ErrBulkheadFull`), fails once the wait ends with
+`BulkheadMaxWait` (`ErrBulkheadTimeout`), and with a CoDel-only queue waits
+until its context ends, forever without a deadline, with every sharing policy
+stuck behind it.
 
 Unlike the shared retry and concurrency budgets, where the last option wins and
 any sharing policy's `Reconfigure` retunes the budget for all of them, a shared

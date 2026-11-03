@@ -170,7 +170,7 @@ var (
 	// [Bulkhead.Reconfigure] retunes.
 	ErrSharedBulkheadConflict error = resilienceError{
 		code: "shared_bulkhead_conflict",
-		msg:  "a shared bulkhead excludes any other bulkhead setting on the policy",
+		msg:  "a shared bulkhead excludes the policy's own concurrency limiter and bulkhead settings",
 	}
 	// ErrTimeBudgetWithoutConsumer indicates [WithTimeBudget] was configured on a
 	// policy with neither [WithRetry] nor [WithHedge]. The budget only gates

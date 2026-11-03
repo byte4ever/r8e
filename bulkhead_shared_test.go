@@ -189,10 +189,14 @@ func TestWithSharedBulkheadIsNotReconfiguredByAPolicy(t *testing.T) {
 
 	slots := 8
 	maxWait := "1s"
+	queueDepth := 4
+	codelTarget := "5ms"
 
 	tests := map[string]PolicyConfig{
 		"size":         {Bulkhead: &slots},
-		"wait setting": {BulkheadMaxWait: &maxWait},
+		"max wait":     {BulkheadMaxWait: &maxWait},
+		"queue depth":  {BulkheadQueueDepth: &queueDepth},
+		"CoDel target": {BulkheadCoDelTarget: &codelTarget},
 	}
 
 	for name, cfg := range tests {

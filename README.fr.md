@@ -483,12 +483,15 @@ passée à `NewBulkhead` : le `WithClock` d'une politique ne s'applique ni à so
 attente maximale ni au temps d'attente mesuré par CoDel.
 
 Le bulkhead n'est pas réentrant. Une opération lancée sous une politique qui le
-partage ne doit pas appeler une autre politique sur le même bulkhead : l'appel
-interne demande un second slot pendant que l'appel externe tient le premier.
-Sans attente, l'appel interne échoue tout de suite (`ErrBulkheadFull`). Avec
-`BulkheadMaxWait`, il échoue à la fin de l'attente (`ErrBulkheadTimeout`). Avec
-une file CoDel seule, il attend la fin de son contexte, donc indéfiniment sans
-deadline.
+partage ne doit appeler, directement ou non, aucune politique attachée au même
+bulkhead, y compris elle-même : l'appel interne demande un second slot pendant
+que l'appel externe tient le premier. Tant qu'il reste de la capacité, l'appel
+interne obtient quand même un slot, et le problème n'apparaît qu'en charge. Une
+fois que ces appels externes tiennent tous les slots, l'appel interne échoue
+tout de suite sans attente (`ErrBulkheadFull`), échoue à la fin de l'attente
+avec `BulkheadMaxWait` (`ErrBulkheadTimeout`), et attend la fin de son contexte
+avec une file CoDel seule, donc indéfiniment sans deadline, en bloquant toutes
+les politiques qui partagent le bulkhead.
 
 Les budgets de retry et de concurrence partagés suivent une autre règle : la
 dernière option l'emporte, et le `Reconfigure` de n'importe quelle politique

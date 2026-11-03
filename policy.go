@@ -34,10 +34,11 @@ type (
 		coalescer         *Coalescer[T]
 		registry          *Registry
 		metrics           *policyMetrics
-		// clock drives the latency window (and is the same clock injected into
-		// every pattern the policy builds; a bulkhead attached with
-		// WithSharedBulkhead keeps its own); held so Do can time each call
-		// deterministically.
+		// clock drives the latency window and is injected into the patterns
+		// the policy builds, with two exceptions: the deadlines of WithTimeout
+		// and PerAttemptTimeout are context deadlines on wall time, and a
+		// bulkhead attached with WithSharedBulkhead keeps its own clock. Held
+		// so Do can time each call deterministically.
 		clock Clock
 		// latency records each Do() duration into a sliding-window DDSketch for
 		// the p50/p95/p99 figures in Metrics. Always present (zero-config).
@@ -253,8 +254,10 @@ func (p *Policy[T]) Do(
 // With* functions — all return Option
 // ---------------------------------------------------------------------------.
 
-// WithClock sets the clock used by the resilience patterns this policy builds.
-// A bulkhead attached with [WithSharedBulkhead] keeps the clock given to
+// WithClock sets the clock the resilience patterns this policy builds read,
+// with two exceptions. The deadline of [WithTimeout] (fixed or adaptive) and
+// of [PerAttemptTimeout] is a context deadline, measured on wall time. A
+// bulkhead attached with [WithSharedBulkhead] keeps the clock given to
 // [NewBulkhead].
 func WithClock(c Clock) Option {
 	return optionFunc(func(s *policySetup) {
@@ -379,13 +382,15 @@ func WithRetryBudget(opts ...RetryBudgetOption) Option {
 // them.
 func WithSharedRetryBudget(budget *RetryBudget) Option {
 	return optionFunc(func(s *policySetup) {
-		s.retryBudget = budget
+		if budget != nil {
+			s.retryBudget = budget
+		}
 	})
 }
 
 // WithConcurrencyBudget adds a concurrency budget that caps how many retries and
 // hedges may be in flight at once, as a fraction of live traffic with a floor
-// (see [ConcurrencyBudget] and the [MaxRate] and [MinConcurrency] options). It is
+// (see [ConcurrencyBudget] and the [MaxRatio] and [MinConcurrency] options). It is
 // the concurrency-dimension complement of [WithRetryBudget] (which throttles the
 // retry RATE over time): the two compose. It requires [WithRetry] or [WithHedge];
 // a policy configured with a budget but neither panics in NewPolicy. To bound
@@ -405,7 +410,9 @@ func WithConcurrencyBudget(opts ...ConcurrencyBudgetOption) Option {
 // on any policy sharing the budget retunes it for all of them.
 func WithSharedConcurrencyBudget(budget *ConcurrencyBudget) Option {
 	return optionFunc(func(s *policySetup) {
-		s.concurrencyBudget = budget
+		if budget != nil {
+			s.concurrencyBudget = budget
+		}
 	})
 }
 
@@ -464,12 +471,15 @@ func WithBulkhead(maxConcurrent int, opts ...BulkheadOption) Option {
 // it, since one bulkhead cannot follow the clocks of several policies.
 //
 // The bulkhead is not re-entrant. An operation run through a policy attached
-// to a shared bulkhead must not call, directly or indirectly, a policy
-// attached to the same bulkhead: the inner call needs a second slot while the
-// outer call holds one. With no wait, the inner call fails at once with
-// [ErrBulkheadFull]; with [BulkheadMaxWait], it fails with [ErrBulkheadTimeout]
-// once the wait ends; with a CoDel-only queue, it waits until its context
-// ends, forever if the context has no deadline.
+// to a shared bulkhead must not call, directly or indirectly, any policy
+// attached to the same bulkhead, the calling policy itself included: the inner
+// call needs a second slot while the outer call holds one. Below capacity the
+// inner call still gets a slot, so the fault shows only under load. Once such
+// outer calls hold every slot, the inner call fails at once with
+// [ErrBulkheadFull] when there is no wait; with [BulkheadMaxWait], it fails
+// with [ErrBulkheadTimeout] once the wait ends; with a CoDel-only queue, it
+// waits until its context ends, forever if the context has no deadline, and
+// every policy sharing the bulkhead waits behind it.
 //
 // Unlike [WithSharedRetryBudget] and [WithSharedConcurrencyBudget], it excludes
 // the policy's own limiter. It cannot be combined with [WithBulkhead] or
@@ -986,8 +996,9 @@ func checkSetupInvariants(setup *policySetup) error {
 	}
 
 	// A shared bulkhead drives the same slot as a policy's own bulkhead or
-	// adaptive limiter. Checked first, so any combination that includes it
-	// reports this conflict.
+	// adaptive limiter. Checked before the bulkhead/adaptive conflict, so any
+	// combination of WithSharedBulkhead with WithBulkhead and/or
+	// WithAdaptiveConcurrency reports this conflict.
 	if setup.sharedBulkhead != nil && (setup.bulkhead != nil || setup.adaptive != nil) {
 		return ErrSharedBulkheadConflict
 	}
