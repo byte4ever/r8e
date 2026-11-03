@@ -57,7 +57,9 @@ func (r *Registry) Reconfigure(name string, cfg PolicyConfig) error { //nolint:g
 // targeted pattern, plus duration/strategy parsing) before any change is
 // applied, so on error the policy is left exactly as it was. It returns an
 // error wrapping [ErrPatternAbsent] if cfg specifies a pattern the policy does
-// not have, or a parse error for an invalid duration or backoff strategy.
+// not have, an error wrapping [ErrSharedBulkheadConflict] if cfg carries a
+// bulkhead setting for a policy built with [WithSharedBulkhead], or a parse
+// error for an invalid duration or backoff strategy.
 func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // value-passed Reconfigurer API
 	// Serialize reconfigures so concurrent callers cannot interleave the
 	// load-modify-store of a shared cell (e.g. timeBudget) and lose an update.
@@ -106,10 +108,11 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		actions = append(actions, action)
 	}
 
-	if p.sharedBulkhead && (cfg.Bulkhead != nil || cfg.hasAnyBulkheadWaitSetting()) {
+	if p.bulkheadIsShared && (cfg.Bulkhead != nil || cfg.hasAnyBulkheadWaitSetting()) {
 		// A shared bulkhead belongs to every policy using it: one policy's
-		// reload must not resize it for the others.
-		return fmt.Errorf("r8e: reconfigure: %w", ErrSharedBulkheadConflict)
+		// reload must not retune it for the others.
+		return fmt.Errorf("r8e: reconfigure bulkhead: the policy uses a shared bulkhead: %w",
+			ErrSharedBulkheadConflict)
 	}
 
 	if cfg.Bulkhead != nil {

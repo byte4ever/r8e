@@ -123,8 +123,9 @@ func BulkheadCoDel(target, interval time.Duration) BulkheadOption {
 }
 
 // NewBulkhead creates a bulkhead that allows at most maxConcurrent simultaneous
-// calls, using clock for max-wait timing (like the other limiters; a [Policy]
-// injects its own clock). By default a full bulkhead rejects immediately; pass
+// calls, using clock for max-wait timing (like the other limiters; [WithBulkhead]
+// injects the policy's clock, while a bulkhead attached with [WithSharedBulkhead]
+// keeps this one). By default a full bulkhead rejects immediately; pass
 // [BulkheadMaxWait] to enable the bounded FIFO wait.
 func NewBulkhead(
 	maxConcurrent int,

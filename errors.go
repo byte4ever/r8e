@@ -165,11 +165,12 @@ var (
 	// ErrSharedBulkheadConflict indicates a policy built with
 	// [WithSharedBulkhead] was also given its own concurrency limiter
 	// ([WithBulkhead] or [WithAdaptiveConcurrency]), the value [NewPolicy]
-	// panics with; or that Policy.Reconfigure was asked to resize a shared
-	// bulkhead, which only [Bulkhead.Reconfigure] does.
+	// panics with; or that [Policy.Reconfigure] was given a bulkhead setting
+	// (size, max wait, queue depth or CoDel) for such a policy, which only
+	// [Bulkhead.Reconfigure] retunes.
 	ErrSharedBulkheadConflict error = resilienceError{
 		code: "shared_bulkhead_conflict",
-		msg:  "a shared bulkhead excludes a policy bulkhead or adaptive concurrency",
+		msg:  "a shared bulkhead excludes any other bulkhead setting on the policy",
 	}
 	// ErrTimeBudgetWithoutConsumer indicates [WithTimeBudget] was configured on a
 	// policy with neither [WithRetry] nor [WithHedge]. The budget only gates

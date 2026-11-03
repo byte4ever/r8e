@@ -475,13 +475,28 @@ users := r8e.NewPolicy[User]("users", r8e.WithSharedBulkhead(api))
 Chaque politique rapporte ses propres appels : les événements du bulkhead
 (`OnBulkheadFull`, `OnBulkheadQueued`, …) vont aux hooks et aux compteurs de
 cette politique, pas aux hooks passés à `NewBulkhead`. Les jauges
-(`BulkheadInUse`, `BulkheadCap`, `BulkheadQueued`, `CoDelLoad`) et la condition
-de santé `bulkhead_full` décrivent le même bulkhead dans chaque politique :
-agrégez-les entre politiques avec max, pas avec une somme, comme pour
-`RetryBudgetTokens`. L'option ne se combine ni avec `WithBulkhead` ni avec
-`WithAdaptiveConcurrency` (`NewPolicy` panique avec
-`ErrSharedBulkheadConflict`), et le `Reconfigure` d'une politique ne le
-redimensionne pas (il renvoie `ErrSharedBulkheadConflict`) : appelez
+(`BulkheadInUse`, `BulkheadCap`, `BulkheadQueued`, `CoDelLoad`) et les conditions
+de santé `bulkhead_full` et `bulkhead_overloaded` décrivent le même bulkhead
+dans chaque politique : agrégez-les entre politiques avec max, pas avec une
+somme, comme pour `RetryBudgetTokens`. Le bulkhead partagé garde l'horloge
+passée à `NewBulkhead` : le `WithClock` d'une politique ne s'applique ni à son
+attente maximale ni au temps d'attente mesuré par CoDel.
+
+Le bulkhead n'est pas réentrant. Une opération lancée sous une politique qui le
+partage ne doit pas appeler une autre politique sur le même bulkhead : l'appel
+interne demande un second slot pendant que l'appel externe tient le premier.
+Sans attente, l'appel interne échoue tout de suite (`ErrBulkheadFull`). Avec
+`BulkheadMaxWait`, il échoue à la fin de l'attente (`ErrBulkheadTimeout`). Avec
+une file CoDel seule, il attend la fin de son contexte, donc indéfiniment sans
+deadline.
+
+Les budgets de retry et de concurrence partagés suivent une autre règle : la
+dernière option l'emporte, et le `Reconfigure` de n'importe quelle politique
+qui les partage les modifie pour toutes. Un bulkhead partagé, lui, exclut le
+limiteur propre de la politique. L'option ne se combine ni avec `WithBulkhead`
+ni avec `WithAdaptiveConcurrency` (`NewPolicy` panique avec
+`ErrSharedBulkheadConflict`), et le `Reconfigure` d'une politique refuse tout
+réglage de bulkhead (il renvoie `ErrSharedBulkheadConflict`) : appelez
 `Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement.
 
 ### Requête spéculative

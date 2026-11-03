@@ -94,12 +94,15 @@ func TestWithSharedBulkheadHandsTheSlotAcrossPolicies(t *testing.T) {
 		a := NewPolicy[string]("", WithSharedBulkhead(shared), WithHooks(routeA.hooks()))
 		b := NewPolicy[string]("", WithSharedBulkhead(shared), WithHooks(routeB.hooks()))
 
+		aDone := make(chan error, 1)
+
 		go func() {
-			_, _ = a.Do(t.Context(), func(context.Context) (string, error) {
+			_, err := a.Do(t.Context(), func(context.Context) (string, error) {
 				time.Sleep(100 * time.Millisecond)
 
 				return "a", nil
 			})
+			aDone <- err
 		}()
 
 		synctest.Wait()
@@ -108,9 +111,13 @@ func TestWithSharedBulkheadHandsTheSlotAcrossPolicies(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "b", v)
 
-		assert.Equal(t, int64(1), routeB.queued.Load())
-		assert.Equal(t, int64(1), routeB.acquired.Load())
-		assert.Equal(t, int64(1), routeA.released.Load())
+		// Route A reports its release after handing the slot over: wait for
+		// its call to return before reading its counter.
+		require.NoError(t, <-aDone)
+
+		assert.Equal(t, int64(1), routeB.queued.Load(), "route B queued")
+		assert.Equal(t, int64(1), routeB.acquired.Load(), "route B was granted the slot")
+		assert.Equal(t, int64(1), routeA.released.Load(), "route A released the slot")
 	})
 }
 
@@ -155,19 +162,21 @@ func TestWithSharedBulkheadHoldsTheSlotAcrossRetries(t *testing.T) {
 func TestWithSharedBulkheadConflicts(t *testing.T) {
 	t.Parallel()
 
-	tests := map[string]Option{
-		"with WithBulkhead":            WithBulkhead(4),
-		"with WithAdaptiveConcurrency": WithAdaptiveConcurrency(),
+	tests := map[string][]Option{
+		"with WithBulkhead":            {WithBulkhead(4)},
+		"with WithAdaptiveConcurrency": {WithAdaptiveConcurrency()},
+		"with both":                    {WithBulkhead(4), WithAdaptiveConcurrency()},
 	}
 
-	for name, other := range tests {
+	for name, others := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			shared := NewBulkhead(1, RealClock{}, &Hooks{})
+			opts := append([]Option{WithSharedBulkhead(shared)}, others...)
 
 			assert.PanicsWithValue(t, ErrSharedBulkheadConflict, func() {
-				NewPolicy[string]("", WithSharedBulkhead(shared), other)
+				NewPolicy[string]("", opts...)
 			})
 		})
 	}
@@ -204,11 +213,51 @@ func TestWithSharedBulkheadIsNotReconfiguredByAPolicy(t *testing.T) {
 	}
 }
 
-// A nil shared bulkhead is ignored.
+// A reload that leaves the bulkhead alone goes through on a policy with a
+// shared bulkhead.
+func TestWithSharedBulkheadLetsOtherReloadsThrough(t *testing.T) {
+	t.Parallel()
+
+	shared := NewBulkhead(1, RealClock{}, &Hooks{})
+	p := NewPolicy[string]("", WithSharedBulkhead(shared), WithTimeout(time.Second))
+
+	timeout := "2s"
+
+	require.NoError(t, p.Reconfigure(PolicyConfig{Timeout: &timeout}))
+	assert.Equal(t, int64(1), shared.Cap())
+}
+
+// A nil shared bulkhead is ignored: it neither attaches a bulkhead nor removes
+// one attached before it.
 func TestWithSharedBulkheadIgnoresNil(t *testing.T) {
 	t.Parallel()
 
-	p := NewPolicy[string]("", WithSharedBulkhead(nil))
+	tests := map[string]struct {
+		opts    func() []Option
+		wantCap int64
+	}{
+		"alone": {
+			opts:    func() []Option { return []Option{WithSharedBulkhead(nil)} },
+			wantCap: 0,
+		},
+		"after a shared bulkhead": {
+			opts: func() []Option {
+				return []Option{WithSharedBulkhead(NewBulkhead(1, RealClock{}, &Hooks{})), WithSharedBulkhead(nil)}
+			},
+			wantCap: 1,
+		},
+	}
 
-	assert.Zero(t, p.Metrics().BulkheadCap)
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			p := NewPolicy[string]("", tt.opts()...)
+
+			v, err := p.Do(t.Context(), func(context.Context) (string, error) { return "ok", nil })
+			require.NoError(t, err)
+			assert.Equal(t, "ok", v)
+			assert.Equal(t, tt.wantCap, p.Metrics().BulkheadCap)
+		})
+	}
 }

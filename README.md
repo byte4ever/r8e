@@ -471,13 +471,26 @@ users := r8e.NewPolicy[User]("users", r8e.WithSharedBulkhead(api))
 Each policy reports its own calls: the bulkhead events (`OnBulkheadFull`,
 `OnBulkheadQueued`, …) go to that policy's hooks and counters, not to the hooks
 passed to `NewBulkhead`. The gauges (`BulkheadInUse`, `BulkheadCap`,
-`BulkheadQueued`, `CoDelLoad`) and the `bulkhead_full` health condition describe
-the same bulkhead in every policy: aggregate them across policies with max, not
-sum, as for `RetryBudgetTokens`. It cannot be combined with `WithBulkhead` or
-`WithAdaptiveConcurrency` (`NewPolicy` panics with `ErrSharedBulkheadConflict`),
-and a policy's `Reconfigure` does not resize it (it returns
-`ErrSharedBulkheadConflict`): call `Bulkhead.Reconfigure` on the shared bulkhead.
-Code-only.
+`BulkheadQueued`, `CoDelLoad`) and the `bulkhead_full` and `bulkhead_overloaded`
+health conditions describe the same bulkhead in every policy: aggregate them
+across policies with max, not sum, as for `RetryBudgetTokens`. The shared
+bulkhead keeps the clock passed to `NewBulkhead`: a policy's `WithClock` does not
+reach its max wait or CoDel dwell.
+
+The bulkhead is not re-entrant. An operation run under one sharing policy must
+not call another policy on the same bulkhead: the inner call needs a second slot
+while the outer call holds the first. With no wait the inner call fails at once
+(`ErrBulkheadFull`), with `BulkheadMaxWait` it fails once the wait ends
+(`ErrBulkheadTimeout`), and with a CoDel-only queue it waits until its context
+ends, forever without a deadline.
+
+Unlike the shared retry and concurrency budgets, where the last option wins and
+any sharing policy's `Reconfigure` retunes the budget for all of them, a shared
+bulkhead excludes the policy's own limiter. It cannot be combined with
+`WithBulkhead` or `WithAdaptiveConcurrency` (`NewPolicy` panics with
+`ErrSharedBulkheadConflict`), and a policy's `Reconfigure` refuses any bulkhead
+setting for it (it returns `ErrSharedBulkheadConflict`): call
+`Bulkhead.Reconfigure` on the shared bulkhead. Code-only.
 
 ### Hedged Request
 
