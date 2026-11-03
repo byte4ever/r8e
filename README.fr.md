@@ -772,14 +772,18 @@ svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
 **Protéger le parent (`ShieldParent`).** Une route morte continue de vider le
 parent par ses seuls échecs de première tentative, même une fois ses propres
 retries coupés, et les routes saines voisines perdent leurs retries.
-`ShieldParent()` sur l'enfant l'évite : tant que l'enfant est épuisé, ses échecs
-ne sont plus reportés sur le parent, et ils le sont de nouveau quand les succès
-le ramènent au-dessus de la moitié de sa capacité. Un enfant mort ne vide alors
-le parent que d'environ la moitié de sa propre capacité. Les succès sont toujours
-crédités au parent : un enfant instable garde donc cette borne tant que son
-`TokenRatio` ne dépasse pas celui du parent. Tant que la protection joue, les
-jetons du parent ne reflètent plus cet enfant : surveillez le budget de l'enfant.
-Comme `Parent`, l'option se pose à la construction, en code uniquement.
+`ShieldParent()` sur l'enfant borne cette perte : tant que l'enfant est épuisé,
+ses échecs ne sont plus reportés sur le parent, et ils le sont de nouveau quand
+les succès le ramènent au-dessus de la moitié de sa capacité. Un enfant mort ne
+retire alors au parent que la moitié de sa propre capacité, arrondie au-dessus
+(5 jetons pour `MaxTokens(10)`). Les routes voisines gardent leurs retries tant
+que le parent reste au-dessus de la moitié de sa capacité après cette perte :
+dimensionnez le parent en conséquence. Aucune borne n'est promise pour un enfant
+instable : ses succès sont toujours crédités au parent, et chaque succès qui le
+ramène au-dessus du seuil laisse passer l'échec suivant. Tant que la protection
+joue, les jetons du parent ne comptent plus les échecs de cet enfant, mais
+comptent toujours ses succès : surveillez le budget de l'enfant. Comme `Parent`,
+l'option se pose à la construction, en code uniquement.
 
 ```go
 svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())

@@ -93,8 +93,12 @@ func TestShieldParentAcrossReconfigure(t *testing.T) {
 		reconfig   []RetryBudgetOption
 		wantParent float64
 	}{
-		"not added":   {reconfig: []RetryBudgetOption{ShieldParent()}, wantParent: 80},
-		"not removed": {opts: []RetryBudgetOption{ShieldParent()}, reconfig: []RetryBudgetOption{MaxTokens(10)}, wantParent: 95},
+		"not added": {reconfig: []RetryBudgetOption{ShieldParent()}, wantParent: 80},
+		"not removed": {
+			opts:       []RetryBudgetOption{ShieldParent()},
+			reconfig:   []RetryBudgetOption{MaxTokens(10)},
+			wantParent: 95,
+		},
 	}
 
 	for name, tt := range tests {
@@ -121,17 +125,85 @@ func TestShieldParentFollowsExhausted(t *testing.T) {
 	t.Parallel()
 
 	parent := NewRetryBudget(MaxTokens(100))
-	child := NewRetryBudget(MaxTokens(7), Parent(parent), ShieldParent())
+	child := NewRetryBudget(MaxTokens(8), Parent(parent), ShieldParent())
 
 	for range 10 {
 		exhausted := child.Exhausted()
-		before := parent.Tokens()
+		childBefore := child.Tokens()
+		parentBefore := parent.Tokens()
 
 		child.recordFailure()
 
-		reached := parent.Tokens() < before
-		assert.Equal(t, !exhausted, reached, "child tokens %.1f", child.Tokens()+1)
+		reached := parent.Tokens() < parentBefore
+		assert.Equal(t, !exhausted, reached, "child tokens %.1f", childBefore)
 	}
+}
+
+// A dead shielded child drains its parent by half of its own capacity,
+// rounded up, at every capacity.
+func TestShieldParentDeadChildDrain(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		capacity  int
+		wantDrain float64
+	}{
+		"capacity 1":  {capacity: 1, wantDrain: 1},
+		"capacity 2":  {capacity: 2, wantDrain: 1},
+		"capacity 7":  {capacity: 7, wantDrain: 4},
+		"capacity 10": {capacity: 10, wantDrain: 5},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			parent := NewRetryBudget(MaxTokens(1000))
+			child := NewRetryBudget(MaxTokens(tt.capacity), Parent(parent), ShieldParent())
+
+			for range 100 {
+				child.recordFailure()
+			}
+
+			assert.InDelta(t, tt.wantDrain, 1000-parent.Tokens(), 1e-9)
+		})
+	}
+}
+
+// A shielded child that is already full still credits its parent on every
+// success.
+func TestShieldParentCreditsSuccessesAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	parent := NewRetryBudget(MaxTokens(100))
+	for range 10 {
+		parent.recordFailure()
+	}
+
+	child := NewRetryBudget(MaxTokens(10), Parent(parent), ShieldParent())
+	for range 10 {
+		child.recordSuccess()
+	}
+
+	assert.InDelta(t, 91.0, parent.Tokens(), 1e-9)
+	assert.InDelta(t, 10.0, child.Tokens(), 1e-9)
+}
+
+// A shielded leaf stops its failures from reaching every ancestor, not only
+// its parent.
+func TestShieldParentStopsEveryAncestor(t *testing.T) {
+	t.Parallel()
+
+	root := NewRetryBudget(MaxTokens(100))
+	mid := NewRetryBudget(MaxTokens(100), Parent(root))
+	leaf := NewRetryBudget(MaxTokens(10), Parent(mid), ShieldParent())
+
+	for range 50 {
+		leaf.recordFailure()
+	}
+
+	assert.InDelta(t, 95.0, mid.Tokens(), 1e-9)
+	assert.InDelta(t, 95.0, root.Tokens(), 1e-9)
 }
 
 // A shielded middle budget stops its whole subtree's failures from reaching

@@ -120,12 +120,11 @@ func Parent(parent *RetryBudget) RetryBudgetOption {
 // the child is exhausted (at or below half its capacity) is not passed to the
 // parent; once successes bring the child back above that threshold, its
 // failures debit the parent again. A dead child, one that records no more
-// successes, then drains the parent by about half of its own capacity.
-// Successes are always credited to the parent, so the bound also holds for a
-// flapping child as long as its [TokenRatio] does not exceed its parent's:
-// with a larger child ratio, each success lifts the child back above the
-// threshold for one failure that costs the parent more than the successes
-// returned to it. On a middle budget, the shield stops its whole subtree's
+// successes, then drains the parent by half of its own capacity rounded up:
+// 5 tokens for MaxTokens(10), its whole token for MaxTokens(1). No bound is
+// promised for a flapping child: its successes are still credited to the
+// parent, and each one that lifts it back above the threshold lets the next
+// failure through. On a middle budget, the shield stops its whole subtree's
 // failures from reaching the ancestors above it. It has no effect on a budget
 // without a parent, and it is set at construction only: Reconfigure neither
 // adds nor removes it.
@@ -238,9 +237,10 @@ func (b *RetryBudget) recordSuccess() {
 }
 
 // recordFailure removes one whole token from the bucket, floored at zero, then
-// charges every ancestor, unless this budget shields its parent (see
-// ShieldParent) and was already exhausted when the failure arrived. It is a
-// no-op on a nil budget. Like recordSuccess it holds one lock at a time as it
+// passes the failure to the parent, which does the same. Each level applies
+// its own shield (see ShieldParent) as the failure walks up: the walk stops at
+// the first budget that shields its parent and was already exhausted when the
+// failure arrived. It is a no-op on a nil budget. Like recordSuccess it holds one lock at a time as it
 // walks up the tree.
 func (b *RetryBudget) recordFailure() {
 	if b == nil {
@@ -317,8 +317,8 @@ func (b *RetryBudget) Tokens() float64 {
 // and RetryBudgetExceeded metric, which fire on the full-chain retry decision —
 // not through any health condition. Monitor such a parent by reading its own
 // Exhausted / Tokens directly. A child built with [ShieldParent] shows its
-// exhaustion on its own budget only: once exhausted, its failures no longer
-// reach the parent, so the parent's Tokens leave that child out.
+// exhaustion on its own budget only: while it is exhausted, the parent's
+// Tokens leave out that child's failures but still count its successes.
 func (b *RetryBudget) Exhausted() bool {
 	if b == nil {
 		return false
