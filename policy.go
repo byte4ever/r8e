@@ -987,8 +987,9 @@ func NewPolicy[T any](name string, opts ...Option) *Policy[T] {
 }
 
 // ValidateOptions reports the misconfiguration [NewPolicy] would panic with
-// for opts (a conflict between patterns, an out-of-range [Burst], a
-// non-positive [MaxCooldown]), or nil. It lets code that combines options from
+// for opts, or nil: everything checkSetupInvariants returns, such as a
+// conflict between patterns, an out-of-range [Burst], a non-positive
+// [MaxCooldown], a nil cache or key function, or a non-positive cache TTL. It lets code that combines options from
 // several sources, such as r8econf.GetPolicy, return the conflict as an error
 // instead of a panic. It cannot see a value whose type does not match the
 // policy's T (a [WithFallback], [WithFallbackFunc], [WithCache] or chaos value
@@ -1012,11 +1013,14 @@ func validateSetup(setup *policySetup) {
 }
 
 // checkSetupInvariants returns the first misconfiguration in setup, or nil if
-// it is self-consistent: a cross-pattern conflict, an out-of-range [Burst] or a
-// non-positive [MaxCooldown]. It is the single source of truth for these rules:
-// [validateSetup] panics with it (the options path) and [BuildOptions] returns
-// it (the config path), so an invariant added here is enforced by both paths
-// and the config path can never panic on one the options path catches.
+// it is self-consistent: for example a cross-pattern conflict, a nil cache or
+// key function for [WithCache] or [WithCoalesce], a non-positive cache TTL, an
+// out-of-range [Burst] or a non-positive [MaxCooldown]. [validateSetup] panics
+// with it (the options path) and [BuildOptions] returns it (the config path),
+// so an invariant added here is enforced by both paths and the config path can
+// never panic on one the options path catches. The config path may meet a
+// value rule first in its own parser (parseCooldownCap for the cooldown cap);
+// both apply the same check.
 func checkSetupInvariants(setup *policySetup) error {
 	// A retry budget gates retries; without a retry pattern it has nothing to do.
 	if setup.retryBudget != nil && setup.retry == nil {

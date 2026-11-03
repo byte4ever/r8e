@@ -1179,8 +1179,8 @@ func parseCooldownCap(raw string) (time.Duration, error) {
 		return 0, fmt.Errorf("cooldown: %w", err)
 	}
 
-	if limit <= 0 {
-		return 0, fmt.Errorf("cooldown: %w", ErrCooldownNonPositiveMax)
+	if err := checkCooldownCap(limit); err != nil {
+		return 0, fmt.Errorf("cooldown: %w", err)
 	}
 
 	return limit, nil

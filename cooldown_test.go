@@ -489,6 +489,55 @@ func TestCooldownConcurrentUse(t *testing.T) {
 	assert.True(t, cd.Armed())
 }
 
+// Every path that sets a cooldown cap accepts and rejects the same values:
+// NewCooldown, NewPolicy, ValidateOptions, SetMaxCooldown, BuildOptions and
+// Policy.Reconfigure.
+func TestCooldownCapPathsAgree(t *testing.T) {
+	t.Parallel()
+
+	caps := map[string]bool{"-1s": false, "0s": false, "1ns": true, "500ms": true, "1h": true}
+
+	for raw, valid := range caps {
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+
+			d, err := time.ParseDuration(raw)
+			require.NoError(t, err)
+
+			check := func(name string, err error) {
+				if valid {
+					assert.NoError(t, err, name)
+				} else {
+					assert.ErrorIs(t, err, ErrCooldownNonPositiveMax, name)
+				}
+			}
+
+			check("NewCooldown", recovered(func() { NewCooldown(MaxCooldown(d)) }))
+			check("NewPolicy", recovered(func() { NewPolicy[string]("", WithCooldown(MaxCooldown(d))) }))
+			check("ValidateOptions", ValidateOptions(WithCooldown(MaxCooldown(d))))
+			check("SetMaxCooldown", NewCooldown().SetMaxCooldown(d))
+
+			_, err = BuildOptions(&PolicyConfig{Cooldown: &raw})
+			check("BuildOptions", err)
+
+			check("Reconfigure", NewPolicy[string]("", WithCooldown()).Reconfigure(PolicyConfig{Cooldown: &raw}))
+		})
+	}
+}
+
+// recovered runs fn and returns the error it panics with, or nil.
+func recovered(fn func()) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err, _ = r.(error)
+		}
+	}()
+
+	fn()
+
+	return nil
+}
+
 // ValidateOptions reports the conflicts and range errors NewPolicy would
 // panic with.
 func TestValidateOptions(t *testing.T) {

@@ -91,20 +91,32 @@ func NewCooldown(opts ...CooldownOption) *Cooldown {
 	return &Cooldown{clock: cfg.clock, trigger: cfg.trigger, limit: cfg.limit}
 }
 
-// newCooldownConfig applies opts over the defaults and checks the result. It
-// holds the cooldown's only validity rules: NewCooldown panics with its error,
-// and checkSetupInvariants returns it.
+// newCooldownConfig applies opts over the defaults and checks the cap with
+// [checkCooldownCap]. NewCooldown panics with its error, and
+// checkSetupInvariants returns it.
 func newCooldownConfig(opts []CooldownOption) (cooldownConfig, error) {
 	cfg := cooldownConfig{clock: RealClock{}, limit: defaultMaxCooldown}
 	for _, o := range opts {
 		o(&cfg)
 	}
 
-	if cfg.limit <= 0 {
-		return cooldownConfig{}, ErrCooldownNonPositiveMax
+	if err := checkCooldownCap(cfg.limit); err != nil {
+		return cooldownConfig{}, err
 	}
 
 	return cfg, nil
+}
+
+// checkCooldownCap is the one rule a cooldown cap must meet, whichever path
+// sets it: [NewCooldown] and [NewPolicy] (through newCooldownConfig),
+// [Cooldown.SetMaxCooldown], and the config path ([BuildOptions] and
+// [Policy.Reconfigure], through parseCooldownCap).
+func checkCooldownCap(limit time.Duration) error {
+	if limit <= 0 {
+		return ErrCooldownNonPositiveMax
+	}
+
+	return nil
 }
 
 // Remaining reports how long the cooldown stays armed, zero when it is not.
@@ -128,8 +140,8 @@ func (c *Cooldown) Armed() bool {
 // set is kept. A non-positive limit is rejected with
 // [ErrCooldownNonPositiveMax] and leaves the cap unchanged.
 func (c *Cooldown) SetMaxCooldown(limit time.Duration) error {
-	if limit <= 0 {
-		return ErrCooldownNonPositiveMax
+	if err := checkCooldownCap(limit); err != nil {
+		return err
 	}
 
 	c.setLimit(limit)

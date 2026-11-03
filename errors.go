@@ -66,8 +66,8 @@ var (
 	ErrCoolingDown error = resilienceError{code: "cooling_down", msg: "cooling down"}
 	// ErrCooldownNonPositiveMax is the value [NewCooldown] and [NewPolicy]
 	// panic with when [MaxCooldown] is not positive, and the error
-	// [BuildOptions], [Policy.Reconfigure] and [Cooldown.SetMaxCooldown]
-	// return for a non-positive cap.
+	// [ValidateOptions], [BuildOptions], [Policy.Reconfigure] and
+	// [Cooldown.SetMaxCooldown] return for a non-positive cap.
 	ErrCooldownNonPositiveMax error = resilienceError{
 		code: "cooldown_non_positive_max",
 		msg:  "cooldown cap must be positive",
