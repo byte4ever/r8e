@@ -437,3 +437,111 @@ func TestPolicyCountsAttemptTimeouts(t *testing.T) {
 		assert.Equal(t, []int{1, 2}, rec.got())
 	})
 }
+
+// A downstream that returns its own timeout error, one that matches
+// context.DeadlineExceeded, at the attempt deadline is cut, and the chain
+// matches both: the wrap keeps the attempt's own error.
+func TestPerAttemptTimeoutKeepsADownstreamDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var rec attemptRecorder
+
+		_, err := DoRetry[string](t.Context(), func(ctx context.Context) (string, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok)
+
+			// The downstream's own timer, set to the propagated deadline.
+			own, cancel := context.WithDeadline(context.Background(), deadline)
+			defer cancel()
+
+			<-own.Done()
+
+			return "", own.Err()
+		}, RetryParams{
+			MaxAttempts: 1,
+			Strategy:    ConstantBackoff(0),
+			Hooks:       rec.hooks(),
+			Clock:       RealClock{},
+			Opts:        []RetryOption{PerAttemptTimeout(10 * time.Millisecond)},
+		})
+
+		require.ErrorIs(t, err, ErrAttemptTimeout)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, []int{1}, rec.got())
+	})
+}
+
+// A cut attempt that RetryIf rejects is wrapped too and still stops the
+// retry.
+func TestPerAttemptTimeoutWrapsACutAttemptRetryIfRejects(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var rec attemptRecorder
+
+		calls := 0
+
+		_, err := DoRetry[string](t.Context(), func(ctx context.Context) (string, error) {
+			calls++
+
+			return blockUntilDone(ctx)
+		}, RetryParams{
+			MaxAttempts: 3,
+			Strategy:    ConstantBackoff(time.Millisecond),
+			Hooks:       rec.hooks(),
+			Clock:       RealClock{},
+			Opts: []RetryOption{
+				PerAttemptTimeout(10 * time.Millisecond),
+				RetryIf(func(error) bool { return false }),
+			},
+		})
+
+		assert.Equal(t, 1, calls, "RetryIf still stops the retry")
+		require.ErrorIs(t, err, ErrAttemptTimeout)
+		require.NotErrorIs(t, err, ErrRetriesExhausted)
+		assert.Equal(t, []int{1}, rec.got())
+	})
+}
+
+// stateCtx is a context whose deadline and error are set by the test, so that
+// attemptDeadlineFired can be driven into the states where the attempt
+// context has not reported an end yet.
+type stateCtx struct {
+	context.Context
+
+	deadline time.Time
+	err      error
+}
+
+func (c stateCtx) Deadline() (time.Time, bool) { return c.deadline, !c.deadline.IsZero() }
+
+func (c stateCtx) Err() error { return c.err }
+
+// When the attempt context has not reported its end yet, the clock decides:
+// an attempt past its deadline is cut unless the parent was cancelled.
+func TestAttemptDeadlineFiredOnTheClock(t *testing.T) {
+	t.Parallel()
+
+	past := time.Now().Add(-time.Second)
+	later := past.Add(time.Minute)
+
+	tests := map[string]struct {
+		parent stateCtx
+		want   bool
+	}{
+		"parent alive":           {parent: stateCtx{Context: context.Background()}, want: true},
+		"parent cancelled":       {parent: stateCtx{Context: context.Background(), err: context.Canceled}, want: false},
+		"parent deadline passed": {parent: stateCtx{Context: context.Background(), deadline: later, err: context.DeadlineExceeded}, want: true},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			attempt := stateCtx{Context: context.Background(), deadline: past}
+
+			assert.Equal(t, tt.want, attemptDeadlineFired(tt.parent, attempt))
+		})
+	}
+}

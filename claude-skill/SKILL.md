@@ -167,7 +167,7 @@ r8e.WithRetry(maxAttempts int, strategy BackoffStrategy, opts ...RetryOption)
 
 **Options**: `r8e.MaxDelay(d)`, `r8e.PerAttemptTimeout(d)`, `r8e.RetryIf(func(error) bool)`.
 
-A failed attempt cut by `PerAttemptTimeout` carries `r8e.ErrAttemptTimeout` around its own error (`context.DeadlineExceeded` is in the chain only when that error is the context's), fires `OnAttemptTimeout(attempt)` and counts in the `AttemptTimeouts` metric. The cut is decided when the deadline fires: a caller that cancels while the attempt is still returning does not take it back. It does not apply when the caller's deadline or cancellation, `WithTimeout` or a time budget ends the attempt first: keep `PerAttemptTimeout` strictly shorter than those. A cut `Permanent` error is wrapped too and still stops the retry.
+A failed attempt cut by `PerAttemptTimeout` carries `r8e.ErrAttemptTimeout` around its own error (nothing is added: `errors.Is(err, context.DeadlineExceeded)` holds only when the attempt's own error matches it, as the context's error or net/http's response-header timeout do and a socket deadline error does not; detect the cut with `errors.Is(err, r8e.ErrAttemptTimeout)`), fires `OnAttemptTimeout(attempt)` and counts in the `AttemptTimeouts` metric. The cut is decided when the deadline fires: a caller that cancels while the attempt is still returning does not take it back. It does not apply when the caller's deadline or cancellation, `WithTimeout` or a time budget ends the attempt first: keep `PerAttemptTimeout` strictly shorter than those. A cut `Permanent` error is wrapped too and still stops the retry.
 
 Returns `r8e.ErrRetriesExhausted` wrapping the last error.
 
