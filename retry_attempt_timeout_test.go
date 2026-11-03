@@ -524,7 +524,7 @@ func TestAttemptDeadlineFiredOnTheClock(t *testing.T) {
 	t.Parallel()
 
 	past := time.Now().Add(-time.Second)
-	later := past.Add(time.Minute)
+	later := past.Add(500 * time.Millisecond) // after the attempt's, already passed
 
 	tests := map[string]struct {
 		parent stateCtx
@@ -544,4 +544,17 @@ func TestAttemptDeadlineFiredOnTheClock(t *testing.T) {
 			assert.Equal(t, tt.want, attemptDeadlineFired(tt.parent, attempt))
 		})
 	}
+}
+
+// An attempt that returns exactly on its deadline, before its context reports
+// it, is cut.
+func TestAttemptDeadlineFiredOnTheDeadline(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		parent := stateCtx{Context: context.Background()}
+		attempt := stateCtx{Context: context.Background(), deadline: time.Now()}
+
+		assert.True(t, attemptDeadlineFired(parent, attempt))
+	})
 }

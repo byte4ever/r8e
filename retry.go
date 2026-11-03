@@ -56,10 +56,12 @@ func MaxDelay(d time.Duration) RetryOption {
 // cancels before the deadline keeps the attempt. An attempt that returns its
 // own error on the deadline, before its context reports it, counts as cut.
 //
-// The wrap keeps the attempt's own error in the chain, so
-// errors.Is(err, context.DeadlineExceeded) holds only when that error carries
-// the context's. A cut attempt marked [Permanent], or rejected by [RetryIf],
-// is wrapped too and still stops the retry.
+// The wrap keeps the attempt's own error in the chain and adds nothing to it,
+// so errors.Is(err, context.DeadlineExceeded) holds only when that error
+// matches context.DeadlineExceeded itself (the context's error does, and so
+// does net/http's response-header timeout). Detect the cut with
+// errors.Is(err, ErrAttemptTimeout). A cut attempt marked [Permanent], or
+// rejected by [RetryIf], is wrapped too and still stops the retry.
 func PerAttemptTimeout(d time.Duration) RetryOption {
 	return func(cfg *retryConfig) {
 		cfg.perAttemptTimeout = d
