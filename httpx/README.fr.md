@@ -14,7 +14,9 @@ l'utilisateur.
   (retentables) ou **permanents** (non retentables) via une fonction
   `Classifier`.
 - Retourne a la fois le `*http.Response` et l'erreur en cas d'echec, comme
-  `http.Client.Do` — l'appelant garde le controle total de la reponse.
+  `http.Client.Do` — l'appelant garde le controle total de la reponse. Avec
+  `WithRetry`, la réponse revient dans l'erreur, sous la forme
+  `StatusError.Response` (voir la gestion des erreurs).
 - Draine et ferme automatiquement le corps de la reponse sur les erreurs
   transitoires afin que les connexions TCP soient reutilisees lors des
   tentatives.
@@ -37,13 +39,18 @@ l'utilisateur.
 Chaque appelant doit avoir sa propre réponse. Ne construisez pas un `Client`
 avec `r8e.WithCoalesce` ou `r8e.WithCache` : les deux donnent le même
 `*http.Response`, donc le même flux de corps, à tous les appelants qui le
-partagent.
+partagent. N'utilisez pas non plus un `r8e.WithFallback` statique : il jette
+l'erreur, et avec elle le `StatusError` qui garde ouvert le corps d'une réponse
+permanente. La connexion fuit alors jusqu'à la fin du contexte de l'appelant.
+Utilisez plutôt `r8e.WithFallbackFunc`, et fermez le corps du `Response` du
+`StatusError`, que vous retrouvez avec `errors.As`.
 
 ## Flux de requete
 
 Le diagramme montre un `Client` construit par `NewClient`. Avec
 `NewResponseClient`, le `ResponseClassifier` prend la place du `Classifier`, et
-l'adapter n'ajoute pas de `StatusError` à son erreur.
+l'adapter n'ajoute pas de `StatusError` à son erreur. La politique peut quand
+même envelopper cette erreur : comparez-la avec `errors.Is` ou `errors.As`.
 
 ```mermaid
 flowchart TD
@@ -199,12 +206,13 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   celle de l'appelant, en parallèle de lui-même (appels `Do` concurrents, `WithHedge`),
   et parfois après le retour de `Do` (une tentative coupée par `WithTimeout`).
   Tout état qu'il partage doit supporter l'accès concurrent.
-- Le corps reste lisible seulement là où l'appelant peut l'atteindre : sur
-  `nil`, `Do` renvoie `resp` ; sur une erreur permanente qui porte un
-  `StatusError` pour `resp`, comme dans l'exemple, `errors.As` le retrouve même
-  quand `WithRetry` fait renvoyer à `Do` une réponse `nil`. Toute autre erreur
-  vide puis ferme le corps (un 101 est seulement fermé), pour réutiliser la
-  connexion.
+- Le corps reste lisible dans deux cas : sur `nil`, où `Do` renvoie `resp`, et
+  sur une erreur permanente qui porte un `StatusError` pour `resp`, comme dans
+  l'exemple, où `errors.As` le retrouve même quand `WithRetry` fait renvoyer à
+  `Do` une réponse `nil`. Toute autre erreur vide puis ferme le corps (un 101
+  est seulement fermé), pour réutiliser la connexion. Une option qui jette
+  l'erreur jette aussi le `StatusError` : c'est pour cela qu'un `WithFallback`
+  statique est exclu (voir plus haut).
 - Un échec de lecture du corps est transitoire, et le classifier n'est pas
   appelé.
 

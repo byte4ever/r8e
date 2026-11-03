@@ -35,13 +35,16 @@ type (
 	// resp.Body is [http.NoBody]. The classifier must not modify body, since
 	// the caller reads the same bytes back.
 	//
-	// The body stays open, to read from the start, only where the caller can
-	// reach it whatever the policy does with the attempt: on a nil error,
-	// where Do returns resp, and on a permanent error that carries a
+	// The body stays open, to read from the start, in two cases: on a nil
+	// error, where Do returns resp, and on a permanent error that carries a
 	// [StatusError] for resp, where errors.As finds it even when a retrying
 	// policy makes Do return a nil response. Any other error closes the body,
 	// after draining it for a status of 200 or above, so the connection can
-	// be reused.
+	// be reused. A policy option that drops the attempt's error also drops
+	// that StatusError: a static [r8e.WithFallback] is excluded for this
+	// reason (see [Client]), and an attempt cut by [r8e.WithTimeout] or a
+	// losing hedge ends with its context, on which a net/http transport
+	// closes the connection.
 	//
 	// The classifier runs inside the attempt. It may run on a goroutine other
 	// than the caller's, concurrently with itself (concurrent Do calls on one
@@ -75,8 +78,9 @@ const MaxClassifiedBody = 64 << 10
 // response, leaves the body readable from the start. Any other error drains
 // and closes the body (a 1xx body is only closed), since a retry may follow
 // or the policy may drop the response. A failure reading the body is
-// transient, and classify is not called. As for [NewClient], do not pass
-// [r8e.WithCoalesce] or [r8e.WithCache] (see [Client]).
+// transient, and classify is not called. As for any Client, do not pass
+// [r8e.WithCoalesce], [r8e.WithCache] or a static [r8e.WithFallback] (see
+// [Client]).
 func NewResponseClient(
 	name string,
 	hc *http.Client,
@@ -93,8 +97,8 @@ func NewResponseClient(
 // classifyResponse runs classify on resp (see [ResponseClassifier]) and
 // returns the error the attempt fails with, nil for a success. For a status
 // of 300 or above, the body is read up to MaxClassifiedBody and put back in
-// front of the rest, so the caller still reads it whole. When the outcome may
-// be retried, the body is released, as for a Transient status.
+// front of the rest, so the caller still reads it whole. settleBody then
+// decides whether the body stays open.
 func classifyResponse(resp *http.Response, classify ResponseClassifier) error {
 	if resp.StatusCode < http.StatusMultipleChoices {
 		return settleBody(resp, classifyHidingBody(resp, nil, classify))
@@ -127,12 +131,13 @@ func classifyHidingBody(resp *http.Response, body []byte, classify ResponseClass
 	return classify(resp, body)
 }
 
-// settleBody leaves resp's body open only where the caller can reach it:
-// on a nil err, or on a permanent err that carries resp in a [StatusError].
-// Any other err releases the body, since a retry may follow or the policy may
-// drop resp. It returns err unchanged.
+// settleBody keeps resp's body open on a nil err, which Do returns with resp,
+// and on a permanent err that carries resp in a [StatusError], which the
+// caller reaches through the error. Any other err releases the body, since a
+// retry may follow or the policy may drop resp. It returns err unchanged.
 func settleBody(resp *http.Response, err error) error {
-	if err != nil && (!r8e.IsPermanent(err) || !carriesResponse(err, resp)) {
+	keepOpen := err == nil || (r8e.IsPermanent(err) && carriesResponse(err, resp))
+	if !keepOpen {
 		releaseBody(resp)
 	}
 

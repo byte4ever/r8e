@@ -40,7 +40,13 @@ type (
 	// Each caller must own the response it gets. Do not
 	// build a Client with [r8e.WithCoalesce] or
 	// [r8e.WithCache]: both hand one *http.Response, so
-	// one body stream, to every caller sharing it.
+	// one body stream, to every caller sharing it. Do not
+	// pass a static [r8e.WithFallback] either: it drops
+	// the error, and with it the StatusError that keeps a
+	// permanent response's body open, which then leaks
+	// its connection until the caller's context ends. Use
+	// [r8e.WithFallbackFunc] instead, and close the body
+	// of the StatusError's Response found with errors.As.
 	//
 	// Pattern: Adapter — bridges net/http and r8e's
 	// resilience policy by translating HTTP responses

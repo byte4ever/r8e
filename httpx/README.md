@@ -12,7 +12,9 @@ and a user-provided HTTP status code classifier.
 - Lets you define which HTTP status codes are **transient** (retriable) or
   **permanent** (non-retriable) via a `Classifier` function.
 - Returns both the `*http.Response` and the error on failure, just like
-  `http.Client.Do` — the caller stays in full control of the response.
+  `http.Client.Do` — the caller stays in full control of the response. Under
+  `WithRetry` the response comes back inside the error, as
+  `StatusError.Response` (see Error handling).
 - Drains and closes the response body automatically on transient errors so TCP
   connections are reused during retries.
 - Replays the request body on each retry via `req.GetBody`, so a retried
@@ -33,13 +35,18 @@ and a user-provided HTTP status code classifier.
 
 Each caller must own the response it gets. Do not build a `Client` with
 `r8e.WithCoalesce` or `r8e.WithCache`: both hand one `*http.Response`, so one
-body stream, to every caller sharing it.
+body stream, to every caller sharing it. Do not pass a static `r8e.WithFallback`
+either: it drops the error, and with it the `StatusError` that keeps a permanent
+response's body open, so the connection leaks until the caller's context ends.
+Use `r8e.WithFallbackFunc` and close the body of the `StatusError`'s `Response`,
+found with `errors.As`.
 
 ## Request flow
 
 The diagram shows a `Client` built by `NewClient`. With `NewResponseClient`, the
 `ResponseClassifier` takes the `Classifier`'s place, and the adapter adds no
-`StatusError` to its error.
+`StatusError` to its error. The policy may still wrap that error, so match it
+with `errors.Is` or `errors.As`.
 
 ```mermaid
 flowchart TD
@@ -191,11 +198,13 @@ client := httpx.NewResponseClient("orders", http.DefaultClient, classify,
   the caller's, concurrently with itself (concurrent `Do` calls, `WithHedge`), and
   possibly after `Do` has returned (an attempt cut by `WithTimeout`). Any state
   it shares must be safe for concurrent use.
-- The body stays readable only where the caller can reach it: on `nil`, `Do`
-  returns `resp`; on a permanent error that carries a `StatusError` for `resp`,
-  as in the example, `errors.As` finds it even when `WithRetry` makes `Do`
-  return a `nil` response. Any other error drains and closes the body (a 101 is
-  only closed), so the connection is reused.
+- The body stays readable in two cases: on `nil`, where `Do` returns `resp`,
+  and on a permanent error that carries a `StatusError` for `resp`, as in the
+  example, where `errors.As` finds it even when `WithRetry` makes `Do` return a
+  `nil` response. Any other error drains and closes the body (a 101 is only
+  closed), so the connection is reused. An option that drops the error drops
+  the `StatusError` too: this is why a static `WithFallback` is excluded (see
+  above).
 - A failure reading the body is transient, and the classifier is not called.
 
 `NewClient` and its `Classifier` are unchanged.

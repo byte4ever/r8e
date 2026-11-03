@@ -870,8 +870,11 @@ error, so reach it with `errors.As`); any other error drains and closes it (a
 101 is only closed); a body read failure is transient and skips `classify`. `classify` runs inside the attempt: maybe on
 another goroutine, concurrently with itself (hedge, concurrent `Do`), and after
 `Do` returned (`WithTimeout` cut) — keep it stateless or synchronised. Never
-build an httpx `Client` with `WithCoalesce` or `WithCache`: every sharing caller
-would get the same `*http.Response` and body stream.
+build an httpx `Client` with `WithCoalesce` or `WithCache` (every sharing caller
+would get the same `*http.Response` and body stream) or with a static
+`WithFallback` (it drops the `StatusError` keeping a permanent body open, which
+leaks the connection); use `WithFallbackFunc` and close
+`StatusError.Response.Body`.
 
 ## Presets
 

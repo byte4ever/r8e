@@ -219,6 +219,18 @@ func TestResponseClassifierClosesAnUnreachableBody(t *testing.T) {
 		"retriable 2xx":              {status: http.StatusOK, classify: constErr(errTokenExpired), wantClosed: true},
 		"permanent, no StatusError":  {status: http.StatusForbidden, classify: constErr(r8e.Permanent(errMoved)), wantClosed: true},
 		"permanent with StatusError": {status: http.StatusForbidden, classify: permanentStatusError},
+		"transient with StatusError": {
+			status: http.StatusServiceUnavailable,
+			classify: func(resp *http.Response) error {
+				return &httpx.StatusError{Response: resp, StatusCode: resp.StatusCode}
+			},
+			wantClosed: true,
+		},
+		"permanent StatusError without the response": {
+			status:     http.StatusForbidden,
+			classify:   func(resp *http.Response) error { return r8e.Permanent(&httpx.StatusError{StatusCode: resp.StatusCode}) },
+			wantClosed: true,
+		},
 	}
 
 	for name, tt := range tests {
@@ -250,6 +262,35 @@ func TestResponseClassifierClosesAnUnreachableBody(t *testing.T) {
 			assert.Equal(t, "error body", string(got), "the body is whole")
 		})
 	}
+}
+
+// A WithFallbackFunc receives the permanent StatusError, so it can close the
+// body of the response it replaces.
+func TestResponseClassifierFallbackFuncClosesTheBody(t *testing.T) {
+	t.Parallel()
+
+	body := newTrackedBody("error body")
+
+	hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return respond(http.StatusForbidden, body), nil
+	})}
+
+	var seen *httpx.StatusError
+
+	cl := httpx.NewResponseClient("", hc,
+		func(resp *http.Response, _ []byte) error { return permanentStatusError(resp) },
+		r8e.WithFallbackFunc(func(err error) (*http.Response, error) {
+			if errors.As(err, &seen) {
+				_ = seen.Response.Body.Close()
+			}
+
+			return nil, err
+		}))
+
+	_, err := cl.Do(t.Context(), getRequest(t))
+	require.Error(t, err)
+	require.NotNil(t, seen, "the fallback gets the StatusError")
+	assert.True(t, body.closed.Load(), "the fallback closed the body")
 }
 
 // Under a retrying policy, Do returns a nil response on a permanent error, so
