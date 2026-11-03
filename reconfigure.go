@@ -97,6 +97,19 @@ func (p *Policy[T]) Reconfigure(cfg PolicyConfig) error { //nolint:gocritic // v
 		actions = append(actions, func() { p.rateLimiter.Reconfigure(rate) })
 	}
 
+	if cfg.RateLimitBurst != nil {
+		if p.rateLimiter == nil {
+			return absentPatternError("rate_limit")
+		}
+
+		burst := *cfg.RateLimitBurst
+		if !validBurst(burst) {
+			return fmt.Errorf("r8e: reconfigure: %w", ErrRateLimitBurstOutOfRange)
+		}
+
+		actions = append(actions, func() { p.rateLimiter.reconfigureBurst(burst) })
+	}
+
 	if cfg.AIMD != nil {
 		action, err := p.aimdReconfigureAction(cfg.AIMD)
 		if err != nil {

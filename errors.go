@@ -197,6 +197,20 @@ var (
 	ErrAIMDWithoutRateLimit error = resilienceError(
 		"AIMD adaptation requires a rate limiter built with the AIMD option",
 	)
+	// ErrBurstWithoutRateLimit indicates a [PolicyConfig] set rate_limit_burst
+	// without rate_limit: the burst sizes the rate limiter's bucket, so without
+	// a rate limiter it would silently do nothing. It is the error
+	// [BuildOptions] returns for that misconfiguration.
+	ErrBurstWithoutRateLimit error = resilienceError(
+		"rate limit burst requires a rate limit",
+	)
+	// ErrRateLimitBurstOutOfRange indicates a rate limiter burst (see [Burst])
+	// below 1 or above [MaxBurst]. It is the value [NewRateLimiter] and
+	// [NewPolicy] panic with, and the error [BuildOptions] and
+	// [Policy.Reconfigure] return, for that misconfiguration.
+	ErrRateLimitBurstOutOfRange error = resilienceError(
+		"rate limit burst must be between 1 and MaxBurst",
+	)
 	// ErrAdaptiveTimeoutWithoutTimeout indicates percentile-driven adaptive timeout
 	// was requested where there is no timeout to adapt: an adaptive_timeout config
 	// block without timeout, or a [Policy.Reconfigure] targeting a policy whose
