@@ -512,6 +512,50 @@ r8e.WithBulkhead(10,
 )
 ```
 
+**Partager un bulkhead entre politiques (`WithSharedBulkhead`).** Pour limiter
+les appels en cours vers une même API sur toutes ses routes, chacune avec sa
+propre politique, créez un seul `Bulkhead` et rattachez-le à chaque politique.
+Il occupe la même place dans la chaîne que `WithBulkhead` : un slot couvre tout
+l'appel, retries et backoff compris, et ses options (attente maximale,
+profondeur de file, CoDel) valent pour toutes les politiques.
+
+```go
+api := r8e.NewBulkhead(20, r8e.RealClock{}, &r8e.Hooks{}, r8e.BulkheadMaxWait(50*time.Millisecond))
+
+orders := r8e.NewPolicy[Order]("orders", r8e.WithSharedBulkhead(api), r8e.WithRetry(3, strategy))
+users := r8e.NewPolicy[User]("users", r8e.WithSharedBulkhead(api))
+```
+
+Chaque politique rapporte ses propres appels : les événements du bulkhead
+(`OnBulkheadFull`, `OnBulkheadQueued`, …) vont aux hooks et aux compteurs de
+cette politique, pas aux hooks passés à `NewBulkhead`. Les jauges
+(`BulkheadInUse`, `BulkheadCap`, `BulkheadQueued`, `CoDelLoad`) et les conditions
+de santé `bulkhead_full` et `bulkhead_overloaded` décrivent le même bulkhead
+dans chaque politique : agrégez-les entre politiques avec max, pas avec une
+somme, comme pour `RetryBudgetTokens`. Le bulkhead partagé garde l'horloge
+passée à `NewBulkhead` : le `WithClock` d'une politique ne s'applique ni à son
+attente maximale ni au temps d'attente mesuré par CoDel.
+
+Le bulkhead n'est pas réentrant. Une opération lancée sous une politique qui le
+partage ne doit appeler, directement ou non, aucune politique attachée au même
+bulkhead, y compris elle-même : l'appel interne demande un second slot pendant
+que l'appel externe tient le premier. Tant qu'il reste de la capacité, l'appel
+interne obtient quand même un slot, et le problème n'apparaît qu'en charge. Une
+fois que ces appels externes tiennent tous les slots, l'appel interne reçoit ce
+que reçoit tout appelant d'un bulkhead plein (voir `Bulkhead.Acquire`) : il
+échoue, ou il attend un slot que seul un appel externe peut libérer. Le bulkhead
+reste plein tant que ces appels durent, et les appelants de toutes les
+politiques qui le partagent sont refusés ou attendent.
+
+Les budgets de retry et de concurrence partagés suivent une autre règle : la
+dernière option l'emporte, et le `Reconfigure` de n'importe quelle politique
+qui les partage les modifie pour toutes. Un bulkhead partagé, lui, exclut le
+limiteur propre de la politique. L'option ne se combine ni avec `WithBulkhead`
+ni avec `WithAdaptiveConcurrency` (`NewPolicy` panique avec
+`ErrSharedBulkheadConflict`), et le `Reconfigure` d'une politique refuse tout
+réglage de bulkhead (il renvoie `ErrSharedBulkheadConflict`) : appelez
+`Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement.
+
 ### Requête spéculative
 
 Lance un second appel concurrent après un délai. La première réponse gagne ; l'autre est annulée. Réduit la latence de queue.
@@ -1045,6 +1089,39 @@ follower au-delà de sa deadline. Le détachement retire aussi la deadline de
 l'appelant — c'est pourquoi le coalescing **exige** un `WithTimeout` pour borner
 le travail partagé ; sans lui, un leader dont le `fn` ne retourne jamais
 parquerait une goroutine et figerait sa clé.
+
+**Arrêter les appels détachés à l'arrêt du client (`WithBaseContext`).** Rien en
+dehors de la politique n'arrête un appel détaché : l'appel partagé ci-dessus et
+le rechargement en avance (refresh-ahead) tournent jusqu'au retour de `fn` ou
+jusqu'à la coupure par `WithTimeout`. `WithBaseContext(ctx)` les rattache à un
+contexte que contrôle le propriétaire de la politique. Annulez `ctx` à l'arrêt
+du client et les deux s'arrêtent : leur contexte se termine avec la cause de
+`ctx`. Ils gardent les valeurs du contexte de l'appelant et ignorent toujours
+l'annulation propre à l'appelant.
+
+Une fois `ctx` terminé, la politique arrête tous ses appels détachés, pour tous
+ceux qui la partagent, y compris les appels lancés après. Un appel avec une clé
+de coalescing qui rate le cache échoue tout de suite avec `context.Canceled`. Un
+hit du cache, une valeur périmée (`StaleIfError`) ou `WithFallback` lui
+répondent quand même. Un rechargement en avance s'arrête sans remonter
+d'erreur, et l'entrée garde sa valeur jusqu'à son expiration. Un appel sans clé
+de coalescing tourne toujours sur le contexte de son appelant. Une fois `ctx`
+terminé, cette politique n'écrit plus d'entrée négative. En revanche, une
+politique ou un cache qui l'enveloppe met quand même en cache le
+`context.Canceled` qu'elle renvoie. Ne posez `ctx` que sur une politique dont
+tous les utilisateurs s'arrêtent avec son propriétaire. L'option se pose en code
+uniquement, et `Reconfigure` ne la change pas.
+
+```go
+base, stop := context.WithCancelCause(context.Background())
+defer stop(errors.New("client closed"))
+
+policy := r8e.NewPolicy[User]("users",
+    r8e.WithBaseContext(base),
+    r8e.WithCoalesce(userKey),
+    r8e.WithTimeout(2*time.Second),
+)
+```
 
 Observabilité : les hooks `OnCoalesceLeader` / `OnCoalesceFollower`, les
 compteurs `CoalesceLeaders` / `CoalesceFollowers` (leur ratio est le taux de

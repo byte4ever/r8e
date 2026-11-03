@@ -109,7 +109,10 @@ type (
 		// [RefreshAhead]). Each is also counted in CacheStores.
 		CacheRefreshes int64 `json:"cache_refreshes"`
 
-		// Live gauges at snapshot time.
+		// Live gauges at snapshot time. The bulkhead gauges (BulkheadInUse,
+		// BulkheadCap, BulkheadQueued, CoDelLoad) of a bulkhead shared through
+		// WithSharedBulkhead are the same in every sharing policy: aggregate
+		// them with max, not sum.
 		BulkheadInUse int64 `json:"bulkhead_in_use"` // slots currently held
 		BulkheadCap   int64 `json:"bulkhead_cap"`    // configured slot capacity
 		// BulkheadQueued is the number of callers currently waiting for a bulkhead

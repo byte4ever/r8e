@@ -506,6 +506,46 @@ r8e.WithBulkhead(10,
 )
 ```
 
+**Sharing one bulkhead across policies (`WithSharedBulkhead`).** To cap the calls
+in flight to one API across all its routes, each with its own policy, build one
+`Bulkhead` and attach it to every policy. It takes the same place in the chain
+as `WithBulkhead`, so a slot covers the whole call, retries and backoff
+included, and its options (max wait, queue depth, CoDel) apply to every policy.
+
+```go
+api := r8e.NewBulkhead(20, r8e.RealClock{}, &r8e.Hooks{}, r8e.BulkheadMaxWait(50*time.Millisecond))
+
+orders := r8e.NewPolicy[Order]("orders", r8e.WithSharedBulkhead(api), r8e.WithRetry(3, strategy))
+users := r8e.NewPolicy[User]("users", r8e.WithSharedBulkhead(api))
+```
+
+Each policy reports its own calls: the bulkhead events (`OnBulkheadFull`,
+`OnBulkheadQueued`, …) go to that policy's hooks and counters, not to the hooks
+passed to `NewBulkhead`. The gauges (`BulkheadInUse`, `BulkheadCap`,
+`BulkheadQueued`, `CoDelLoad`) and the `bulkhead_full` and `bulkhead_overloaded`
+health conditions describe the same bulkhead in every policy: aggregate them
+across policies with max, not sum, as for `RetryBudgetTokens`. The shared
+bulkhead keeps the clock passed to `NewBulkhead`: a policy's `WithClock` does not
+reach its max wait or CoDel dwell.
+
+The bulkhead is not re-entrant. An operation run under one sharing policy must
+not call, directly or indirectly, any policy on the same bulkhead, the calling
+policy itself included: the inner call needs a second slot while the outer call
+holds the first. Below capacity the inner call still gets a slot, so the fault
+shows only under load. Once such outer calls hold every slot, the inner call
+gets what any caller of a full bulkhead gets (see `Bulkhead.Acquire`): it fails,
+or it waits for a slot that only an outer call can free. The bulkhead stays full
+while those calls last, and the callers of every sharing policy are refused or
+wait.
+
+Unlike the shared retry and concurrency budgets, where the last option wins and
+any sharing policy's `Reconfigure` retunes the budget for all of them, a shared
+bulkhead excludes the policy's own limiter. It cannot be combined with
+`WithBulkhead` or `WithAdaptiveConcurrency` (`NewPolicy` panics with
+`ErrSharedBulkheadConflict`), and a policy's `Reconfigure` refuses any bulkhead
+setting for it (it returns `ErrSharedBulkheadConflict`): call
+`Bulkhead.Reconfigure` on the shared bulkhead. Code-only.
+
 ### Hedged Request
 
 Fire a second concurrent call after a delay. The first response wins; the other is cancelled. Reduces tail latency.
@@ -1022,6 +1062,35 @@ returns `ctx.Err()`, so a slow leader never pins a follower past its deadline.
 Detaching also strips the caller's deadline — which is why coalescing **requires**
 a `WithTimeout` to bound the shared work; without it a leader whose `fn` never
 returns would park a goroutine and wedge its key.
+
+**Stopping detached calls on shutdown (`WithBaseContext`).** Nothing outside the
+policy stops a detached call: the shared call above and the refresh-ahead reload
+run until `fn` returns or `WithTimeout` cuts them. `WithBaseContext(ctx)` ties
+them to a context the owner of the policy controls. Cancel `ctx` when the
+client shuts down and both stop: their context ends with `ctx`'s cause. They
+keep the caller's values and still ignore the caller's own cancellation.
+
+Once `ctx` has ended, the policy stops every detached call for every holder of
+the policy, including calls started after the end. A call with a coalescing key
+that misses the cache fails at once with `context.Canceled`; a cache hit, a
+stale value (`StaleIfError`) or `WithFallback` still answers it. A refresh-ahead
+reload stops without any error surfacing (the entry keeps its value until it
+expires). A call with no coalescing key still runs on its caller's context.
+This policy stores no negative entry once `ctx` has ended; a policy or cache
+that wraps it still caches the `context.Canceled` it returns. Set `ctx` only on
+a policy whose holders all stop with its owner. Code-only, and `Reconfigure` does not
+change it.
+
+```go
+base, stop := context.WithCancelCause(context.Background())
+defer stop(errors.New("client closed"))
+
+policy := r8e.NewPolicy[User]("users",
+    r8e.WithBaseContext(base),
+    r8e.WithCoalesce(userKey),
+    r8e.WithTimeout(2*time.Second),
+)
+```
 
 Observability: the `OnCoalesceLeader` / `OnCoalesceFollower` hooks, the
 `CoalesceLeaders` / `CoalesceFollowers` counters (their ratio is the dedup rate),

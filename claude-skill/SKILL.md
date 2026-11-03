@@ -433,6 +433,23 @@ hot-reloadable. Observability: `OnBulkheadQueued` / `OnBulkheadTimeout` hooks,
 `Bulkhead.Acquire(ctx) error` (takes a ctx — may block on the wait) + `Release()`
 + `Queued()`.
 
+**Shared bulkhead** (`r8e.WithSharedBulkhead(*Bulkhead)`, code-only): one
+`NewBulkhead` attached to several policies caps their calls in flight together
+(same chain slot as `WithBulkhead`, so retries and backoff hold the slot). Each
+policy reports its own calls to its own hooks and counters; the gauges,
+`bulkhead_full` and `bulkhead_overloaded` describe the same bulkhead in every
+policy, so aggregate them with max, not sum. It keeps the clock given to
+`NewBulkhead` (a policy's `WithClock` does not reach it). Not re-entrant: an
+operation under one sharing policy must not call, directly or indirectly, any
+policy on the same bulkhead, itself included (fine below capacity; once outer
+calls hold every slot the inner call gets what any caller of a full bulkhead
+gets, see `Bulkhead.Acquire`; the bulkhead stays full while those calls last,
+and the callers of every sharing policy are refused or wait). Unlike the shared
+retry/concurrency budgets (last option wins, any policy's `Reconfigure` retunes
+them for all), combining it with `WithBulkhead` or `WithAdaptiveConcurrency`
+panics with `r8e.ErrSharedBulkheadConflict`, and a policy `Reconfigure` carrying
+any bulkhead setting returns that error (retune with `Bulkhead.Reconfigure`).
+
 **Controlled-delay queue (CoDel + adaptive LIFO)** (opt-in): `r8e.BulkheadCoDel(target, interval)`
 disciplines the wait queue by observed dwell (RFC 8289 / folly), instead of (or
 alongside) the fixed max-wait. It watches the standing queue delay (oldest
@@ -599,7 +616,17 @@ the chain while each caller keeps its own fallback.
 The shared call runs under a **detached context** (`context.WithoutCancel`): one
 caller cancelling never aborts the group, and each caller still bails on its own
 `ctx.Done()`. Detaching strips the deadline, so **`WithCoalesce` requires
-`WithTimeout`** to bound the shared call. Two `NewPolicy` panics: a **nil** keyFn
+`WithTimeout`** to bound the shared call. `r8e.WithBaseContext(ctx)` ties the
+detached calls (the coalesced call and the `RefreshAhead` reload) to a context
+the policy's owner controls: cancelling it stops them, with its cause, on client
+shutdown; caller values are kept and the caller's own cancellation is still
+ignored. Once it has ended, every coalesced call of the policy that misses the
+cache (every holder, including calls started later) fails at once with
+`context.Canceled` (a cache hit, StaleIfError or WithFallback still answers),
+reloads stop silently, calls with no coalescing key still run, and this policy
+stores no negative entry; a policy or cache wrapping it still caches the
+`context.Canceled` it returns. Set it only on a policy whose holders all stop
+with its owner. Code-only, not changed by Reconfigure. Two `NewPolicy` panics: a **nil** keyFn
 → `r8e.ErrCoalesceNilKeyFunc`; **no `WithTimeout`** → `r8e.ErrCoalesceWithoutTimeout`.
 Not a cache (only dedups time-overlapping calls). Usable standalone via
 `r8e.NewCoalescer[T](hooks)` + `c.Do(ctx, key, fn)` (bound `fn` yourself — no

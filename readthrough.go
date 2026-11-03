@@ -72,6 +72,10 @@ type (
 		hooks      *Hooks
 		clock      Clock
 		refreshing map[string]struct{}
+		// detach holds the base context of the background reload, from
+		// which derive makes its context (see WithBaseContext); nil for a
+		// standalone cache.
+		detach     detacher
 		freshTTL   time.Duration
 		staleTTL   time.Duration
 		negTTL     time.Duration
@@ -109,6 +113,7 @@ type (
 	// corresponding behaviour); clock and hooks default to [RealClock] and the
 	// no-op zero [Hooks] in [NewReadThroughCache].
 	cacheOptions struct {
+		detach     detacher
 		clock      Clock
 		hooks      *Hooks
 		staleTTL   time.Duration
@@ -244,6 +249,14 @@ func cacheHandOff() CacheOption {
 	}
 }
 
+// cacheDetach ties the background reloads to the policy's base context (see
+// [WithBaseContext]). Only a [Policy] sets it.
+func cacheDetach(d detacher) CacheOption {
+	return func(o *cacheOptions) {
+		o.detach = d
+	}
+}
+
 // NegativeCache enables negative caching: when an execution fails and no stale
 // value is available to serve, the error is cached for negTTL so subsequent
 // calls for the same key fast-fail with the recorded error instead of
@@ -305,6 +318,7 @@ func NewReadThroughCache[T any](
 		negTTL:     cfg.negTTL,
 		refreshTTL: cfg.refreshTTL,
 		handOff:    cfg.handOff,
+		detach:     cfg.detach,
 	}
 }
 
@@ -317,8 +331,8 @@ func NewReadThroughCache[T any](
 // next before returning. Otherwise it executes next and: on success caches and
 // returns the result; on error serves a stale value if one is available (see
 // [StaleIfError]), else caches the error if negative caching is enabled (see
-// [NegativeCache]) and ctx is neither done nor past its deadline, and returns
-// it.
+// [NegativeCache]) and ctx is neither done nor past its deadline, nor the
+// policy's base context (see [WithBaseContext]) ended, and returns it.
 //
 //nolint:ireturn // generic type parameter T, not an interface
 func (rc *ReadThroughCache[T]) Do(
@@ -383,8 +397,10 @@ func (rc *ReadThroughCache[T]) Do(
 		// downstream built from it (a gRPC status, a %v wrap). The state of
 		// ctx decides, not the error, and a deadline set by an enclosing
 		// policy counts too: caching it would fail callers of this key that
-		// carry no such deadline.
-		if rc.negTTL > 0 && !contextEnded(ctx) {
+		// carry no such deadline. The same holds once the policy's base
+		// context has ended (see WithBaseContext): a coalesced call it stopped
+		// fails a caller whose own context is still live.
+		if rc.negTTL > 0 && !contextEnded(ctx) && !rc.detach.ended() {
 			rc.storeNegative(key, err)
 		}
 
@@ -542,7 +558,8 @@ func (rc *ReadThroughCache[T]) endRefresh(key string) {
 // success. It executes next under a context detached from the triggering caller
 // (cancellation and deadline stripped, values preserved) so the caller leaving
 // cannot abort the shared refresh — the inner [WithTimeout] the [Policy] requires
-// bounds it instead. A failed reload is best-effort: the current entry is left
+// bounds it instead, and the policy's base context ends it (see
+// [WithBaseContext]). A failed reload is best-effort: the current entry is left
 // untouched (its store time unchanged, so the next in-window read retries) and
 // no error is surfaced. A successful reload stores the value (firing
 // OnCacheStored) and fires OnCacheRefreshed.
@@ -560,7 +577,10 @@ func (rc *ReadThroughCache[T]) refresh(
 ) {
 	defer rc.endRefresh(key)
 
-	result, err := next(context.WithoutCancel(parent))
+	detached, stop := rc.detach.derive(parent)
+	defer stop()
+
+	result, err := next(detached)
 	if err != nil {
 		return // keep the current entry; a later read retries the refresh
 	}
