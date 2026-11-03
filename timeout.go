@@ -91,9 +91,8 @@ const (
 //
 // The timeout is r8e's only when it is earlier than any deadline ctx already
 // has. When ctx's own deadline falls before it or on the same instant,
-// DoTimeout arms no timer of its own: the call ends when ctx does, and
-// DoTimeout returns ctx's error, which ctx already reports, without firing
-// OnTimeout. That is the rule [IsCallerCancellation] applies too.
+// DoTimeout arms no timer of its own: the call ends when ctx does, without
+// firing OnTimeout. That is the rule [IsCallerCancellation] applies too.
 //
 // Who ended the call is decided when the binding timeout fires, as for a time
 // budget: a caller that cancels, or reaches its own later deadline, after
@@ -101,7 +100,11 @@ const (
 // the call. fn may stop on the propagated deadline by itself and return its
 // own error (a socket or client deadline) at the instant the timeout fires:
 // an error fn returns once the binding timeout has passed is ErrTimeout too,
-// with one OnTimeout, whichever of the two DoTimeout sees first. The check
+// with one OnTimeout, whichever of the two DoTimeout sees first. A failed call
+// the timeout did not cut, once ctx reports its end, returns ctx's error
+// rather than fn's, again whichever DoTimeout sees first, as a time budget
+// does. An error fn returns before ctx reports its end stays fn's, even on
+// ctx's own deadline: only r8e's deadline is decided on the clock. The check
 // applies to errors only: a success DoTimeout receives before it sees the
 // timeout stays a success, even on the deadline.
 //
@@ -145,14 +148,22 @@ func DoTimeout[T any](
 		ch <- result{val: v, err: err}
 	}()
 
-	// Wait for fn to complete or context to expire. Both arms decide who
-	// ended the call the same way (see policyDeadlineCut), so a downstream
-	// that returns its own error on the deadline gets the same answer as one
-	// the timeout cuts.
+	// Wait for fn to complete or context to expire. Both arms give the same
+	// answer for the same history: the timeout cut the call (see
+	// policyDeadlineCut), or the caller ended it and its error comes back, or
+	// fn's own result does.
 	select {
-	case r := <-ch:
-		if r.err == nil || !policyDeadlineCut(ctx, timeoutCtx) {
-			return r.val, r.err
+	case res := <-ch:
+		switch {
+		case res.err == nil:
+			return res.val, nil
+		case policyDeadlineCut(ctx, timeoutCtx):
+			// Cut by the timeout: answered below.
+		case ctx.Err() != nil:
+			// The caller ended the call, as the other arm would report it.
+			return zero, ctx.Err() //nolint:wrapcheck // preserving context error identity
+		default:
+			return res.val, res.err
 		}
 	case <-timeoutCtx.Done():
 		if !policyDeadlineCut(ctx, timeoutCtx) {

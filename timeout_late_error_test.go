@@ -3,6 +3,7 @@ package r8e_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -99,23 +100,27 @@ func TestTimeoutAttributesADownstreamStoppingOnItsDeadline(t *testing.T) {
 
 			var (
 				wg     sync.WaitGroup
-				wrong  atomic.Int32
-				sample atomic.Value
+				mu     sync.Mutex
+				wrong  int
+				sample string
 			)
 
 			for range calls {
 				wg.Go(func() {
 					if err := call(t.Context()); !errors.Is(err, tt.wantErr) {
-						wrong.Add(1)
-						sample.Store(err)
+						mu.Lock()
+						defer mu.Unlock()
+
+						wrong++
+						sample = fmt.Sprintf("%v", err)
 					}
 				})
 			}
 
 			wg.Wait()
 
-			assert.Zero(t, wrong.Load(), "calls with another outcome, e.g. %v", sample.Load())
-			assert.EqualValues(t, calls, fired.Load())
+			assert.Zero(t, wrong, "calls with another outcome, e.g. %s", sample)
+			assert.EqualValues(t, calls, fired.Load(), "one hook per call")
 		})
 	}
 }
@@ -136,7 +141,11 @@ func TestDoTimeoutDecidesWhenTheTimeoutFires(t *testing.T) {
 		wantTimeouts int32
 	}{
 		"own error on the deadline": {
-			fn:      stopOnDeadline,
+			fn: func(ctx context.Context) (int, error) {
+				_, err := stopOnDeadline(ctx)
+
+				return 42, err
+			},
 			wantErr: r8e.ErrTimeout, wantTimeouts: 1,
 		},
 		"own error after the deadline, context ignored": {
@@ -199,4 +208,143 @@ func TestDoTimeoutDecidesWhenTheTimeoutFires(t *testing.T) {
 			})
 		})
 	}
+}
+
+// cancelledAfterFirstCtx reads as live on the first Err call and as cancelled
+// on every later one, with no deadline and a Done that never closes: it plays
+// a caller that cancels in the instant between the binding timeout firing and
+// DoTimeout looking at it.
+type cancelledAfterFirstCtx struct {
+	context.Context
+
+	errCalls atomic.Int32
+}
+
+func (c *cancelledAfterFirstCtx) Err() error {
+	if c.errCalls.Add(1) == 1 {
+		return nil
+	}
+
+	return context.Canceled
+}
+
+// A caller that cancels after the binding timeout fired does not take the call
+// back: it is ErrTimeout, with one OnTimeout.
+func TestDoTimeoutLateCancelDoesNotTakeTheCallBack(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var timeouts atomic.Int32
+
+		ctx := &cancelledAfterFirstCtx{Context: context.Background()}
+
+		_, err := r8e.DoTimeout(ctx, time.Second, blockOnCtx,
+			&r8e.Hooks{OnTimeout: func() { timeouts.Add(1) }})
+
+		require.ErrorIs(t, err, r8e.ErrTimeout)
+		require.EqualValues(t, 1, timeouts.Load())
+	})
+}
+
+// A caller that ends the call gets its own error back, even when fn returns
+// an error of its own at that instant: the caller's cancellation, or the
+// caller's deadline when the timeout does not bind.
+func TestDoTimeoutCallerEndReturnsTheCallersError(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+
+	ownErr := func(ctx context.Context) (int, error) {
+		<-ctx.Done()
+
+		return 0, errBoom
+	}
+
+	tests := map[string]struct {
+		caller  func(context.Context) (context.Context, context.CancelFunc)
+		wantErr error
+	}{
+		"caller cancels": {
+			caller: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(ctx)
+				time.AfterFunc(5*time.Millisecond, cancel)
+
+				return ctx, cancel
+			},
+			wantErr: context.Canceled,
+		},
+		"caller deadline first": {
+			caller: func(ctx context.Context) (context.Context, context.CancelFunc) {
+				return context.WithTimeout(ctx, 5*time.Millisecond)
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				var timeouts atomic.Int32
+
+				for range 200 {
+					ctx, cancel := tt.caller(t.Context())
+
+					_, err := r8e.DoTimeout(ctx, 10*time.Millisecond, ownErr,
+						&r8e.Hooks{OnTimeout: func() { timeouts.Add(1) }})
+
+					require.ErrorIs(t, err, tt.wantErr)
+					require.True(t, r8e.IsCallerCancellation(ctx, err))
+
+					cancel()
+				}
+
+				assert.Zero(t, timeouts.Load())
+			})
+		})
+	}
+}
+
+// A success that reaches DoTimeout before it sees the timeout stays a success,
+// even on the deadline: across many calls, each one is either the success or
+// a cut, and the success shows up.
+func TestDoTimeoutSuccessOnTheDeadlineStaysASuccess(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		succeedOnDeadline := func(ctx context.Context) (int, error) {
+			deadline, _ := ctx.Deadline()
+			time.Sleep(time.Until(deadline))
+
+			return 7, nil
+		}
+
+		var successes, cuts int
+
+		for range 200 {
+			var timeouts atomic.Int32
+
+			val, err := r8e.DoTimeout(t.Context(), 10*time.Millisecond, succeedOnDeadline,
+				&r8e.Hooks{OnTimeout: func() { timeouts.Add(1) }})
+
+			switch {
+			case err == nil:
+				successes++
+
+				assert.Equal(t, 7, val)
+				assert.Zero(t, timeouts.Load())
+			default:
+				cuts++
+
+				require.ErrorIs(t, err, r8e.ErrTimeout)
+				assert.EqualValues(t, 1, timeouts.Load())
+			}
+
+			synctest.Wait()
+		}
+
+		assert.Positive(t, successes, "a success seen first stays a success")
+		assert.Equal(t, 200, successes+cuts)
+	})
 }
