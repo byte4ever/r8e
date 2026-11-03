@@ -370,6 +370,28 @@ func TestErrorCode(t *testing.T) {
 			errors.Join(r8e.ErrRetriesExhausted, r8e.ErrBulkheadFull),
 			"bulkhead_full",
 		},
+		{
+			"pre-order, not level order",
+			errors.Join(fmt.Errorf("svc a: %w", r8e.ErrCircuitOpen), r8e.ErrRateLimited),
+			"circuit_open",
+		},
+		{
+			"outermost envelope in pre-order",
+			errors.Join(fmt.Errorf("x: %w", r8e.ErrRetriesExhausted), r8e.ErrTimeBudgetExceeded),
+			"retries_exhausted",
+		},
+		{
+			"cause under a time budget and a retry",
+			fmt.Errorf("%w: %w", r8e.ErrTimeBudgetExceeded,
+				fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted, r8e.ErrCircuitOpen)),
+			"circuit_open",
+		},
+		{
+			"cause under nested retries",
+			fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted,
+				fmt.Errorf("%w: %w", r8e.ErrRetriesExhausted, r8e.ErrTimeout)),
+			"timeout",
+		},
 		{"plain error", errors.New("boom"), ""},
 		{"nil", nil, ""},
 	}
