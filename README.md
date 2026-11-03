@@ -1192,7 +1192,7 @@ r8e.IsTransient(err)  // true for unclassified and explicitly transient errors
 r8e.IsPermanent(err)  // true only for explicitly permanent errors
 ```
 
-Every r8e sentinel has a short, stable code for logs, metrics and trace labels. `r8e.ErrorCode(err)` returns it (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`, …), even when the sentinel is wrapped, and `""` for an error that carries none. When an error carries several sentinels, the most specific wins: a timeout wrapped in `ErrRetriesExhausted` reports `"timeout"`.
+Every r8e sentinel has a short, stable code for logs, metrics and trace labels. `r8e.ErrorCode(err)` returns it (`"circuit_open"`, `"rate_limited"`, `"timeout"`, `"retries_exhausted"`, …), even when the sentinel is wrapped, and `""` for an error that carries none. Three sentinels are envelopes: `ErrRetriesExhausted`, `ErrTimeBudgetExceeded` and `ErrConcurrencyBudgetExceeded` wrap the error that ended the last attempt, so they yield to the cause they carry. A panic retried to exhaustion reports `"panic_recovered"`, and a timeout `"timeout"`. An error that carries only envelopes reports the outermost one, so a time budget that cuts a retry reports `"time_budget_exceeded"`.
 
 ```go
 slog.Warn("call failed", "reason", r8e.ErrorCode(err), "err", err)

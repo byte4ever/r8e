@@ -18,10 +18,20 @@ type (
 	}
 
 	// resilienceError is the concrete type backing all sentinel errors. code
-	// is the short, stable label [ErrorCode] returns; msg is the message.
+	// is the short, stable label [ErrorCode] returns; msg is the message. An
+	// envelope sentinel wraps the error that ended the last attempt, and
+	// ErrorCode reports that cause before it.
 	resilienceError struct {
-		code string
-		msg  string
+		code     string
+		msg      string
+		envelope bool
+	}
+
+	// sentinelCarrier is an error that stands for an r8e sentinel in
+	// [ErrorCode]'s walk: a resilienceError, or a type such as [PanicError]
+	// that matches a sentinel through its Is method.
+	sentinelCarrier interface {
+		sentinel() resilienceError
 	}
 )
 
@@ -69,9 +79,17 @@ var (
 	// ErrTimeBudgetExceeded is returned (wrapping the last downstream error) when
 	// retry stops early because the total time budget would be exhausted by the
 	// next backoff. See [WithTimeBudget].
-	ErrTimeBudgetExceeded error = resilienceError{code: "time_budget_exceeded", msg: "time budget exceeded"}
+	ErrTimeBudgetExceeded error = resilienceError{
+		code:     "time_budget_exceeded",
+		msg:      "time budget exceeded",
+		envelope: true,
+	}
 	// ErrRetriesExhausted is returned when all retry attempts have been used.
-	ErrRetriesExhausted error = resilienceError{code: "retries_exhausted", msg: "retries exhausted"}
+	ErrRetriesExhausted error = resilienceError{
+		code:     "retries_exhausted",
+		msg:      "retries exhausted",
+		envelope: true,
+	}
 	// ErrRetryBudgetWithoutRetry indicates a retry budget was configured on a
 	// policy that has no retry pattern; the budget would have nothing to gate.
 	// It is the value [NewPolicy] panics with and the error [BuildOptions]
@@ -283,8 +301,9 @@ var (
 	// traffic (see [WithConcurrencyBudget]). An over-budget hedge is silently not
 	// launched instead of surfacing this error, since the primary still runs.
 	ErrConcurrencyBudgetExceeded error = resilienceError{
-		code: "concurrency_budget_exceeded",
-		msg:  "concurrency budget exceeded",
+		code:     "concurrency_budget_exceeded",
+		msg:      "concurrency budget exceeded",
+		envelope: true,
 	}
 	// ErrChaosInjected is the default error a [ChaosFault] strategy injects when
 	// the caller passes a nil error (see [WithChaos]). Match it with errors.Is to
@@ -310,50 +329,71 @@ func (e *permanentError) Unwrap() error { return e.err }
 func (e resilienceError) Error() string { return e.msg }
 
 // ErrorCode returns the short, stable code of the r8e sentinel that err
-// carries, such as "circuit_open" or "retries_exhausted", for logs, metrics
-// and trace labels. When err carries several sentinels, the most specific one
-// wins: a shedding or timeout sentinel wrapped in [ErrRetriesExhausted]
-// reports its own code. ErrorCode returns "" when err carries no r8e
-// sentinel, nil included.
+// carries, such as "circuit_open" or "panic_recovered", for logs, metrics and
+// trace labels. It walks err's tree as [errors.As] does, outermost first, and
+// returns the first sentinel it finds that is not an envelope. The envelopes
+// ([ErrRetriesExhausted], [ErrTimeBudgetExceeded] and
+// [ErrConcurrencyBudgetExceeded]) wrap the error that ended the last attempt,
+// so they yield to the cause they carry: a circuit breaker rejection, a panic
+// or a chaos fault wrapped in ErrRetriesExhausted reports its own code. An
+// error that carries only envelopes reports the outermost one. ErrorCode
+// returns "" when err carries no r8e sentinel, nil included.
 func ErrorCode(err error) string {
-	// The sentinels one error can carry together, most specific first. A
-	// sentinel missing from this list still has its code; it only loses to
-	// the ones listed.
-	precedence := [...]error{
-		ErrCircuitOpen,
-		ErrCircuitRamping,
-		ErrRateLimited,
-		ErrBulkheadFull,
-		ErrBulkheadTimeout,
-		ErrCoDelShed,
-		ErrConcurrencyLimited,
-		ErrThrottled,
-		ErrSLOShed,
-		ErrTimeout,
-		ErrTimeBudgetExceeded,
-		ErrConcurrencyBudgetExceeded,
-		ErrRetriesExhausted,
-		ErrPanic,
-	}
+	envelope := ""
+	cause := ""
 
-	for _, sentinel := range precedence {
-		if errors.Is(err, sentinel) {
-			return codeOf(sentinel)
+	walkSentinels(err, func(sentinel resilienceError) bool {
+		if !sentinel.envelope {
+			cause = sentinel.code
+
+			return true
 		}
+
+		if envelope == "" {
+			envelope = sentinel.code
+		}
+
+		return false
+	})
+
+	if cause != "" {
+		return cause
 	}
 
-	return codeOf(err)
+	return envelope
 }
 
-// codeOf returns the code of the first r8e sentinel found in err's tree, or "".
-func codeOf(err error) string {
-	var sentinel resilienceError
-	if errors.As(err, &sentinel) {
-		return sentinel.code
+// walkSentinels calls visit on each r8e sentinel in err's tree, in the
+// pre-order [errors.As] uses, until visit returns true. It reports whether
+// visit stopped the walk.
+func walkSentinels(err error, visit func(resilienceError) bool) bool {
+	if err == nil {
+		return false
 	}
 
-	return ""
+	if carrier, ok := err.(sentinelCarrier); ok && visit(carrier.sentinel()) {
+		return true
+	}
+
+	//nolint:errorlint // walks the tree node by node, as errors.As does
+	switch wrapper := err.(type) {
+	case interface{ Unwrap() error }:
+		return walkSentinels(wrapper.Unwrap(), visit)
+	case interface{ Unwrap() []error }:
+		for _, inner := range wrapper.Unwrap() {
+			if walkSentinels(inner, visit) {
+				return true
+			}
+		}
+
+		return false
+	default:
+		return false
+	}
 }
+
+// sentinel returns e itself: a resilienceError is its own sentinel.
+func (e resilienceError) sentinel() resilienceError { return e }
 
 // Transient wraps err to mark it as a transient (retriable) error.
 // The wrapper's message is err's message, unchanged. The mark states intent

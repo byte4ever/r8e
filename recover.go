@@ -2,6 +2,7 @@ package r8e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 )
@@ -29,6 +30,15 @@ func (e *PanicError) Error() string {
 // preserving the ability to obtain the original Value and Stack via errors.As.
 func (*PanicError) Is(target error) bool {
 	return target == ErrPanic
+}
+
+// sentinel makes a PanicError stand for [ErrPanic] in [ErrorCode].
+func (*PanicError) sentinel() resilienceError {
+	var sentinel resilienceError
+
+	errors.As(ErrPanic, &sentinel)
+
+	return sentinel
 }
 
 // DoRecover executes fn and catches any panic, returning it as a *[PanicError]
