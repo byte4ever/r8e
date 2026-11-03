@@ -2,7 +2,6 @@ package r8e
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -262,7 +261,7 @@ func DoRetry[T any](
 // timeout, and releases the concurrency-budget permit (when permit is non-nil)
 // as the attempt returns. The release is deferred so it runs even if fn panics,
 // keeping the permit accounting balanced without a WithRecover boundary. When
-// the per-attempt deadline cut a failed attempt (see attemptDeadlineFired), cut
+// the per-attempt deadline cut a failed attempt (see policyDeadlineCut), cut
 // is true and err is fn's error wrapped with ErrAttemptTimeout; otherwise err is
 // fn's error unchanged.
 //
@@ -287,41 +286,11 @@ func runRetryAttempt[T any](
 	defer attemptCancel()
 
 	result, err = fn(attemptCtx)
-	if err != nil && attemptDeadlineFired(ctx, attemptCtx) {
+	if err != nil && policyDeadlineCut(ctx, attemptCtx) {
 		return result, true, fmt.Errorf("%w: %w", ErrAttemptTimeout, err)
 	}
 
 	return result, false, err
-}
-
-// attemptDeadlineFired reports whether the deadline [PerAttemptTimeout] set on
-// attemptCtx cut the attempt. The deadline must bind (see deadlineBinds): one
-// that does not bind leaves attemptCtx with parent's deadline. The decision is
-// then the first end attemptCtx records, as DoTimeout and the time budget
-// decide when their deadline fires: its own deadline means a cut, and a
-// parent cancelled before it means none, whatever happens to parent while the
-// attempt is still returning. A binding deadline comes strictly before any
-// deadline of parent, so DeadlineExceeded as the first end is the attempt's
-// own. When attemptCtx has not reported an end yet, the clock decides: an
-// attempt that returns on or after its deadline, before the context's timer
-// ran, is cut unless parent was cancelled.
-func attemptDeadlineFired(parent, attemptCtx context.Context) bool {
-	deadline, ok := attemptCtx.Deadline()
-	if !ok || !deadlineBinds(parent, deadline) {
-		return false
-	}
-
-	if err := attemptCtx.Err(); err != nil {
-		return errors.Is(err, context.DeadlineExceeded)
-	}
-
-	if time.Now().Before(deadline) {
-		return false
-	}
-
-	err := parent.Err()
-
-	return err == nil || errors.Is(err, context.DeadlineExceeded)
 }
 
 // hintExceedsMaxDelay reports whether err carries a Retry-After hint, before

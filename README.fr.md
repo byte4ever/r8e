@@ -193,7 +193,7 @@ func main() {
 
 ### Timeout
 
-Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant.
+Annule les appels lents après un délai. Si la fonction ne se termine pas à temps, `r8e.ErrTimeout` est retourné. Le timeout n'est celui de r8e que s'il tombe strictement avant la deadline de l'appelant : si celle-ci arrive avant, ou au même instant, `Do` renvoie l'erreur du contexte de l'appelant et `OnTimeout` ne se déclenche pas. `Do` rend la main dès que le timeout tombe ou que le contexte de l'appelant se termine ; la fonction continue de tourner jusqu'à son retour, et doit donc synchroniser ce qu'elle partage avec l'appelant. On décide qui a terminé l'appel quand le timeout tombe, comme pour un budget de temps posé avec `PropagateDeadline` : un appelant qui a annulé avant garde l'appel, et un appelant qui annule ou atteint sa propre deadline plus tard ne le reprend pas. Un service appelé qui s'arrête de lui-même sur la deadline propagée (une deadline de socket ou de client) et renvoie sa propre erreur à cet instant obtient quand même `ErrTimeout` et un seul `OnTimeout`. Un appel en échec que l'appelant a terminé renvoie l'erreur du contexte de l'appelant, même si le service appelé répond par sa propre erreur à cet instant ; une erreur qui revient avant que le contexte de l'appelant signale sa fin reste celle du service appelé. Un succès qui arrive à `Do` avant qu'il voie le timeout reste un succès.
 
 ```go
 policy := r8e.NewPolicy[string]("timeout-example",
@@ -834,6 +834,27 @@ code-only (un graphe d'objets runtime, comme `WithSharedRetryBudget`).
 gateway := r8e.NewRetryBudget(r8e.MaxTokens(20))                        // plafond agrégé
 svcA    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))   // remonte dans gateway
 svcB    := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway))
+```
+
+**Protéger le parent (`ShieldParent`).** Une route morte continue de vider le
+parent par ses seuls échecs de première tentative, même une fois ses propres
+retries coupés, et les routes saines voisines perdent leurs retries.
+`ShieldParent()` sur l'enfant borne cette perte : tant que l'enfant est épuisé,
+ses échecs ne sont plus reportés sur le parent, et ils le sont de nouveau quand
+les succès le ramènent au-dessus de la moitié de sa capacité. Un enfant mort ne
+retire alors au parent au plus que la moitié de sa propre capacité, arrondie
+au-dessus (5 jetons pour `MaxTokens(10)`), tant que sa capacité ne change pas
+pendant ce temps. Les routes voisines gardent leurs retries tant
+que le parent reste au-dessus de la moitié de sa capacité après cette perte :
+dimensionnez le parent en conséquence. Aucune borne n'est promise pour un enfant
+instable : ses succès sont toujours crédités au parent, et chaque succès qui le
+ramène au-dessus du seuil laisse passer l'échec suivant. Tant que la protection
+joue, les jetons du parent ne comptent plus les échecs de cet enfant, mais
+comptent toujours ses succès : surveillez le budget de l'enfant. Comme `Parent`,
+l'option se pose à la construction, en code uniquement.
+
+```go
+svcA := r8e.NewRetryBudget(r8e.MaxTokens(10), r8e.Parent(gateway), r8e.ShieldParent())
 ```
 
 Un budget exige `WithRetry` — en configurer un sans pattern retry panique dans
