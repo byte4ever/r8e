@@ -87,6 +87,7 @@ func TestPerAttemptTimeoutAttributesAnAttemptEndingOnItsDeadline(t *testing.T) {
 
 		require.ErrorIs(t, err, ErrAttemptTimeout)
 		require.ErrorIs(t, err, socketErr)
+		require.NotErrorIs(t, err, context.DeadlineExceeded, "the wrap keeps fn's own error, nothing more")
 		assert.Equal(t, []int{1}, rec.got())
 	})
 }
