@@ -534,7 +534,8 @@ limiteur propre de la politique. L'option ne se combine ni avec `WithBulkhead`
 ni avec `WithAdaptiveConcurrency` (`NewPolicy` panique avec
 `ErrSharedBulkheadConflict`), et le `Reconfigure` d'une politique refuse tout
 réglage de bulkhead (il renvoie `ErrSharedBulkheadConflict`) : appelez
-`Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement.
+`Bulkhead.Reconfigure` sur le bulkhead partagé. En code uniquement. Voir
+[`examples/53-shared-bulkhead`](examples/53-shared-bulkhead).
 
 ### Requête spéculative
 
@@ -1838,6 +1839,8 @@ go run ./examples/48-honor-retry-after/
 go run ./examples/49-attempt-timeout/
 go run ./examples/50-shield-parent/
 go run ./examples/51-base-context/
+go run ./examples/52-response-classifier/
+go run ./examples/53-shared-bulkhead/
 ```
 
 ## Licence

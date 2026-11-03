@@ -527,7 +527,8 @@ bulkhead excludes the policy's own limiter. It cannot be combined with
 `WithBulkhead` or `WithAdaptiveConcurrency` (`NewPolicy` panics with
 `ErrSharedBulkheadConflict`), and a policy's `Reconfigure` refuses any bulkhead
 setting for it (it returns `ErrSharedBulkheadConflict`): call
-`Bulkhead.Reconfigure` on the shared bulkhead. Code-only.
+`Bulkhead.Reconfigure` on the shared bulkhead. Code-only. See
+[`examples/53-shared-bulkhead`](examples/53-shared-bulkhead).
 
 ### Hedged Request
 
@@ -1791,6 +1792,8 @@ go run ./examples/48-honor-retry-after/
 go run ./examples/49-attempt-timeout/
 go run ./examples/50-shield-parent/
 go run ./examples/51-base-context/
+go run ./examples/52-response-classifier/
+go run ./examples/53-shared-bulkhead/
 ```
 
 ## License

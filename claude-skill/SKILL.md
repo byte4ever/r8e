@@ -463,6 +463,7 @@ retry/concurrency budgets (last option wins, any policy's `Reconfigure` retunes
 them for all), combining it with `WithBulkhead` or `WithAdaptiveConcurrency`
 panics with `r8e.ErrSharedBulkheadConflict`, and a policy `Reconfigure` carrying
 any bulkhead setting returns that error (retune with `Bulkhead.Reconfigure`).
+Example: `examples/53-shared-bulkhead`.
 
 **Controlled-delay queue (CoDel + adaptive LIFO)** (opt-in): `r8e.BulkheadCoDel(target, interval)`
 disciplines the wait queue by observed dwell (RFC 8289 / folly), instead of (or
@@ -957,6 +958,7 @@ leaks the connection); use `WithFallbackFunc` and close
 under `WithTimeout`, `WithHedge`, `PerAttemptTimeout` or `WithTimeBudget` +
 `PropagateDeadline` only its buffered start survives `Do`, then
 `context.Canceled`; bound the call with a deadline on the ctx passed to `Do` instead.
+Example: `examples/52-response-classifier`.
 
 ## Presets
 
@@ -1032,7 +1034,7 @@ github.com/byte4ever/r8e/otter      # Otter cache adapter
 github.com/byte4ever/r8e/ristretto  # Ristretto cache adapter
 ```
 
-Examples: `examples/01-quickstart` through `examples/51-base-context`.
+Examples: `examples/01-quickstart` through `examples/53-shared-bulkhead`.
 
 ## Conventions: every feature ships with a documented example (mandatory)
 
